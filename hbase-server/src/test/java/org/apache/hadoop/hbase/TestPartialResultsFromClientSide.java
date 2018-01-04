@@ -20,6 +20,7 @@ package org.apache.hadoop.hbase;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -29,11 +30,10 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.client.ClientScanner;
 import org.apache.hadoop.hbase.client.Delete;
 import org.apache.hadoop.hbase.client.Put;
+import org.apache.hadoop.hbase.client.RegionInfo;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.ResultScanner;
 import org.apache.hadoop.hbase.client.Scan;
@@ -50,8 +50,12 @@ import org.apache.hadoop.hbase.util.ClassSize;
 import org.apache.hadoop.hbase.util.Pair;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.junit.rules.TestName;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * These tests are focused on testing how partial results appear to a client. Partial results are
@@ -65,7 +69,7 @@ import org.junit.experimental.categories.Category;
  */
 @Category(MediumTests.class)
 public class TestPartialResultsFromClientSide {
-  private static final Log LOG = LogFactory.getLog(TestPartialResultsFromClientSide.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestPartialResultsFromClientSide.class);
 
   private final static HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
   private final static int MINICLUSTER_SIZE = 5;
@@ -101,6 +105,9 @@ public class TestPartialResultsFromClientSide {
   private static long CELL_HEAP_SIZE = -1;
 
   private static long timeout = 10000;
+
+  @Rule
+  public TestName name = new TestName();
 
   @BeforeClass
   public static void setUpBeforeClass() throws Exception {
@@ -153,7 +160,7 @@ public class TestPartialResultsFromClientSide {
       message = "Ensuring the expected keyValues are present for row " + row;
       List<Cell> expectedKeyValues = createKeyValuesForRow(ROWS[row], FAMILIES, QUALIFIERS, VALUE);
       Result result = partialScanner.next();
-      assertFalse(result.isPartial());
+      assertFalse(result.mayHaveMoreCellsInRow());
       verifyResult(result, expectedKeyValues, message);
     }
 
@@ -173,7 +180,7 @@ public class TestPartialResultsFromClientSide {
     Result result = scanner.next();
 
     assertTrue(result != null);
-    assertTrue(result.isPartial());
+    assertTrue(result.mayHaveMoreCellsInRow());
     assertTrue(result.rawCells() != null);
     assertTrue(result.rawCells().length == 1);
 
@@ -184,7 +191,7 @@ public class TestPartialResultsFromClientSide {
     result = scanner.next();
 
     assertTrue(result != null);
-    assertTrue(!result.isPartial());
+    assertTrue(!result.mayHaveMoreCellsInRow());
     assertTrue(result.rawCells() != null);
     assertTrue(result.rawCells().length == NUM_COLS);
 
@@ -268,7 +275,7 @@ public class TestPartialResultsFromClientSide {
     int iterationCount = 0;
 
     while (oneShotResult != null && oneShotResult.rawCells() != null) {
-      List<Cell> aggregatePartialCells = new ArrayList<Cell>();
+      List<Cell> aggregatePartialCells = new ArrayList<>();
       do {
         partialResult = partialScanner.next();
         assertTrue("Partial Result is null. iteration: " + iterationCount, partialResult != null);
@@ -278,7 +285,7 @@ public class TestPartialResultsFromClientSide {
         for (Cell c : partialResult.rawCells()) {
           aggregatePartialCells.add(c);
         }
-      } while (partialResult.isPartial());
+      } while (partialResult.mayHaveMoreCellsInRow());
 
       assertTrue("Number of cells differs. iteration: " + iterationCount,
           oneShotResult.rawCells().length == aggregatePartialCells.size());
@@ -348,7 +355,7 @@ public class TestPartialResultsFromClientSide {
       // the last group of cells that fit inside the maxResultSize
       assertTrue(
           "Result's cell count differed from expected number. result: " + result,
-          result.rawCells().length == expectedNumberOfCells || !result.isPartial()
+          result.rawCells().length == expectedNumberOfCells || !result.mayHaveMoreCellsInRow()
               || !Bytes.equals(prevRow, result.getRow()));
       prevRow = result.getRow();
     }
@@ -379,7 +386,7 @@ public class TestPartialResultsFromClientSide {
       // Estimate the cell heap size. One difference is that on server side, the KV Heap size is
       // estimated differently in case the cell is backed up by MSLAB byte[] (no overhead for
       // backing array). Thus below calculation is a bit brittle.
-      CELL_HEAP_SIZE = CellUtil.estimatedHeapSizeOf(result.rawCells()[0])
+      CELL_HEAP_SIZE = PrivateCellUtil.estimatedHeapSizeOf(result.rawCells()[0])
           - (ClassSize.ARRAY+3);
       if (LOG.isInfoEnabled()) LOG.info("Cell heap size: " + CELL_HEAP_SIZE);
       scanner.close();
@@ -426,11 +433,11 @@ public class TestPartialResultsFromClientSide {
     while ((result = scanner.next()) != null) {
       assertTrue(result.rawCells() != null);
 
-      if (result.isPartial()) {
+      if (result.mayHaveMoreCellsInRow()) {
         final String error =
             "Cells:" + result.rawCells().length + " Batch size:" + batch
                 + " cellsPerPartialResult:" + cellsPerPartialResult + " rep:" + repCount;
-        assertTrue(error, result.rawCells().length <= Math.min(batch, cellsPerPartialResult));
+        assertTrue(error, result.rawCells().length == batch);
       } else {
         assertTrue(result.rawCells().length <= batch);
       }
@@ -441,7 +448,7 @@ public class TestPartialResultsFromClientSide {
   }
 
   /**
-   * Test the method {@link Result#createCompleteResult(List)}
+   * Test the method {@link Result#createCompleteResult(Iterable)}
    * @throws Exception
    */
   @Test
@@ -472,7 +479,7 @@ public class TestPartialResultsFromClientSide {
       do {
         partialResult = partialScanner.next();
         partials.add(partialResult);
-      } while (partialResult != null && partialResult.isPartial());
+      } while (partialResult != null && partialResult.mayHaveMoreCellsInRow());
 
       completeResult = Result.createCompleteResult(partials);
       oneShotResult = oneShotScanner.next();
@@ -533,7 +540,7 @@ public class TestPartialResultsFromClientSide {
 
     Result r = null;
     while ((r = scanner.next()) != null) {
-      assertFalse(r.isPartial());
+      assertFalse(r.mayHaveMoreCellsInRow());
     }
 
     scanner.close();
@@ -583,38 +590,7 @@ public class TestPartialResultsFromClientSide {
     // hit before the caching limit and thus partial results may be seen
     boolean expectToSeePartialResults = resultSizeRowLimit < cachingRowLimit;
     while ((r = clientScanner.next()) != null) {
-      assertTrue(!r.isPartial() || expectToSeePartialResults);
-    }
-
-    scanner.close();
-  }
-
-  /**
-   * Small scans should not return partial results because it would prevent small scans from
-   * retrieving all of the necessary results in a single RPC request which is what makese small
-   * scans useful. Thus, ensure that even when {@link Scan#getAllowPartialResults()} is true, small
-   * scans do not return partial results
-   * @throws Exception
-   */
-  @Test
-  public void testSmallScansDoNotAllowPartials() throws Exception {
-    Scan scan = new Scan();
-    testSmallScansDoNotAllowPartials(scan);
-    scan.setReversed(true);
-    testSmallScansDoNotAllowPartials(scan);
-  }
-
-  public void testSmallScansDoNotAllowPartials(Scan baseScan) throws Exception {
-    Scan scan = new Scan(baseScan);
-    scan.setAllowPartialResults(true);
-    scan.setSmall(true);
-    scan.setMaxResultSize(1);
-
-    ResultScanner scanner = TABLE.getScanner(scan);
-    Result r = null;
-
-    while ((r = scanner.next()) != null) {
-      assertFalse(r.isPartial());
+      assertTrue(!r.mayHaveMoreCellsInRow() || expectToSeePartialResults);
     }
 
     scanner.close();
@@ -681,7 +657,7 @@ public class TestPartialResultsFromClientSide {
       LOG.info("Actual count: " + result.size());
     }
 
-    if (expKvList.size() == 0) return;
+    if (expKvList.isEmpty()) return;
 
     int i = 0;
     for (Cell kv : result.rawCells()) {
@@ -723,7 +699,7 @@ public class TestPartialResultsFromClientSide {
 
   @Test
   public void testReadPointAndPartialResults() throws Exception {
-    TableName testName = TableName.valueOf("testReadPointAndPartialResults");
+    final TableName tableName = TableName.valueOf(name.getMethodName());
     int numRows = 5;
     int numFamilies = 5;
     int numQualifiers = 5;
@@ -732,15 +708,14 @@ public class TestPartialResultsFromClientSide {
     byte[][] qualifiers = HTestConst.makeNAscii(Bytes.toBytes("testQualifier"), numQualifiers);
     byte[] value = Bytes.createMaxByteArray(100);
 
-    Table tmpTable = createTestTable(testName, rows, families, qualifiers, value);
-
-    Scan scan = new Scan();
-    scan.setMaxResultSize(1);
-    scan.setAllowPartialResults(true);
-
+    Table tmpTable = createTestTable(tableName, rows, families, qualifiers, value);
     // Open scanner before deletes
-    ResultScanner scanner = tmpTable.getScanner(scan);
-
+    ResultScanner scanner =
+        tmpTable.getScanner(new Scan().setMaxResultSize(1).setAllowPartialResults(true));
+    // now the openScanner will also fetch data and will be executed lazily, i.e, only openScanner
+    // when you call next, so here we need to make a next call to open scanner. The maxResultSize
+    // limit can make sure that we will not fetch all the data at once, so the test sill works.
+    int scannerCount = scanner.next().rawCells().length;
     Delete delete1 = new Delete(rows[0]);
     delete1.addColumn(families[0], qualifiers[0], 0);
     tmpTable.delete(delete1);
@@ -750,19 +725,20 @@ public class TestPartialResultsFromClientSide {
     tmpTable.delete(delete2);
 
     // Should see all cells because scanner was opened prior to deletes
-    int scannerCount = countCellsFromScanner(scanner);
+    scannerCount += countCellsFromScanner(scanner);
     int expectedCount = numRows * numFamilies * numQualifiers;
     assertTrue("scannerCount: " + scannerCount + " expectedCount: " + expectedCount,
         scannerCount == expectedCount);
 
     // Minus 2 for the two cells that were deleted
-    scanner = tmpTable.getScanner(scan);
+    scanner = tmpTable.getScanner(new Scan().setMaxResultSize(1).setAllowPartialResults(true));
     scannerCount = countCellsFromScanner(scanner);
     expectedCount = numRows * numFamilies * numQualifiers - 2;
     assertTrue("scannerCount: " + scannerCount + " expectedCount: " + expectedCount,
         scannerCount == expectedCount);
 
-    scanner = tmpTable.getScanner(scan);
+    scanner = tmpTable.getScanner(new Scan().setMaxResultSize(1).setAllowPartialResults(true));
+    scannerCount = scanner.next().rawCells().length;
     // Put in 2 new rows. The timestamps differ from the deleted rows
     Put put1 = new Put(rows[0]);
     put1.add(new KeyValue(rows[0], families[0], qualifiers[0], 1, value));
@@ -773,19 +749,19 @@ public class TestPartialResultsFromClientSide {
     tmpTable.put(put2);
 
     // Scanner opened prior to puts. Cell count shouldn't have changed
-    scannerCount = countCellsFromScanner(scanner);
+    scannerCount += countCellsFromScanner(scanner);
     expectedCount = numRows * numFamilies * numQualifiers - 2;
     assertTrue("scannerCount: " + scannerCount + " expectedCount: " + expectedCount,
         scannerCount == expectedCount);
 
     // Now the scanner should see the cells that were added by puts
-    scanner = tmpTable.getScanner(scan);
+    scanner = tmpTable.getScanner(new Scan().setMaxResultSize(1).setAllowPartialResults(true));
     scannerCount = countCellsFromScanner(scanner);
     expectedCount = numRows * numFamilies * numQualifiers;
     assertTrue("scannerCount: " + scannerCount + " expectedCount: " + expectedCount,
         scannerCount == expectedCount);
 
-    TEST_UTIL.deleteTable(testName);
+    TEST_UTIL.deleteTable(tableName);
   }
 
   /**
@@ -842,11 +818,11 @@ public class TestPartialResultsFromClientSide {
   }
 
   private void moveRegion(Table table, int index) throws IOException{
-    List<Pair<HRegionInfo, ServerName>> regions = MetaTableAccessor
+    List<Pair<RegionInfo, ServerName>> regions = MetaTableAccessor
         .getTableRegionsAndLocations(TEST_UTIL.getConnection(),
             table.getName());
     assertEquals(1, regions.size());
-    HRegionInfo regionInfo = regions.get(0).getFirst();
+    RegionInfo regionInfo = regions.get(0).getFirst();
     ServerName name = TEST_UTIL.getHBaseCluster().getRegionServer(index).getServerName();
     TEST_UTIL.getAdmin().move(regionInfo.getEncodedNameAsBytes(),
         Bytes.toBytes(name.getServerName()));
@@ -863,7 +839,7 @@ public class TestPartialResultsFromClientSide {
 
   @Test
   public void testPartialResultWhenRegionMove() throws IOException {
-    Table table=createTestTable(TableName.valueOf("testPartialResultWhenRegionMove"),
+    Table table = createTestTable(TableName.valueOf(name.getMethodName()),
         ROWS, FAMILIES, QUALIFIERS, VALUE);
 
     moveRegion(table, 1);
@@ -879,7 +855,7 @@ public class TestPartialResultsFromClientSide {
     assertEquals(1, result1.rawCells().length);
     Cell c1 = result1.rawCells()[0];
     assertCell(c1, ROWS[0], FAMILIES[NUM_FAMILIES - 1], QUALIFIERS[NUM_QUALIFIERS - 1]);
-    assertFalse(result1.isPartial());
+    assertFalse(result1.mayHaveMoreCellsInRow());
 
     moveRegion(table, 2);
 
@@ -887,7 +863,7 @@ public class TestPartialResultsFromClientSide {
     assertEquals(1, result2.rawCells().length);
     Cell c2 = result2.rawCells()[0];
     assertCell(c2, ROWS[1], FAMILIES[0], QUALIFIERS[0]);
-    assertTrue(result2.isPartial());
+    assertTrue(result2.mayHaveMoreCellsInRow());
 
     moveRegion(table, 3);
 
@@ -895,13 +871,13 @@ public class TestPartialResultsFromClientSide {
     assertEquals(1, result3.rawCells().length);
     Cell c3 = result3.rawCells()[0];
     assertCell(c3, ROWS[1], FAMILIES[0], QUALIFIERS[1]);
-    assertTrue(result3.isPartial());
+    assertTrue(result3.mayHaveMoreCellsInRow());
 
   }
 
   @Test
   public void testReversedPartialResultWhenRegionMove() throws IOException {
-    Table table=createTestTable(TableName.valueOf("testReversedPartialResultWhenRegionMove"),
+    Table table = createTestTable(TableName.valueOf(name.getMethodName()),
         ROWS, FAMILIES, QUALIFIERS, VALUE);
 
     moveRegion(table, 1);
@@ -918,7 +894,7 @@ public class TestPartialResultsFromClientSide {
     assertEquals(1, result1.rawCells().length);
     Cell c1 = result1.rawCells()[0];
     assertCell(c1, ROWS[NUM_ROWS-1], FAMILIES[NUM_FAMILIES - 1], QUALIFIERS[NUM_QUALIFIERS - 1]);
-    assertFalse(result1.isPartial());
+    assertFalse(result1.mayHaveMoreCellsInRow());
 
     moveRegion(table, 2);
 
@@ -926,7 +902,7 @@ public class TestPartialResultsFromClientSide {
     assertEquals(1, result2.rawCells().length);
     Cell c2 = result2.rawCells()[0];
     assertCell(c2, ROWS[NUM_ROWS-2], FAMILIES[0], QUALIFIERS[0]);
-    assertTrue(result2.isPartial());
+    assertTrue(result2.mayHaveMoreCellsInRow());
 
     moveRegion(table, 3);
 
@@ -934,13 +910,13 @@ public class TestPartialResultsFromClientSide {
     assertEquals(1, result3.rawCells().length);
     Cell c3 = result3.rawCells()[0];
     assertCell(c3, ROWS[NUM_ROWS-2], FAMILIES[0], QUALIFIERS[1]);
-    assertTrue(result3.isPartial());
+    assertTrue(result3.mayHaveMoreCellsInRow());
 
   }
 
   @Test
   public void testCompleteResultWhenRegionMove() throws IOException {
-    Table table=createTestTable(TableName.valueOf("testCompleteResultWhenRegionMove"),
+    Table table = createTestTable(TableName.valueOf(name.getMethodName()),
         ROWS, FAMILIES, QUALIFIERS, VALUE);
 
     moveRegion(table, 1);
@@ -954,7 +930,7 @@ public class TestPartialResultsFromClientSide {
     assertEquals(NUM_FAMILIES * NUM_QUALIFIERS, result1.rawCells().length);
     Cell c1 = result1.rawCells()[0];
     assertCell(c1, ROWS[0], FAMILIES[0], QUALIFIERS[0]);
-    assertFalse(result1.isPartial());
+    assertFalse(result1.mayHaveMoreCellsInRow());
 
     moveRegion(table, 2);
 
@@ -962,7 +938,7 @@ public class TestPartialResultsFromClientSide {
     assertEquals(NUM_FAMILIES * NUM_QUALIFIERS, result2.rawCells().length);
     Cell c2 = result2.rawCells()[0];
     assertCell(c2, ROWS[1], FAMILIES[0], QUALIFIERS[0]);
-    assertFalse(result2.isPartial());
+    assertFalse(result2.mayHaveMoreCellsInRow());
 
     moveRegion(table, 3);
 
@@ -970,13 +946,13 @@ public class TestPartialResultsFromClientSide {
     assertEquals(NUM_FAMILIES * NUM_QUALIFIERS, result3.rawCells().length);
     Cell c3 = result3.rawCells()[0];
     assertCell(c3, ROWS[2], FAMILIES[0], QUALIFIERS[0]);
-    assertFalse(result3.isPartial());
+    assertFalse(result3.mayHaveMoreCellsInRow());
 
   }
 
   @Test
   public void testReversedCompleteResultWhenRegionMove() throws IOException {
-    Table table=createTestTable(TableName.valueOf("testReversedCompleteResultWhenRegionMove"),
+    Table table = createTestTable(TableName.valueOf(name.getMethodName()),
         ROWS, FAMILIES, QUALIFIERS, VALUE);
 
     moveRegion(table, 1);
@@ -991,7 +967,7 @@ public class TestPartialResultsFromClientSide {
     assertEquals(NUM_FAMILIES*NUM_QUALIFIERS, result1.rawCells().length);
     Cell c1 = result1.rawCells()[0];
     assertCell(c1, ROWS[NUM_ROWS-1], FAMILIES[0], QUALIFIERS[0]);
-    assertFalse(result1.isPartial());
+    assertFalse(result1.mayHaveMoreCellsInRow());
 
     moveRegion(table, 2);
 
@@ -999,7 +975,7 @@ public class TestPartialResultsFromClientSide {
     assertEquals(NUM_FAMILIES*NUM_QUALIFIERS, result2.rawCells().length);
     Cell c2 = result2.rawCells()[0];
     assertCell(c2, ROWS[NUM_ROWS-2], FAMILIES[0], QUALIFIERS[0]);
-    assertFalse(result2.isPartial());
+    assertFalse(result2.mayHaveMoreCellsInRow());
 
     moveRegion(table, 3);
 
@@ -1007,50 +983,90 @@ public class TestPartialResultsFromClientSide {
     assertEquals(NUM_FAMILIES*NUM_QUALIFIERS, result3.rawCells().length);
     Cell c3 = result3.rawCells()[0];
     assertCell(c3, ROWS[NUM_ROWS-3], FAMILIES[0], QUALIFIERS[0]);
-    assertFalse(result3.isPartial());
+    assertFalse(result3.mayHaveMoreCellsInRow());
 
   }
 
   @Test
   public void testBatchingResultWhenRegionMove() throws IOException {
-    Table table =
-        createTestTable(TableName.valueOf("testBatchingResultWhenRegionMove"), ROWS, FAMILIES,
+    // If user setBatch(5) and rpc returns 3+5+5+5+3 cells,
+    // we should return 5+5+5+5+1 to user.
+    // setBatch doesn't mean setAllowPartialResult(true)
+    Table table = createTestTable(TableName.valueOf(name.getMethodName()), ROWS, FAMILIES,
             QUALIFIERS, VALUE);
+
+    Put put = new Put(ROWS[1]);
+    put.addColumn(FAMILIES[0], QUALIFIERS[1], new byte[VALUE_SIZE * 10]);
+    table.put(put);
+    Delete delete = new Delete(ROWS[1]);
+    delete.addColumn(FAMILIES[NUM_FAMILIES - 1], QUALIFIERS[NUM_QUALIFIERS - 1]);
+    table.delete(delete);
 
     moveRegion(table, 1);
 
     Scan scan = new Scan();
     scan.setCaching(1);
-    scan.setBatch(1);
+    scan.setBatch(5);
+    scan.setMaxResultSize(VALUE_SIZE * 6);
 
     ResultScanner scanner = table.getScanner(scan);
-    for (int i = 0; i < NUM_FAMILIES * NUM_QUALIFIERS - 1; i++) {
-      scanner.next();
+    for (int i = 0; i < NUM_FAMILIES * NUM_QUALIFIERS / 5 - 1; i++) {
+      assertTrue(scanner.next().mayHaveMoreCellsInRow());
     }
     Result result1 = scanner.next();
-    assertEquals(1, result1.rawCells().length);
-    Cell c1 = result1.rawCells()[0];
-    assertCell(c1, ROWS[0], FAMILIES[NUM_FAMILIES - 1], QUALIFIERS[NUM_QUALIFIERS - 1]);
+    assertEquals(5, result1.rawCells().length);
+    assertCell(result1.rawCells()[0], ROWS[0], FAMILIES[NUM_FAMILIES - 1],
+        QUALIFIERS[NUM_QUALIFIERS - 5]);
+    assertCell(result1.rawCells()[4], ROWS[0], FAMILIES[NUM_FAMILIES - 1],
+        QUALIFIERS[NUM_QUALIFIERS - 1]);
+    assertFalse(result1.mayHaveMoreCellsInRow());
 
     moveRegion(table, 2);
 
     Result result2 = scanner.next();
-    assertEquals(1, result2.rawCells().length);
-    Cell c2 = result2.rawCells()[0];
-    assertCell(c2, ROWS[1], FAMILIES[0], QUALIFIERS[0]);
+    assertEquals(5, result2.rawCells().length);
+    assertCell(result2.rawCells()[0], ROWS[1], FAMILIES[0], QUALIFIERS[0]);
+    assertCell(result2.rawCells()[4], ROWS[1], FAMILIES[0], QUALIFIERS[4]);
+    assertTrue(result2.mayHaveMoreCellsInRow());
 
     moveRegion(table, 3);
 
     Result result3 = scanner.next();
-    assertEquals(1, result3.rawCells().length);
-    Cell c3 = result3.rawCells()[0];
-    assertCell(c3, ROWS[1], FAMILIES[0], QUALIFIERS[1]);
+    assertEquals(5, result3.rawCells().length);
+    assertCell(result3.rawCells()[0], ROWS[1], FAMILIES[0], QUALIFIERS[5]);
+    assertCell(result3.rawCells()[4], ROWS[1], FAMILIES[0], QUALIFIERS[9]);
+    assertTrue(result3.mayHaveMoreCellsInRow());
+
+    for (int i = 0; i < NUM_FAMILIES * NUM_QUALIFIERS / 5 - 3; i++) {
+      Result result = scanner.next();
+      assertEquals(5, result.rawCells().length);
+      assertTrue(result.mayHaveMoreCellsInRow());
+    }
+    Result result = scanner.next();
+    assertEquals(4, result.rawCells().length);
+    assertFalse(result.mayHaveMoreCellsInRow());
+
+
+    for (int i = 2; i < NUM_ROWS; i++) {
+      for (int j = 0; j < NUM_FAMILIES; j++) {
+        for (int k = 0; k < NUM_QUALIFIERS; k += 5) {
+          result = scanner.next();
+          assertCell(result.rawCells()[0], ROWS[i], FAMILIES[j], QUALIFIERS[k]);
+          assertEquals(5, result.rawCells().length);
+          if (j == NUM_FAMILIES - 1 && k == NUM_QUALIFIERS - 5) {
+            assertFalse(result.mayHaveMoreCellsInRow());
+          } else {
+            assertTrue(result.mayHaveMoreCellsInRow());
+          }
+        }
+      }
+    }
+    assertNull(scanner.next());
   }
 
   @Test
   public void testDontThrowUnknowScannerExceptionToClient() throws Exception {
-    Table table =
-        createTestTable(TableName.valueOf("testDontThrowUnknowScannerException"), ROWS, FAMILIES,
+    Table table = createTestTable(TableName.valueOf(name.getMethodName()), ROWS, FAMILIES,
             QUALIFIERS, VALUE);
     Scan scan = new Scan();
     scan.setCaching(1);
@@ -1063,6 +1079,21 @@ public class TestPartialResultsFromClientSide {
     }
     assertEquals(NUM_ROWS, count);
     scanner.close();
+  }
+
+  @Test
+  public void testMayHaveMoreCellsInRowReturnsTrueAndSetBatch() throws IOException {
+    Table table = createTestTable(TableName.valueOf(name.getMethodName()), ROWS, FAMILIES,
+        QUALIFIERS, VALUE);
+    Scan scan = new Scan();
+    scan.setBatch(1);
+    scan.setFilter(new FirstKeyOnlyFilter());
+    ResultScanner scanner = table.getScanner(scan);
+    Result result;
+    while ((result = scanner.next()) != null) {
+      assertTrue(result.rawCells() != null);
+      assertEquals(1, result.rawCells().length);
+    }
   }
 
 }

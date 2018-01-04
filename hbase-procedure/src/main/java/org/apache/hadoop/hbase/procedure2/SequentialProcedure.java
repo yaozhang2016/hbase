@@ -19,20 +19,19 @@
 package org.apache.hadoop.hbase.procedure2;
 
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceStability;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ProcedureProtos.SequentialProcedureData;
 
 /**
- * A SequentialProcedure describes one step in a procedure chain.
+ * A SequentialProcedure describes one step in a procedure chain:
+ * <pre>
  *   -&gt; Step 1 -&gt; Step 2 -&gt; Step 3
- *
+ * </pre>
  * The main difference from a base Procedure is that the execute() of a
- * SequentialProcedure will be called only once, there will be no second
- * execute() call once the child are finished. which means once the child
+ * SequentialProcedure will be called only once; there will be no second
+ * execute() call once the children are finished. which means once the child
  * of a SequentialProcedure are completed the SequentialProcedure is completed too.
  */
 @InterfaceAudience.Private
@@ -68,15 +67,17 @@ public abstract class SequentialProcedure<TEnvironment> extends Procedure<TEnvir
   }
 
   @Override
-  protected void serializeStateData(final OutputStream stream) throws IOException {
+  protected void serializeStateData(ProcedureStateSerializer serializer)
+      throws IOException {
     SequentialProcedureData.Builder data = SequentialProcedureData.newBuilder();
     data.setExecuted(executed);
-    data.build().writeDelimitedTo(stream);
+    serializer.serialize(data.build());
   }
 
   @Override
-  protected void deserializeStateData(final InputStream stream) throws IOException {
-    SequentialProcedureData data = SequentialProcedureData.parseDelimitedFrom(stream);
+  protected void deserializeStateData(ProcedureStateSerializer serializer)
+      throws IOException {
+    SequentialProcedureData data = serializer.deserialize(SequentialProcedureData.class);
     executed = data.getExecuted();
   }
 }

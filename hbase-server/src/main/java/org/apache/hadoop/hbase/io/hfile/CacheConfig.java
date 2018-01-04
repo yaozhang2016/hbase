@@ -21,27 +21,36 @@ import static org.apache.hadoop.hbase.HConstants.BUCKET_CACHE_IOENGINE_KEY;
 import static org.apache.hadoop.hbase.HConstants.BUCKET_CACHE_SIZE_KEY;
 
 import java.io.IOException;
-import java.lang.management.ManagementFactory;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HConstants;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.apache.hadoop.hbase.client.ColumnFamilyDescriptor;
 import org.apache.hadoop.hbase.io.hfile.BlockType.BlockCategory;
 import org.apache.hadoop.hbase.io.hfile.bucket.BucketCache;
+import org.apache.hadoop.hbase.io.util.MemorySizeUtil;
 import org.apache.hadoop.hbase.util.ReflectionUtils;
 import org.apache.hadoop.util.StringUtils;
 
-import com.google.common.annotations.VisibleForTesting;
+import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
+
 
 /**
  * Stores all of the cache objects and configuration for a single HFile.
  */
 @InterfaceAudience.Private
 public class CacheConfig {
-  private static final Log LOG = LogFactory.getLog(CacheConfig.class.getName());
+  private static final Logger LOG = LoggerFactory.getLogger(CacheConfig.class.getName());
+
+
+  /**
+   * Disabled cache configuration
+   */
+
+  public static final CacheConfig DISABLED = new CacheConfig();
+
 
   /**
    * Configuration key to cache data blocks on read. Bloom blocks and index blocks are always be
@@ -96,19 +105,11 @@ public class CacheConfig {
    * is an in-memory map that needs to be persisted across restarts. Where to store this
    * in-memory state is what you supply here: e.g. <code>/tmp/bucketcache.map</code>.
    */
-  public static final String BUCKET_CACHE_PERSISTENT_PATH_KEY = 
+  public static final String BUCKET_CACHE_PERSISTENT_PATH_KEY =
       "hbase.bucketcache.persistent.path";
 
-  /**
-   * If the bucket cache is used in league with the lru on-heap block cache (meta blocks such
-   * as indices and blooms are kept in the lru blockcache and the data blocks in the
-   * bucket cache).
-   */
-  public static final String BUCKET_CACHE_COMBINED_KEY = 
-      "hbase.bucketcache.combinedcache.enabled";
-
   public static final String BUCKET_CACHE_WRITER_THREADS_KEY = "hbase.bucketcache.writer.threads";
-  public static final String BUCKET_CACHE_WRITER_QUEUE_KEY = 
+  public static final String BUCKET_CACHE_WRITER_QUEUE_KEY =
       "hbase.bucketcache.writer.queuelength";
 
   /**
@@ -119,7 +120,6 @@ public class CacheConfig {
   /**
    * Defaults for Bucket cache
    */
-  public static final boolean DEFAULT_BUCKET_CACHE_COMBINED = true;
   public static final int DEFAULT_BUCKET_CACHE_WRITER_THREADS = 3;
   public static final int DEFAULT_BUCKET_CACHE_WRITER_QUEUE = 64;
 
@@ -208,13 +208,6 @@ public class CacheConfig {
   /** Whether data blocks should be prefetched into the cache */
   private final boolean prefetchOnOpen;
 
-  /**
-   * If true and if more than one tier in this cache deploy -- e.g. CombinedBlockCache has an L1
-   * and an L2 tier -- then cache data blocks up in the L1 tier (The meta blocks are likely being
-   * cached up in L1 already.  At least this is the case if CombinedBlockCache).
-   */
-  private boolean cacheDataInL1;
-
   private final boolean dropBehindCompaction;
 
   /**
@@ -223,7 +216,7 @@ public class CacheConfig {
    * @param conf hbase configuration
    * @param family column family configuration
    */
-  public CacheConfig(Configuration conf, HColumnDescriptor family) {
+  public CacheConfig(Configuration conf, ColumnFamilyDescriptor family) {
     this(CacheConfig.instantiateBlockCache(conf),
         conf.getBoolean(CACHE_DATA_ON_READ_KEY, DEFAULT_CACHE_DATA_ON_READ)
            && family.isBlockCacheEnabled(),
@@ -241,8 +234,6 @@ public class CacheConfig {
         conf.getBoolean(CACHE_DATA_BLOCKS_COMPRESSED_KEY, DEFAULT_CACHE_DATA_COMPRESSED),
         conf.getBoolean(PREFETCH_BLOCKS_ON_OPEN_KEY,
             DEFAULT_PREFETCH_ON_OPEN) || family.isPrefetchBlocksOnOpen(),
-        conf.getBoolean(HColumnDescriptor.CACHE_DATA_IN_L1,
-            HColumnDescriptor.DEFAULT_CACHE_DATA_IN_L1) || family.isCacheDataInL1(),
         conf.getBoolean(DROP_BEHIND_CACHE_COMPACTION_KEY, DROP_BEHIND_CACHE_COMPACTION_DEFAULT)
      );
     LOG.info("Created cacheConfig for " + family.getNameAsString() + ": " + this);
@@ -251,8 +242,8 @@ public class CacheConfig {
   /**
    * Create a cache configuration using the specified configuration object and
    * defaults for family level settings. Only use if no column family context. Prefer
-   * {@link CacheConfig#CacheConfig(Configuration, HColumnDescriptor)}
-   * @see #CacheConfig(Configuration, HColumnDescriptor)
+   * {@link CacheConfig#CacheConfig(Configuration, ColumnFamilyDescriptor)}
+   * @see #CacheConfig(Configuration, ColumnFamilyDescriptor)
    * @param conf hbase configuration
    */
   public CacheConfig(Configuration conf) {
@@ -266,19 +257,16 @@ public class CacheConfig {
         conf.getBoolean(EVICT_BLOCKS_ON_CLOSE_KEY, DEFAULT_EVICT_ON_CLOSE),
         conf.getBoolean(CACHE_DATA_BLOCKS_COMPRESSED_KEY, DEFAULT_CACHE_DATA_COMPRESSED),
         conf.getBoolean(PREFETCH_BLOCKS_ON_OPEN_KEY, DEFAULT_PREFETCH_ON_OPEN),
-        conf.getBoolean(HColumnDescriptor.CACHE_DATA_IN_L1,
-          HColumnDescriptor.DEFAULT_CACHE_DATA_IN_L1),
         conf.getBoolean(DROP_BEHIND_CACHE_COMPACTION_KEY, DROP_BEHIND_CACHE_COMPACTION_DEFAULT)
      );
     LOG.info("Created cacheConfig: " + this);
   }
 
   /**
-   * Create a block cache configuration with the specified cache and
-   * configuration parameters.
+   * Create a block cache configuration with the specified cache and configuration parameters.
    * @param blockCache reference to block cache, null if completely disabled
    * @param cacheDataOnRead whether DATA blocks should be cached on read (we always cache INDEX
-   * blocks and BLOOM blocks; this cannot be disabled).
+   *          blocks and BLOOM blocks; this cannot be disabled).
    * @param inMemory whether blocks should be flagged as in-memory
    * @param cacheDataOnWrite whether data blocks should be cached on write
    * @param cacheIndexesOnWrite whether index blocks should be cached on write
@@ -287,14 +275,16 @@ public class CacheConfig {
    * @param cacheDataCompressed whether to store blocks as compressed in the cache
    * @param prefetchOnOpen whether to prefetch blocks upon open
    * @param cacheDataInL1 If more than one cache tier deployed, if true, cache this column families
-   * data blocks up in the L1 tier.
+   *          data blocks up in the L1 tier.
+   * @param dropBehindCompaction indicate that we should set drop behind to true when open a store
+   *          file reader for compaction
    */
   CacheConfig(final BlockCache blockCache,
       final boolean cacheDataOnRead, final boolean inMemory,
       final boolean cacheDataOnWrite, final boolean cacheIndexesOnWrite,
       final boolean cacheBloomsOnWrite, final boolean evictOnClose,
       final boolean cacheDataCompressed, final boolean prefetchOnOpen,
-      final boolean cacheDataInL1, final boolean dropBehindCompaction) {
+      final boolean dropBehindCompaction) {
     this.blockCache = blockCache;
     this.cacheDataOnRead = cacheDataOnRead;
     this.inMemory = inMemory;
@@ -304,7 +294,6 @@ public class CacheConfig {
     this.evictOnClose = evictOnClose;
     this.cacheDataCompressed = cacheDataCompressed;
     this.prefetchOnOpen = prefetchOnOpen;
-    this.cacheDataInL1 = cacheDataInL1;
     this.dropBehindCompaction = dropBehindCompaction;
   }
 
@@ -317,7 +306,11 @@ public class CacheConfig {
         cacheConf.cacheDataOnWrite, cacheConf.cacheIndexesOnWrite,
         cacheConf.cacheBloomsOnWrite, cacheConf.evictOnClose,
         cacheConf.cacheDataCompressed, cacheConf.prefetchOnOpen,
-        cacheConf.cacheDataInL1, cacheConf.dropBehindCompaction);
+        cacheConf.dropBehindCompaction);
+  }
+
+  private CacheConfig() {
+    this(null, false, false, false, false, false, false, false, false, false);
   }
 
   /**
@@ -371,13 +364,6 @@ public class CacheConfig {
   }
 
   /**
-   * @return True if cache data blocks in L1 tier (if more than one tier in block cache deploy).
-   */
-  public boolean isCacheDataInL1() {
-    return isBlockCacheEnabled() && this.cacheDataInL1;
-  }
-
-  /**
    * @return true if data blocks should be written to the cache when an HFile is
    *         written, false if not
    */
@@ -393,16 +379,6 @@ public class CacheConfig {
   @VisibleForTesting
   public void setCacheDataOnWrite(boolean cacheDataOnWrite) {
     this.cacheDataOnWrite = cacheDataOnWrite;
-  }
-
-  /**
-   * Only used for testing.
-   * @param cacheDataInL1 Whether to cache data blocks up in l1 (if a multi-tier cache
-   * implementation).
-   */
-  @VisibleForTesting
-  public void setCacheDataInL1(boolean cacheDataInL1) {
-    this.cacheDataInL1 = cacheDataInL1;
   }
 
   /**
@@ -531,76 +507,59 @@ public class CacheConfig {
   // Clear this if in tests you'd make more than one block cache instance.
   @VisibleForTesting
   static BlockCache GLOBAL_BLOCK_CACHE_INSTANCE;
-  private static LruBlockCache GLOBAL_L1_CACHE_INSTANCE;
+  private static LruBlockCache ONHEAP_CACHE_INSTANCE = null;
+  private static BlockCache L2_CACHE_INSTANCE = null;// Can be BucketCache or External cache.
 
   /** Boolean whether we have disabled the block cache entirely. */
   @VisibleForTesting
   static boolean blockCacheDisabled = false;
 
-  static long getLruCacheSize(final Configuration conf, final long xmx) {
-    float cachePercentage = conf.getFloat(HConstants.HFILE_BLOCK_CACHE_SIZE_KEY,
-      HConstants.HFILE_BLOCK_CACHE_SIZE_DEFAULT);
-    if (cachePercentage <= 0.0001f) {
+  /**
+   * @param c Configuration to use.
+   * @return An L1 instance.  Currently an instance of LruBlockCache.
+   */
+  public static LruBlockCache getOnHeapCache(final Configuration c) {
+    return getOnHeapCacheInternal(c);
+  }
+
+  public CacheStats getOnHeapCacheStats() {
+    if (ONHEAP_CACHE_INSTANCE != null) {
+      return ONHEAP_CACHE_INSTANCE.getStats();
+    }
+    return null;
+  }
+
+  public CacheStats getL2CacheStats() {
+    if (L2_CACHE_INSTANCE != null) {
+      return L2_CACHE_INSTANCE.getStats();
+    }
+    return null;
+  }
+
+  /**
+   * @param c Configuration to use.
+   * @return An L1 instance.  Currently an instance of LruBlockCache.
+   */
+  private synchronized static LruBlockCache getOnHeapCacheInternal(final Configuration c) {
+    if (ONHEAP_CACHE_INSTANCE != null) {
+      return ONHEAP_CACHE_INSTANCE;
+    }
+    final long cacheSize = MemorySizeUtil.getOnHeapCacheSize(c);
+    if (cacheSize < 0) {
       blockCacheDisabled = true;
-      return -1;
     }
-    if (cachePercentage > 1.0) {
-      throw new IllegalArgumentException(HConstants.HFILE_BLOCK_CACHE_SIZE_KEY +
-        " must be between 0.0 and 1.0, and not > 1.0");
-    }
-
-    // Calculate the amount of heap to give the heap.
-    return (long) (xmx * cachePercentage);
-  }
-
-  /**
-   * @param c Configuration to use.
-   * @return An L1 instance.  Currently an instance of LruBlockCache.
-   */
-  public static LruBlockCache getL1(final Configuration c) {
-    return getL1(c, ManagementFactory.getMemoryMXBean().getHeapMemoryUsage().getMax());
-  }
-
-  /**
-   * @param c Configuration to use.
-   * @param xmx Max heap memory
-   * @return An L1 instance.  Currently an instance of LruBlockCache.
-   */
-  private synchronized static LruBlockCache getL1(final Configuration c, final long xmx) {
-    if (GLOBAL_L1_CACHE_INSTANCE != null) return GLOBAL_L1_CACHE_INSTANCE;
     if (blockCacheDisabled) return null;
-    long lruCacheSize = getLruCacheSize(c, xmx);
-    if (lruCacheSize < 0) return null;
     int blockSize = c.getInt(BLOCKCACHE_BLOCKSIZE_KEY, HConstants.DEFAULT_BLOCKSIZE);
-    LOG.info("Allocating LruBlockCache size=" +
-      StringUtils.byteDesc(lruCacheSize) + ", blockSize=" + StringUtils.byteDesc(blockSize));
-    GLOBAL_L1_CACHE_INSTANCE = new LruBlockCache(lruCacheSize, blockSize, true, c);
-    return GLOBAL_L1_CACHE_INSTANCE;
-  }
-
-  /**
-   * @param c Configuration to use.
-   * @param xmx Max heap memory
-   * @return Returns L2 block cache instance (for now it is BucketCache BlockCache all the time)
-   * or null if not supposed to be a L2.
-   */
-  private static BlockCache getL2(final Configuration c, final long xmx) {
-    final boolean useExternal = c.getBoolean(EXTERNAL_BLOCKCACHE_KEY, EXTERNAL_BLOCKCACHE_DEFAULT);
-    if (LOG.isDebugEnabled()) {
-      LOG.debug("Trying to use " + (useExternal?" External":" Internal") + " l2 cache");
-    }
-
-    // If we want to use an external block cache then create that.
-    if (useExternal) {
-      return getExternalBlockcache(c);
-    }
-
-    // otherwise use the bucket cache.
-    return getBucketCache(c, xmx);
-
+    LOG.info("Allocating On heap LruBlockCache size=" +
+      StringUtils.byteDesc(cacheSize) + ", blockSize=" + StringUtils.byteDesc(blockSize));
+    ONHEAP_CACHE_INSTANCE = new LruBlockCache(cacheSize, blockSize, true, c);
+    return ONHEAP_CACHE_INSTANCE;
   }
 
   private static BlockCache getExternalBlockcache(Configuration c) {
+    if (LOG.isDebugEnabled()) {
+      LOG.debug("Trying to use External l2 cache");
+    }
     Class klass = null;
 
     // Get the class, from the config. s
@@ -626,15 +585,14 @@ public class CacheConfig {
 
   }
 
-  private static BlockCache getBucketCache(Configuration c, long xmx) {
+  @VisibleForTesting
+  static BucketCache getBucketCache(Configuration c) {
     // Check for L2.  ioengine name must be non-null.
     String bucketCacheIOEngineName = c.get(BUCKET_CACHE_IOENGINE_KEY, null);
     if (bucketCacheIOEngineName == null || bucketCacheIOEngineName.length() <= 0) return null;
 
     int blockSize = c.getInt(BLOCKCACHE_BLOCKSIZE_KEY, HConstants.DEFAULT_BLOCKSIZE);
-    float bucketCachePercentage = c.getFloat(BUCKET_CACHE_SIZE_KEY, 0F);
-    long bucketCacheSize = (long) (bucketCachePercentage < 1? xmx * bucketCachePercentage:
-      bucketCachePercentage * 1024 * 1024);
+    final long bucketCacheSize = MemorySizeUtil.getBucketCacheSize(c);
     if (bucketCacheSize <= 0) {
       throw new IllegalStateException("bucketCacheSize <= 0; Check " +
         BUCKET_CACHE_SIZE_KEY + " setting and/or server java heap size");
@@ -653,7 +611,17 @@ public class CacheConfig {
     if (configuredBucketSizes != null) {
       bucketSizes = new int[configuredBucketSizes.length];
       for (int i = 0; i < configuredBucketSizes.length; i++) {
-        bucketSizes[i] = Integer.parseInt(configuredBucketSizes[i].trim());
+        int bucketSize = Integer.parseInt(configuredBucketSizes[i].trim());
+        if (bucketSize % 256 != 0) {
+          // We need all the bucket sizes to be multiples of 256. Having all the configured bucket
+          // sizes to be multiples of 256 will ensure that the block offsets within buckets,
+          // that are calculated, will also be multiples of 256.
+          // See BucketEntry where offset to each block is represented using 5 bytes (instead of 8
+          // bytes long). We would like to save heap overhead as less as possible.
+          throw new IllegalArgumentException("Illegal value: " + bucketSize + " configured for '"
+              + BUCKET_CACHE_BUCKETS_KEY + "'. All bucket sizes to be multiples of 256");
+        }
+        bucketSizes[i] = bucketSize;
       }
     }
     BucketCache bucketCache = null;
@@ -664,7 +632,7 @@ public class CacheConfig {
       // Bucket cache logs its stats on creation internal to the constructor.
       bucketCache = new BucketCache(bucketCacheIOEngineName,
         bucketCacheSize, blockSize, bucketSizes, writerThreads, writerQueueLen, persistentPath,
-        ioErrorsTolerationDuration);
+        ioErrorsTolerationDuration, c);
     } catch (IOException ioex) {
       LOG.error("Can't instantiate bucket cache", ioex); throw new RuntimeException(ioex);
     }
@@ -681,31 +649,25 @@ public class CacheConfig {
   public static synchronized BlockCache instantiateBlockCache(Configuration conf) {
     if (GLOBAL_BLOCK_CACHE_INSTANCE != null) return GLOBAL_BLOCK_CACHE_INSTANCE;
     if (blockCacheDisabled) return null;
-    long xmx = ManagementFactory.getMemoryMXBean().getHeapMemoryUsage().getMax();
-    LruBlockCache l1 = getL1(conf, xmx);
-    // blockCacheDisabled is set as a side-effect of getL1(), so check it again after the call.
+    LruBlockCache onHeapCache = getOnHeapCacheInternal(conf);
+    // blockCacheDisabled is set as a side-effect of getL1Internal(), so check it again after the
+    // call.
     if (blockCacheDisabled) return null;
-    BlockCache l2 = getL2(conf, xmx);
-    if (l2 == null) {
-      GLOBAL_BLOCK_CACHE_INSTANCE = l1;
+    boolean useExternal = conf.getBoolean(EXTERNAL_BLOCKCACHE_KEY, EXTERNAL_BLOCKCACHE_DEFAULT);
+    if (useExternal) {
+      L2_CACHE_INSTANCE = getExternalBlockcache(conf);
+      GLOBAL_BLOCK_CACHE_INSTANCE = L2_CACHE_INSTANCE == null ? onHeapCache
+          : new InclusiveCombinedBlockCache(onHeapCache, L2_CACHE_INSTANCE);
     } else {
-      boolean useExternal = conf.getBoolean(EXTERNAL_BLOCKCACHE_KEY, EXTERNAL_BLOCKCACHE_DEFAULT);
-      boolean combinedWithLru = conf.getBoolean(BUCKET_CACHE_COMBINED_KEY,
-        DEFAULT_BUCKET_CACHE_COMBINED);
-      if (useExternal) {
-        GLOBAL_BLOCK_CACHE_INSTANCE = new InclusiveCombinedBlockCache(l1, l2);
-      } else {
-        if (combinedWithLru) {
-          GLOBAL_BLOCK_CACHE_INSTANCE = new CombinedBlockCache(l1, l2);
-        } else {
-          // L1 and L2 are not 'combined'.  They are connected via the LruBlockCache victimhandler
-          // mechanism.  It is a little ugly but works according to the following: when the
-          // background eviction thread runs, blocks evicted from L1 will go to L2 AND when we get
-          // a block from the L1 cache, if not in L1, we will search L2.
-          GLOBAL_BLOCK_CACHE_INSTANCE = l1;
-        }
+      // otherwise use the bucket cache.
+      L2_CACHE_INSTANCE = getBucketCache(conf);
+      if (!conf.getBoolean("hbase.bucketcache.combinedcache.enabled", true)) {
+        // Non combined mode is off from 2.0
+        LOG.warn(
+            "From HBase 2.0 onwards only combined mode of LRU cache and bucket cache is available");
       }
-      l1.setVictimCache(l2);
+      GLOBAL_BLOCK_CACHE_INSTANCE = L2_CACHE_INSTANCE == null ? onHeapCache
+          : new CombinedBlockCache(onHeapCache, L2_CACHE_INSTANCE);
     }
     return GLOBAL_BLOCK_CACHE_INSTANCE;
   }
@@ -713,7 +675,8 @@ public class CacheConfig {
   // Supposed to use only from tests. Some tests want to reinit the Global block cache instance
   @VisibleForTesting
   static synchronized void clearGlobalInstances() {
-    GLOBAL_L1_CACHE_INSTANCE = null;
+    ONHEAP_CACHE_INSTANCE = null;
+    L2_CACHE_INSTANCE = null;
     GLOBAL_BLOCK_CACHE_INSTANCE = null;
   }
 }

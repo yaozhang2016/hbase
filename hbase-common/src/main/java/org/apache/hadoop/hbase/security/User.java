@@ -28,16 +28,17 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutionException;
-import com.google.common.cache.LoadingCache;
+
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
 import org.apache.hadoop.hbase.util.Methods;
 import org.apache.hadoop.security.Groups;
 import org.apache.hadoop.security.SecurityUtil;
 import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.token.Token;
 import org.apache.hadoop.security.token.TokenIdentifier;
+import org.apache.yetus.audience.InterfaceAudience;
+
+import org.apache.hbase.thirdparty.com.google.common.cache.LoadingCache;
 
 /**
  * Wrapper to abstract out usage of user and group information in HBase.
@@ -51,7 +52,6 @@ import org.apache.hadoop.security.token.TokenIdentifier;
  * </p>
  */
 @InterfaceAudience.Public
-@InterfaceStability.Stable
 public abstract class User {
   public static final String HBASE_SECURITY_CONF_KEY =
       "hbase.security.authentication";
@@ -354,8 +354,7 @@ public abstract class User {
   }
 
   static class TestingGroups extends Groups {
-    private final Map<String, List<String>> userToGroupsMapping =
-        new HashMap<String,List<String>>();
+    private final Map<String, List<String>> userToGroupsMapping = new HashMap<>();
     private Groups underlyingImplementation;
 
     TestingGroups(Groups underlyingImplementation) {

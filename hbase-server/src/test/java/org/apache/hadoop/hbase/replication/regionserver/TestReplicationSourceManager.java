@@ -20,12 +20,12 @@ package org.apache.hadoop.hbase.replication.regionserver;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import java.io.IOException;
+import java.lang.reflect.Field;
 import java.net.URLEncoder;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -39,9 +39,8 @@ import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
+import java.util.stream.Collectors;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
@@ -57,16 +56,13 @@ import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.Server;
 import org.apache.hadoop.hbase.ServerName;
-import org.apache.hadoop.hbase.Stoppable;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.Waiter;
 import org.apache.hadoop.hbase.client.ClusterConnection;
-import org.apache.hadoop.hbase.shaded.com.google.protobuf.UnsafeByteOperations;
-import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.WALProtos.BulkLoadDescriptor;
+import org.apache.hadoop.hbase.client.Connection;
+import org.apache.hadoop.hbase.regionserver.HRegionServer;
 import org.apache.hadoop.hbase.regionserver.MultiVersionConcurrencyControl;
 import org.apache.hadoop.hbase.regionserver.wal.WALActionsListener;
-import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
 import org.apache.hadoop.hbase.replication.ReplicationEndpoint;
 import org.apache.hadoop.hbase.replication.ReplicationFactory;
 import org.apache.hadoop.hbase.replication.ReplicationPeerConfig;
@@ -80,14 +76,16 @@ import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.testclassification.ReplicationTests;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.FSUtils;
+import org.apache.hadoop.hbase.util.JVMClusterUtil;
 import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.hbase.wal.WAL;
+import org.apache.hadoop.hbase.wal.WALEdit;
 import org.apache.hadoop.hbase.wal.WALFactory;
-import org.apache.hadoop.hbase.wal.WALKey;
+import org.apache.hadoop.hbase.wal.WALKeyImpl;
 import org.apache.hadoop.hbase.zookeeper.MetaTableLocator;
 import org.apache.hadoop.hbase.zookeeper.ZKClusterId;
 import org.apache.hadoop.hbase.zookeeper.ZKUtil;
-import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher;
+import org.apache.hadoop.hbase.zookeeper.ZKWatcher;
 import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.Before;
@@ -95,8 +93,12 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.junit.rules.TestName;
-
-import com.google.common.collect.Sets;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.apache.hbase.thirdparty.com.google.common.collect.Sets;
+import org.apache.hbase.thirdparty.com.google.protobuf.UnsafeByteOperations;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.WALProtos.BulkLoadDescriptor;
 
 /**
  * An abstract class that tests ReplicationSourceManager. Classes that extend this class should
@@ -106,8 +108,8 @@ import com.google.common.collect.Sets;
 @Category({ReplicationTests.class, MediumTests.class})
 public abstract class TestReplicationSourceManager {
 
-  protected static final Log LOG =
-      LogFactory.getLog(TestReplicationSourceManager.class);
+  protected static final Logger LOG =
+      LoggerFactory.getLogger(TestReplicationSourceManager.class);
 
   protected static Configuration conf;
 
@@ -117,7 +119,9 @@ public abstract class TestReplicationSourceManager {
 
   protected static ReplicationSourceManager manager;
 
-  protected static ZooKeeperWatcher zkw;
+  protected static ReplicationSourceManager managerOfCluster;
+
+  protected static ZKWatcher zkw;
 
   protected static HTableDescriptor htd;
 
@@ -144,13 +148,13 @@ public abstract class TestReplicationSourceManager {
 
   protected static CountDownLatch latch;
 
-  protected static List<String> files = new ArrayList<String>();
+  protected static List<String> files = new ArrayList<>();
   protected static NavigableMap<byte[], Integer> scopes;
 
   protected static void setupZkAndReplication() throws Exception {
     // The implementing class should set up the conf
     assertNotNull(conf);
-    zkw = new ZooKeeperWatcher(conf, "test", null);
+    zkw = new ZKWatcher(conf, "test", null);
     ZKUtil.createWithParents(zkw, "/hbase/replication");
     ZKUtil.createWithParents(zkw, "/hbase/replication/peers/1");
     ZKUtil.setData(zkw, "/hbase/replication/peers/1",
@@ -170,9 +174,14 @@ public abstract class TestReplicationSourceManager {
     logDir = new Path(utility.getDataTestDir(),
         HConstants.HREGION_LOGDIR_NAME);
     replication = new Replication(new DummyServer(), fs, logDir, oldLogDir);
-    manager = replication.getReplicationManager();
 
+    managerOfCluster = getManagerFromCluster();
+    manager = replication.getReplicationManager();
     manager.addSource(slaveId);
+    if (managerOfCluster != null) {
+      waitPeer(slaveId, managerOfCluster, true);
+    }
+    waitPeer(slaveId, manager, true);
 
     htd = new HTableDescriptor(test);
     HColumnDescriptor col = new HColumnDescriptor(f1);
@@ -182,17 +191,32 @@ public abstract class TestReplicationSourceManager {
     col.setScope(HConstants.REPLICATION_SCOPE_LOCAL);
     htd.addFamily(col);
 
-    scopes = new TreeMap<byte[], Integer>(
-        Bytes.BYTES_COMPARATOR);
+    scopes = new TreeMap<>(Bytes.BYTES_COMPARATOR);
     for(byte[] fam : htd.getFamiliesKeys()) {
       scopes.put(fam, 0);
     }
     hri = new HRegionInfo(htd.getTableName(), r1, r2);
   }
 
+  private static ReplicationSourceManager getManagerFromCluster() {
+    // TestReplicationSourceManagerZkImpl won't start the mini hbase cluster.
+    if (utility.getMiniHBaseCluster() == null) {
+      return null;
+    }
+    return utility.getMiniHBaseCluster().getRegionServerThreads()
+        .stream().map(JVMClusterUtil.RegionServerThread::getRegionServer)
+        .findAny()
+        .map(HRegionServer::getReplicationSourceService)
+        .map(r -> (Replication)r)
+        .map(Replication::getReplicationManager)
+        .get();
+  }
+
   @AfterClass
   public static void tearDownAfterClass() throws Exception {
-    manager.join();
+    if (manager != null) {
+      manager.join();
+    }
     utility.shutdownMiniCluster();
   }
 
@@ -214,6 +238,14 @@ public abstract class TestReplicationSourceManager {
   public void tearDown() throws Exception {
     LOG.info("End " + testName.getMethodName());
     cleanLogDir();
+    List<String> ids = manager.getSources().stream()
+        .map(ReplicationSourceInterface::getPeerId).collect(Collectors.toList());
+    for (String id : ids) {
+      if (slaveId.equals(id)) {
+        continue;
+      }
+      removePeerAndWait(id);
+    }
   }
 
   @Test
@@ -225,7 +257,7 @@ public abstract class TestReplicationSourceManager {
     WALEdit edit = new WALEdit();
     edit.add(kv);
 
-    List<WALActionsListener> listeners = new ArrayList<WALActionsListener>();
+    List<WALActionsListener> listeners = new ArrayList<>(1);
     listeners.add(replication);
     final WALFactory wals = new WALFactory(utility.getConfiguration(), listeners,
         URLEncoder.encode("regionserver:60020", "UTF8"));
@@ -233,8 +265,7 @@ public abstract class TestReplicationSourceManager {
     manager.init();
     HTableDescriptor htd = new HTableDescriptor(TableName.valueOf("tableame"));
     htd.addFamily(new HColumnDescriptor(f1));
-    NavigableMap<byte[], Integer> scopes = new TreeMap<byte[], Integer>(
-        Bytes.BYTES_COMPARATOR);
+    NavigableMap<byte[], Integer> scopes = new TreeMap<>(Bytes.BYTES_COMPARATOR);
     for(byte[] fam : htd.getFamiliesKeys()) {
       scopes.put(fam, 0);
     }
@@ -243,10 +274,10 @@ public abstract class TestReplicationSourceManager {
       if(i > 1 && i % 20 == 0) {
         wal.rollWriter();
       }
-      LOG.info(i);
+      LOG.info(Long.toString(i));
       final long txid = wal.append(
           hri,
-          new WALKey(hri.getEncodedNameAsBytes(), test, System.currentTimeMillis(), mvcc, scopes),
+          new WALKeyImpl(hri.getEncodedNameAsBytes(), test, System.currentTimeMillis(), mvcc, scopes),
           edit,
           true);
       wal.sync(txid);
@@ -261,9 +292,8 @@ public abstract class TestReplicationSourceManager {
 
     for (int i = 0; i < 3; i++) {
       wal.append(hri,
-          new WALKey(hri.getEncodedNameAsBytes(), test, System.currentTimeMillis(), mvcc, scopes),
-          edit,
-          true);
+        new WALKeyImpl(hri.getEncodedNameAsBytes(), test, System.currentTimeMillis(), mvcc, scopes),
+          edit, true);
     }
     wal.sync();
 
@@ -279,7 +309,7 @@ public abstract class TestReplicationSourceManager {
         "1", 0, false, false);
 
     wal.append(hri,
-        new WALKey(hri.getEncodedNameAsBytes(), test, System.currentTimeMillis(), mvcc, scopes),
+        new WALKeyImpl(hri.getEncodedNameAsBytes(), test, System.currentTimeMillis(), mvcc, scopes),
         edit,
         true);
     wal.sync();
@@ -341,7 +371,7 @@ public abstract class TestReplicationSourceManager {
           server.getZooKeeper()));
     rq.init(server.getServerName().toString());
     // populate some znodes in the peer znode
-    SortedSet<String> files = new TreeSet<String>();
+    SortedSet<String> files = new TreeSet<>();
     String group = "testgroup";
     String file1 = group + ".log1";
     String file2 = group + ".log2";
@@ -393,11 +423,11 @@ public abstract class TestReplicationSourceManager {
 
   @Test
   public void testBulkLoadWALEditsWithoutBulkLoadReplicationEnabled() throws Exception {
-    NavigableMap<byte[], Integer> scope = new TreeMap<byte[], Integer>(Bytes.BYTES_COMPARATOR);
+    NavigableMap<byte[], Integer> scope = new TreeMap<>(Bytes.BYTES_COMPARATOR);
     // 1. Get the bulk load wal edit event
     WALEdit logEdit = getBulkLoadWALEdit(scope);
     // 2. Create wal key
-    WALKey logKey = new WALKey(scope);
+    WALKeyImpl logKey = new WALKeyImpl(scope);
 
     // 3. Get the scopes for the key
     Replication.scopeWALEdits(logKey, logEdit, conf, manager);
@@ -410,10 +440,10 @@ public abstract class TestReplicationSourceManager {
   @Test
   public void testBulkLoadWALEdits() throws Exception {
     // 1. Get the bulk load wal edit event
-    NavigableMap<byte[], Integer> scope = new TreeMap<byte[], Integer>(Bytes.BYTES_COMPARATOR);
+    NavigableMap<byte[], Integer> scope = new TreeMap<>(Bytes.BYTES_COMPARATOR);
     WALEdit logEdit = getBulkLoadWALEdit(scope);
     // 2. Create wal key
-    WALKey logKey = new WALKey(scope);
+    WALKeyImpl logKey = new WALKeyImpl(scope);
     // 3. Enable bulk load hfile replication
     Configuration bulkLoadConf = HBaseConfiguration.create(conf);
     bulkLoadConf.setBoolean(HConstants.REPLICATION_BULKLOAD_ENABLE_KEY, true);
@@ -440,6 +470,9 @@ public abstract class TestReplicationSourceManager {
   @Test
   public void testPeerRemovalCleanup() throws Exception{
     String replicationSourceImplName = conf.get("replication.replicationsource.implementation");
+    final String peerId = "FakePeer";
+    final ReplicationPeerConfig peerConfig = new ReplicationPeerConfig()
+        .setClusterKey("localhost:" + utility.getZkCluster().getClientPort() + ":/hbase");
     try {
       DummyServer server = new DummyServer();
       final ReplicationQueues rq =
@@ -452,38 +485,139 @@ public abstract class TestReplicationSourceManager {
           FailInitializeDummyReplicationSource.class.getName());
       final ReplicationPeers rp = manager.getReplicationPeers();
       // Set up the znode and ReplicationPeer for the fake peer
-      rp.registerPeer("FakePeer", new ReplicationPeerConfig().setClusterKey("localhost:1:/hbase"));
-      // Wait for the peer to get created and connected
-      Waiter.waitFor(conf, 20000, new Waiter.Predicate<Exception>() {
-        @Override
-        public boolean evaluate() throws Exception {
-          return (rp.getConnectedPeer("FakePeer") != null);
-        }
-      });
+      // Don't wait for replication source to initialize, we know it won't.
+      addPeerAndWait(peerId, peerConfig, false);
 
-      // Make sure that the replication source was not initialized
-      List<ReplicationSourceInterface> sources = manager.getSources();
-      for (ReplicationSourceInterface source : sources) {
-        assertNotEquals("FakePeer", source.getPeerClusterId());
-      }
+      // Sanity check
+      assertNull(manager.getSource(peerId));
 
       // Create a replication queue for the fake peer
-      rq.addLog("FakePeer", "FakeFile");
+      rq.addLog(peerId, "FakeFile");
       // Unregister peer, this should remove the peer and clear all queues associated with it
       // Need to wait for the ReplicationTracker to pick up the changes and notify listeners.
-      rp.unregisterPeer("FakePeer");
-      Waiter.waitFor(conf, 20000, new Waiter.Predicate<Exception>() {
-        @Override
-        public boolean evaluate() throws Exception {
-          List<String> peers = rp.getAllPeerIds();
-          return (!rq.getAllQueues().contains("FakePeer"))
-              && (rp.getConnectedPeer("FakePeer") == null)
-              && (!peers.contains("FakePeer"));
-          }
-      });
+      removePeerAndWait(peerId);
+      assertFalse(rq.getAllQueues().contains(peerId));
     } finally {
       conf.set("replication.replicationsource.implementation", replicationSourceImplName);
+      removePeerAndWait(peerId);
     }
+  }
+
+  private static MetricsReplicationSourceSource getGlobalSource() throws Exception {
+    ReplicationSourceInterface source = manager.getSource(slaveId);
+    // Retrieve the global replication metrics source
+    Field f = MetricsSource.class.getDeclaredField("globalSourceSource");
+    f.setAccessible(true);
+    return (MetricsReplicationSourceSource)f.get(source.getSourceMetrics());
+  }
+
+  private static long getSizeOfLatestPath() {
+    // If no mini cluster is running, there are extra replication manager influencing the metrics.
+    if (utility.getMiniHBaseCluster() == null) {
+      return 0;
+    }
+    return utility.getMiniHBaseCluster().getRegionServerThreads()
+        .stream().map(JVMClusterUtil.RegionServerThread::getRegionServer)
+        .map(HRegionServer::getReplicationSourceService)
+        .map(r -> (Replication)r)
+        .map(Replication::getReplicationManager)
+        .mapToLong(ReplicationSourceManager::getSizeOfLatestPath)
+        .sum();
+  }
+
+  @Test
+  public void testRemovePeerMetricsCleanup() throws Exception {
+    final String peerId = "DummyPeer";
+    final ReplicationPeerConfig peerConfig = new ReplicationPeerConfig()
+        .setClusterKey("localhost:" + utility.getZkCluster().getClientPort() + ":/hbase");
+    try {
+      MetricsReplicationSourceSource globalSource = getGlobalSource();
+      final int globalLogQueueSizeInitial = globalSource.getSizeOfLogQueue();
+      final long sizeOfLatestPath = getSizeOfLatestPath();
+      addPeerAndWait(peerId, peerConfig, true);
+      assertEquals(sizeOfLatestPath + globalLogQueueSizeInitial,
+          globalSource.getSizeOfLogQueue());
+      ReplicationSourceInterface source = manager.getSource(peerId);
+      // Sanity check
+      assertNotNull(source);
+      final int sizeOfSingleLogQueue = source.getSourceMetrics().getSizeOfLogQueue();
+      // Enqueue log and check if metrics updated
+      source.enqueueLog(new Path("abc"));
+      assertEquals(1 + sizeOfSingleLogQueue,
+          source.getSourceMetrics().getSizeOfLogQueue());
+      assertEquals(source.getSourceMetrics().getSizeOfLogQueue()
+              + globalLogQueueSizeInitial, globalSource.getSizeOfLogQueue());
+
+      // Removing the peer should reset the global metrics
+      removePeerAndWait(peerId);
+      assertEquals(globalLogQueueSizeInitial, globalSource.getSizeOfLogQueue());
+
+      // Adding the same peer back again should reset the single source metrics
+      addPeerAndWait(peerId, peerConfig, true);
+      source = manager.getSource(peerId);
+      assertNotNull(source);
+      assertEquals(sizeOfLatestPath, source.getSourceMetrics().getSizeOfLogQueue());
+      assertEquals(source.getSourceMetrics().getSizeOfLogQueue()
+          + globalLogQueueSizeInitial, globalSource.getSizeOfLogQueue());
+    } finally {
+      removePeerAndWait(peerId);
+    }
+  }
+
+  /**
+   * Add a peer and wait for it to initialize
+   * @param peerId
+   * @param peerConfig
+   * @param waitForSource Whether to wait for replication source to initialize
+   * @throws Exception
+   */
+  private void addPeerAndWait(final String peerId, final ReplicationPeerConfig peerConfig,
+      final boolean waitForSource) throws Exception {
+    final ReplicationPeers rp = manager.getReplicationPeers();
+    rp.registerPeer(peerId, peerConfig);
+    waitPeer(peerId, manager, waitForSource);
+    if (managerOfCluster != null) {
+      waitPeer(peerId, managerOfCluster, waitForSource);
+    }
+  }
+
+  private static void waitPeer(final String peerId,
+      ReplicationSourceManager manager, final boolean waitForSource) {
+    ReplicationPeers rp = manager.getReplicationPeers();
+    Waiter.waitFor(conf, 20000, () -> {
+      if (waitForSource) {
+        ReplicationSourceInterface rs = manager.getSource(peerId);
+        if (rs == null) {
+          return false;
+        }
+        if (rs instanceof ReplicationSourceDummy) {
+          return ((ReplicationSourceDummy)rs).isStartup();
+        }
+        return true;
+      } else {
+        return (rp.getConnectedPeer(peerId) != null);
+      }
+    });
+  }
+
+  /**
+   * Remove a peer and wait for it to get cleaned up
+   * @param peerId
+   * @throws Exception
+   */
+  private void removePeerAndWait(final String peerId) throws Exception {
+    final ReplicationPeers rp = manager.getReplicationPeers();
+    if (rp.getAllPeerIds().contains(peerId)) {
+      rp.unregisterPeer(peerId);
+    }
+    Waiter.waitFor(conf, 20000, new Waiter.Predicate<Exception>() {
+      @Override public boolean evaluate() throws Exception {
+        List<String> peers = rp.getAllPeerIds();
+        return (!manager.getAllQueues().contains(peerId)) && (rp.getConnectedPeer(peerId) == null)
+            && (!peers.contains(peerId))
+            && manager.getSource(peerId) == null;
+      }
+    });
   }
 
   private WALEdit getBulkLoadWALEdit(NavigableMap<byte[], Integer> scope) {
@@ -543,7 +677,9 @@ public abstract class TestReplicationSourceManager {
         List<String> queues = rq.getUnClaimedQueueIds(deadRsZnode);
         for(String queue:queues){
           Pair<String, SortedSet<String>> pair = rq.claimQueue(deadRsZnode, queue);
-          logZnodesMap.put(pair.getFirst(), pair.getSecond());
+          if (pair != null) {
+            logZnodesMap.put(pair.getFirst(), pair.getSecond());
+          }
         }
         server.abort("Done with testing", null);
       } catch (Exception e) {
@@ -579,9 +715,9 @@ public abstract class TestReplicationSourceManager {
 
     @Override
     public void init(Configuration conf, FileSystem fs, ReplicationSourceManager manager,
-        ReplicationQueues rq, ReplicationPeers rp, Stoppable stopper, String peerClusterId,
-        UUID clusterId, ReplicationEndpoint replicationEndpoint, MetricsSource metrics)
-        throws IOException {
+        ReplicationQueues rq, ReplicationPeers rp, Server server, String peerClusterId,
+        UUID clusterId, ReplicationEndpoint replicationEndpoint,
+        WALFileLengthProvider walFileLengthProvider, MetricsSource metrics) throws IOException {
       throw new IOException("Failing deliberately");
     }
   }
@@ -603,7 +739,7 @@ public abstract class TestReplicationSourceManager {
     }
 
     @Override
-    public ZooKeeperWatcher getZooKeeper() {
+    public ZKWatcher getZooKeeper() {
       return zkw;
     }
 
@@ -654,6 +790,21 @@ public abstract class TestReplicationSourceManager {
     @Override
     public ClusterConnection getClusterConnection() {
       // TODO Auto-generated method stub
+      return null;
+    }
+
+    @Override
+    public FileSystem getFileSystem() {
+      return null;
+    }
+
+    @Override
+    public boolean isStopping() {
+      return false;
+    }
+
+    @Override
+    public Connection createConnection(Configuration conf) throws IOException {
       return null;
     }
   }

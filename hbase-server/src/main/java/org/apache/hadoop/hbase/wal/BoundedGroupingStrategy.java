@@ -18,11 +18,13 @@
  */
 package org.apache.hadoop.hbase.wal;
 
+import static org.apache.hadoop.hbase.util.CollectionUtils.computeIfAbsent;
+
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.wal.RegionGroupingProvider.RegionGroupingStrategy;
 
@@ -36,23 +38,15 @@ public class BoundedGroupingStrategy implements RegionGroupingStrategy{
   static final String NUM_REGION_GROUPS = "hbase.wal.regiongrouping.numgroups";
   static final int DEFAULT_NUM_REGION_GROUPS = 2;
 
-  private ConcurrentHashMap<String, String> groupNameCache =
-      new ConcurrentHashMap<String, String>();
+  private ConcurrentHashMap<String, String> groupNameCache = new ConcurrentHashMap<>();
   private AtomicInteger counter = new AtomicInteger(0);
   private String[] groupNames;
 
   @Override
   public String group(byte[] identifier, byte[] namespace) {
     String idStr = Bytes.toString(identifier);
-    String groupName = groupNameCache.get(idStr);
-    if (null == groupName) {
-      groupName = groupNames[getAndIncrAtomicInteger(counter, groupNames.length)];
-      String extantName = groupNameCache.putIfAbsent(idStr, groupName);
-      if (extantName != null) {
-        return extantName;
-      }
-    }
-    return groupName;
+    return computeIfAbsent(groupNameCache, idStr,
+      () -> groupNames[getAndIncrAtomicInteger(counter, groupNames.length)]);
   }
 
   // Non-blocking incrementing & resetting of AtomicInteger.

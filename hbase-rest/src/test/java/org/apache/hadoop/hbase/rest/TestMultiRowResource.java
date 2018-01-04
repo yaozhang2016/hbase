@@ -29,11 +29,9 @@ import org.apache.hadoop.hbase.rest.client.Response;
 import org.apache.hadoop.hbase.rest.model.CellModel;
 import org.apache.hadoop.hbase.rest.model.CellSetModel;
 import org.apache.hadoop.hbase.rest.model.RowModel;
-import org.apache.hadoop.hbase.rest.provider.JacksonProvider;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.testclassification.RestTests;
 import org.apache.hadoop.hbase.util.Bytes;
-import org.codehaus.jackson.map.ObjectMapper;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -47,9 +45,10 @@ import javax.xml.bind.JAXBException;
 import javax.xml.bind.Marshaller;
 import javax.xml.bind.Unmarshaller;
 import java.io.IOException;
-import java.util.ArrayList;
 import java.util.Collection;
-import java.util.List;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.jaxrs.json.JacksonJaxbJsonProvider;
 
 import static org.junit.Assert.assertEquals;
 
@@ -82,10 +81,7 @@ public class TestMultiRowResource {
 
   @Parameterized.Parameters
   public static Collection<Object[]> data() {
-    List<Object[]> params = new ArrayList<Object[]>();
-    params.add(new Object[] {Boolean.TRUE});
-    params.add(new Object[] {Boolean.FALSE});
-    return params;
+    return HBaseCommonTestingUtility.BOOLEAN_PARAMETERIZED;
   }
 
   public TestMultiRowResource(Boolean csrf) {
@@ -107,7 +103,7 @@ public class TestMultiRowResource {
     marshaller = context.createMarshaller();
     unmarshaller = context.createUnmarshaller();
     client = new Client(new Cluster().add("localhost", REST_TEST_UTIL.getServletPort()));
-    Admin admin = TEST_UTIL.getHBaseAdmin();
+    Admin admin = TEST_UTIL.getAdmin();
     if (admin.tableExists(TABLE)) {
       return;
     }
@@ -204,8 +200,8 @@ public class TestMultiRowResource {
     Response response = client.get(path.toString(), Constants.MIMETYPE_JSON);
     assertEquals(response.getCode(), 200);
     ObjectMapper mapper =
-        new JacksonProvider().locateMapper(CellSetModel.class, MediaType.APPLICATION_JSON_TYPE);
-    CellSetModel cellSet = (CellSetModel) mapper.readValue(response.getBody(), CellSetModel.class);
+        new JacksonJaxbJsonProvider().locateMapper(CellSetModel.class, MediaType.APPLICATION_JSON_TYPE);
+    CellSetModel cellSet = mapper.readValue(response.getBody(), CellSetModel.class);
     assertEquals(2, cellSet.getRows().size());
     assertEquals(ROW_1, Bytes.toString(cellSet.getRows().get(0).getKey()));
     assertEquals(VALUE_1, Bytes.toString(cellSet.getRows().get(0).getCells().get(0).getValue()));
@@ -232,7 +228,7 @@ public class TestMultiRowResource {
     client.post(row_5_url, Constants.MIMETYPE_BINARY, Bytes.toBytes(VALUE_1), extraHdr);
     Response response = client.get(path.toString(), Constants.MIMETYPE_JSON);
     assertEquals(response.getCode(), 200);
-    ObjectMapper mapper = new JacksonProvider().locateMapper(CellSetModel.class,
+    ObjectMapper mapper = new JacksonJaxbJsonProvider().locateMapper(CellSetModel.class,
       MediaType.APPLICATION_JSON_TYPE);
     CellSetModel cellSet = (CellSetModel) mapper.readValue(response.getBody(), CellSetModel.class);
     assertEquals(1, cellSet.getRows().size());

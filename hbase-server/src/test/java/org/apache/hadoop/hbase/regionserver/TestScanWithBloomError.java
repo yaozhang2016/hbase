@@ -31,8 +31,6 @@ import java.util.List;
 import java.util.NavigableSet;
 import java.util.TreeSet;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
@@ -56,6 +54,8 @@ import org.junit.experimental.categories.Category;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 import org.junit.runners.Parameterized.Parameters;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Test a multi-column scanner when there is a Bloom filter false-positive.
@@ -65,8 +65,8 @@ import org.junit.runners.Parameterized.Parameters;
 @Category({RegionServerTests.class, SmallTests.class})
 public class TestScanWithBloomError {
 
-  private static final Log LOG =
-    LogFactory.getLog(TestScanWithBloomError.class);
+  private static final Logger LOG =
+    LoggerFactory.getLogger(TestScanWithBloomError.class);
 
   private static final String TABLE_NAME = "ScanWithBloomError";
   private static final String FAMILY = "myCF";
@@ -74,8 +74,8 @@ public class TestScanWithBloomError {
   private static final String ROW = "theRow";
   private static final String QUALIFIER_PREFIX = "qual";
   private static final byte[] ROW_BYTES = Bytes.toBytes(ROW);
-  private static NavigableSet<Integer> allColIds = new TreeSet<Integer>();
-  private Region region;
+  private static NavigableSet<Integer> allColIds = new TreeSet<>();
+  private HRegion region;
   private BloomType bloomType;
   private FileSystem fs;
   private Configuration conf;
@@ -84,7 +84,7 @@ public class TestScanWithBloomError {
 
   @Parameters
   public static final Collection<Object[]> parameters() {
-    List<Object[]> configurations = new ArrayList<Object[]>();
+    List<Object[]> configurations = new ArrayList<>();
     for (BloomType bloomType : BloomType.values()) {
       configurations.add(new Object[] { bloomType });
     }
@@ -121,7 +121,7 @@ public class TestScanWithBloomError {
     LOG.info("Scanning column set: " + Arrays.toString(colSet));
     Scan scan = new Scan(ROW_BYTES, ROW_BYTES);
     addColumnSetToScan(scan, colSet);
-    RegionScannerImpl scanner = (RegionScannerImpl) region.getScanner(scan);
+    RegionScannerImpl scanner = region.getScanner(scan);
     KeyValueHeap storeHeap = scanner.getStoreHeapForTesting();
     assertEquals(0, storeHeap.getHeap().size());
     StoreScanner storeScanner =
@@ -160,24 +160,24 @@ public class TestScanWithBloomError {
         + lastStoreFileReader.getHFileReader().getName());
     lastStoreFileReader.disableBloomFilterForTesting();
 
-    List<Cell> allResults = new ArrayList<Cell>();
+    List<Cell> allResults = new ArrayList<>();
 
     { // Limit the scope of results.
-      List<Cell> results = new ArrayList<Cell>();
+      List<Cell> results = new ArrayList<>();
       while (scanner.next(results) || results.size() > 0) {
         allResults.addAll(results);
         results.clear();
       }
     }
 
-    List<Integer> actualIds = new ArrayList<Integer>();
+    List<Integer> actualIds = new ArrayList<>();
     for (Cell kv : allResults) {
       String qual = Bytes.toString(CellUtil.cloneQualifier(kv));
       assertTrue(qual.startsWith(QUALIFIER_PREFIX));
       actualIds.add(Integer.valueOf(qual.substring(
           QUALIFIER_PREFIX.length())));
     }
-    List<Integer> expectedIds = new ArrayList<Integer>();
+    List<Integer> expectedIds = new ArrayList<>();
     for (int expectedId : expectedResultCols)
       expectedIds.add(expectedId);
 

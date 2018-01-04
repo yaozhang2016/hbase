@@ -22,15 +22,10 @@ package org.apache.hadoop.hbase.regionserver;
 import static org.junit.Assert.*;
 
 import java.io.IOException;
-import java.util.Arrays;
-import java.util.Collection;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.commons.logging.impl.Log4JLogger;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HConstants;
@@ -42,7 +37,6 @@ import org.apache.hadoop.hbase.client.Connection;
 import org.apache.hadoop.hbase.client.ConnectionFactory;
 import org.apache.hadoop.hbase.client.Consistency;
 import org.apache.hadoop.hbase.client.Get;
-import org.apache.hadoop.hbase.client.RpcRetryingCallerImpl;
 import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.replication.regionserver.TestRegionReplicaReplicationEndpoint;
 import org.apache.hadoop.hbase.testclassification.LargeTests;
@@ -50,29 +44,22 @@ import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.ServerRegionReplicaUtil;
 import org.apache.hadoop.hbase.util.Threads;
 import org.apache.hadoop.hbase.util.JVMClusterUtil.RegionServerThread;
-import org.apache.log4j.Level;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.junit.rules.TestName;
-import org.junit.runner.RunWith;
-import org.junit.runners.Parameterized;
-import org.junit.runners.Parameterized.Parameters;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Tests failover of secondary region replicas.
  */
-@RunWith(Parameterized.class)
 @Category(LargeTests.class)
 public class TestRegionReplicaFailover {
-
-  private static final Log LOG = LogFactory.getLog(TestRegionReplicaReplicationEndpoint.class);
-
-  static {
-    ((Log4JLogger)RpcRetryingCallerImpl.LOG).getLogger().setLevel(Level.ALL);
-  }
+  private static final Logger LOG =
+      LoggerFactory.getLogger(TestRegionReplicaReplicationEndpoint.class);
 
   private static final HBaseTestingUtility HTU = new HBaseTestingUtility();
 
@@ -90,19 +77,6 @@ public class TestRegionReplicaFailover {
 
   private HTableDescriptor htd;
 
-  /*
-   * We are testing with dist log split and dist log replay separately
-   */
-  @Parameters
-  public static Collection<Object[]> getParameters() {
-    Object[][] params =
-        new Boolean[][] { /*{true}, Disable DLR!!! It is going to be removed*/ {false} };
-    return Arrays.asList(params);
-  }
-
-  @Parameterized.Parameter(0)
-  public boolean distributedLogReplay;
-
   @Before
   public void before() throws Exception {
     Configuration conf = HTU.getConfiguration();
@@ -112,13 +86,12 @@ public class TestRegionReplicaFailover {
     conf.setBoolean(ServerRegionReplicaUtil.REGION_REPLICA_WAIT_FOR_PRIMARY_FLUSH_CONF_KEY, true);
     conf.setInt("replication.stats.thread.period.seconds", 5);
     conf.setBoolean("hbase.tests.use.shortcircuit.reads", false);
-    conf.setBoolean(HConstants.DISTRIBUTED_LOG_REPLAY_KEY, distributedLogReplay);
 
     HTU.startMiniCluster(NB_SERVERS);
     htd = HTU.createTableDescriptor(
       name.getMethodName().substring(0, name.getMethodName().length()-3));
     htd.setRegionReplication(3);
-    HTU.getHBaseAdmin().createTable(htd);
+    HTU.getAdmin().createTable(htd);
   }
 
   @After
@@ -159,8 +132,8 @@ public class TestRegionReplicaFailover {
 
       HTU.loadNumericRows(table, fam, 0, 1000);
 
-      HTU.getHBaseAdmin().disableTable(htd.getTableName());
-      HTU.getHBaseAdmin().enableTable(htd.getTableName());
+      HTU.getAdmin().disableTable(htd.getTableName());
+      HTU.getAdmin().enableTable(htd.getTableName());
 
       HTU.verifyNumericRows(table, fam, 0, 1000, 1);
     }
@@ -185,7 +158,7 @@ public class TestRegionReplicaFailover {
       // read from it the same data from primary and secondaries
       boolean aborted = false;
       for (RegionServerThread rs : HTU.getMiniHBaseCluster().getRegionServerThreads()) {
-        for (Region r : rs.getRegionServer().getOnlineRegions(htd.getTableName())) {
+        for (Region r : rs.getRegionServer().getRegions(htd.getTableName())) {
           if (r.getRegionInfo().getReplicaId() == 0) {
             LOG.info("Aborting region server hosting primary region replica");
             rs.getRegionServer().abort("for test");
@@ -247,7 +220,7 @@ public class TestRegionReplicaFailover {
       // read from it the same data
       boolean aborted = false;
       for (RegionServerThread rs : HTU.getMiniHBaseCluster().getRegionServerThreads()) {
-        for (Region r : rs.getRegionServer().getOnlineRegions(htd.getTableName())) {
+        for (Region r : rs.getRegionServer().getRegions(htd.getTableName())) {
           if (r.getRegionInfo().getReplicaId() == 1) {
             LOG.info("Aborting region server hosting secondary region replica");
             rs.getRegionServer().abort("for test");
@@ -283,7 +256,7 @@ public class TestRegionReplicaFailover {
       admin.flush(table.getName());
       HTU.loadNumericRows(table, fam, 1000, 2000);
 
-      final AtomicReference<Throwable> ex = new AtomicReference<Throwable>(null);
+      final AtomicReference<Throwable> ex = new AtomicReference<>(null);
       final AtomicBoolean done = new AtomicBoolean(false);
       final AtomicInteger key = new AtomicInteger(2000);
 
@@ -308,7 +281,7 @@ public class TestRegionReplicaFailover {
           try {
             boolean aborted = false;
             for (RegionServerThread rs : HTU.getMiniHBaseCluster().getRegionServerThreads()) {
-              for (Region r : rs.getRegionServer().getOnlineRegions(htd.getTableName())) {
+              for (Region r : rs.getRegionServer().getRegions(htd.getTableName())) {
                 if (r.getRegionInfo().getReplicaId() == 1) {
                   LOG.info("Aborting region server hosting secondary region replica");
                   rs.getRegionServer().abort("for test");
@@ -357,7 +330,7 @@ public class TestRegionReplicaFailover {
     byte[] startKey = Bytes.toBytes("aaa");
     byte[] endKey = Bytes.toBytes("zzz");
     byte[][] splits = HTU.getRegionSplitStartKeys(startKey, endKey, numRegions);
-    HTU.getHBaseAdmin().createTable(htd, startKey, endKey, numRegions);
+    HTU.getAdmin().createTable(htd, startKey, endKey, numRegions);
 
     try (Connection connection = ConnectionFactory.createConnection(HTU.getConfiguration());
         Table table = connection.getTable(htd.getTableName())) {

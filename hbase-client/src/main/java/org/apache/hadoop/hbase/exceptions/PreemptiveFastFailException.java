@@ -22,8 +22,7 @@ package org.apache.hadoop.hbase.exceptions;
 import java.net.ConnectException;
 
 import org.apache.hadoop.hbase.ServerName;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * Thrown when the client believes that we are trying to communicate to has
@@ -33,7 +32,6 @@ import org.apache.hadoop.hbase.classification.InterfaceStability;
  * retries and fast fail the operation.
  */
 @InterfaceAudience.Public
-@InterfaceStability.Evolving
 public class PreemptiveFastFailException extends ConnectException {
   private static final long serialVersionUID = 7129103682617007177L;
   private long failureCount, timeOfFirstFailureMilliSec, timeOfLatestAttemptMilliSec;

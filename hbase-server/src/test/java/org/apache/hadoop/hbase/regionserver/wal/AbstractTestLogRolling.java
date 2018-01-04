@@ -23,25 +23,24 @@ import static org.junit.Assert.assertTrue;
 
 import java.io.IOException;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
-import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.HRegionInfo;
-import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.MiniHBaseCluster;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Admin;
+import org.apache.hadoop.hbase.client.ColumnFamilyDescriptorBuilder;
 import org.apache.hadoop.hbase.client.Get;
 import org.apache.hadoop.hbase.client.Put;
+import org.apache.hadoop.hbase.client.RegionInfo;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.Table;
+import org.apache.hadoop.hbase.client.TableDescriptor;
+import org.apache.hadoop.hbase.client.TableDescriptorBuilder;
+import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.HRegionServer;
-import org.apache.hadoop.hbase.regionserver.Region;
 import org.apache.hadoop.hbase.regionserver.Store;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.Threads;
@@ -56,12 +55,14 @@ import org.junit.BeforeClass;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TestName;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Test log deletion as logs are rolled.
  */
 public abstract class AbstractTestLogRolling  {
-  private static final Log LOG = LogFactory.getLog(AbstractTestLogRolling.class);
+  private static final Logger LOG = LoggerFactory.getLogger(AbstractTestLogRolling.class);
   protected HRegionServer server;
   protected String tableName;
   protected byte[] value;
@@ -88,31 +89,33 @@ public abstract class AbstractTestLogRolling  {
   // to the HDFS & HBase cluster startup.
   @BeforeClass
   public static void setUpBeforeClass() throws Exception {
-
-
     /**** configuration for testLogRolling ****/
     // Force a region split after every 768KB
-    TEST_UTIL.getConfiguration().setLong(HConstants.HREGION_MAX_FILESIZE, 768L * 1024L);
+    Configuration conf = TEST_UTIL.getConfiguration();
+    conf.setLong(HConstants.HREGION_MAX_FILESIZE, 768L * 1024L);
 
     // We roll the log after every 32 writes
-    TEST_UTIL.getConfiguration().setInt("hbase.regionserver.maxlogentries", 32);
+    conf.setInt("hbase.regionserver.maxlogentries", 32);
 
-    TEST_UTIL.getConfiguration().setInt("hbase.regionserver.logroll.errors.tolerated", 2);
-    TEST_UTIL.getConfiguration().setInt("hbase.rpc.timeout", 10 * 1000);
+    conf.setInt("hbase.regionserver.logroll.errors.tolerated", 2);
+    conf.setInt("hbase.rpc.timeout", 10 * 1000);
 
     // For less frequently updated regions flush after every 2 flushes
-    TEST_UTIL.getConfiguration().setInt("hbase.hregion.memstore.optionalflushcount", 2);
+    conf.setInt("hbase.hregion.memstore.optionalflushcount", 2);
 
     // We flush the cache after every 8192 bytes
-    TEST_UTIL.getConfiguration().setInt(
-        HConstants.HREGION_MEMSTORE_FLUSH_SIZE, 8192);
+    conf.setInt(HConstants.HREGION_MEMSTORE_FLUSH_SIZE, 8192);
 
     // Increase the amount of time between client retries
-    TEST_UTIL.getConfiguration().setLong("hbase.client.pause", 10 * 1000);
+    conf.setLong("hbase.client.pause", 10 * 1000);
 
     // Reduce thread wake frequency so that other threads can get
     // a chance to run.
-    TEST_UTIL.getConfiguration().setInt(HConstants.THREAD_WAKE_FREQUENCY, 2 * 1000);
+    conf.setInt(HConstants.THREAD_WAKE_FREQUENCY, 2 * 1000);
+
+    // disable low replication check for log roller to get a more stable result
+    // TestWALOpenAfterDNRollingStart will test this option.
+    conf.setLong("hbase.regionserver.hlog.check.lowreplication.interval", 24L * 60 * 60 * 1000);
   }
 
   @Before
@@ -122,7 +125,7 @@ public abstract class AbstractTestLogRolling  {
     cluster = TEST_UTIL.getHBaseCluster();
     dfsCluster = TEST_UTIL.getDFSCluster();
     fs = TEST_UTIL.getTestFileSystem();
-    admin = TEST_UTIL.getHBaseAdmin();
+    admin = TEST_UTIL.getAdmin();
 
     // disable region rebalancing (interferes with log watching)
     cluster.getMaster().balanceSwitch(false);
@@ -189,14 +192,13 @@ public abstract class AbstractTestLogRolling  {
     this.tableName = getName();
     // TODO: Why does this write data take for ever?
     startAndWriteData();
-    HRegionInfo region = server.getOnlineRegions(TableName.valueOf(tableName)).get(0)
-        .getRegionInfo();
+    RegionInfo region = server.getRegions(TableName.valueOf(tableName)).get(0).getRegionInfo();
     final WAL log = server.getWAL(region);
     LOG.info("after writing there are " + AbstractFSWALProvider.getNumRolledLogFiles(log) + " log files");
     assertLogFileSize(log);
 
     // flush all regions
-    for (Region r : server.getOnlineRegionsLocalContext()) {
+    for (HRegion r : server.getOnlineRegionsLocalContext()) {
       r.flush(true);
     }
 
@@ -249,7 +251,7 @@ public abstract class AbstractTestLogRolling  {
       table = createTestTable(getName());
 
       server = TEST_UTIL.getRSForFirstRegionInTable(table.getName());
-      Region region = server.getOnlineRegions(table.getName()).get(0);
+      HRegion region = server.getRegions(table.getName()).get(0);
       final WAL log = server.getWAL(region.getRegionInfo());
       Store s = region.getStore(HConstants.CATALOG_FAMILY);
 
@@ -305,8 +307,8 @@ public abstract class AbstractTestLogRolling  {
 
   protected Table createTestTable(String tableName) throws IOException {
     // Create the test table and open it
-    HTableDescriptor desc = new HTableDescriptor(TableName.valueOf(tableName));
-    desc.addFamily(new HColumnDescriptor(HConstants.CATALOG_FAMILY));
+    TableDescriptor desc = TableDescriptorBuilder.newBuilder(TableName.valueOf(getName()))
+        .addColumnFamily(ColumnFamilyDescriptorBuilder.of(HConstants.CATALOG_FAMILY)).build();
     admin.createTable(desc);
     return TEST_UTIL.getConnection().getTable(desc.getTableName());
   }

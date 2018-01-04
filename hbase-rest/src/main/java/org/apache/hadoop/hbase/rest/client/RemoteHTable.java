@@ -19,30 +19,23 @@
 
 package org.apache.hadoop.hbase.rest.client;
 
-import java.io.IOException;
-import java.io.InterruptedIOException;
-import java.io.UnsupportedEncodingException;
-import java.net.URLEncoder;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.TreeMap;
+import com.google.protobuf.Descriptors;
+import com.google.protobuf.Message;
+import com.google.protobuf.Service;
+import com.google.protobuf.ServiceException;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellUtil;
+import org.apache.hadoop.hbase.CompareOperator;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.TableName;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.hbase.client.Append;
 import org.apache.hadoop.hbase.client.Delete;
 import org.apache.hadoop.hbase.client.Durability;
@@ -55,8 +48,10 @@ import org.apache.hadoop.hbase.client.Row;
 import org.apache.hadoop.hbase.client.RowMutations;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.client.Table;
+import org.apache.hadoop.hbase.client.TableDescriptor;
 import org.apache.hadoop.hbase.client.coprocessor.Batch;
 import org.apache.hadoop.hbase.client.coprocessor.Batch.Callback;
+import org.apache.hadoop.hbase.client.metrics.ScanMetrics;
 import org.apache.hadoop.hbase.filter.CompareFilter.CompareOp;
 import org.apache.hadoop.hbase.io.TimeRange;
 import org.apache.hadoop.hbase.ipc.CoprocessorRpcChannel;
@@ -69,19 +64,28 @@ import org.apache.hadoop.hbase.rest.model.TableSchemaModel;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.util.StringUtils;
 
-import com.google.protobuf.Descriptors;
-import com.google.protobuf.Message;
-import com.google.protobuf.Service;
-import com.google.protobuf.ServiceException;
+import java.io.IOException;
+import java.io.InterruptedIOException;
+import java.io.UnsupportedEncodingException;
+import java.net.URLEncoder;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.concurrent.TimeUnit;
+
+import org.apache.hbase.thirdparty.com.google.common.base.Preconditions;
 
 /**
  * HTable interface to remote tables accessed via REST gateway
  */
 @InterfaceAudience.Public
-@InterfaceStability.Stable
 public class RemoteHTable implements Table {
 
-  private static final Log LOG = LogFactory.getLog(RemoteHTable.class);
+  private static final Logger LOG = LoggerFactory.getLogger(RemoteHTable.class);
 
   final Client client;
   final Configuration conf;
@@ -173,11 +177,11 @@ public class RemoteHTable implements Table {
   }
 
   protected Result[] buildResultFromModel(final CellSetModel model) {
-    List<Result> results = new ArrayList<Result>();
+    List<Result> results = new ArrayList<>();
     for (RowModel row: model.getRows()) {
-      List<Cell> kvs = new ArrayList<Cell>();
+      List<Cell> kvs = new ArrayList<>(row.getCells().size());
       for (CellModel cell: row.getCells()) {
-        byte[][] split = KeyValue.parseColumn(cell.getColumn());
+        byte[][] split = CellUtil.parseColumn(cell.getColumn());
         byte[] column = split[0];
         byte[] qualifier = null;
         if (split.length == 1) {
@@ -250,6 +254,7 @@ public class RemoteHTable implements Table {
   }
 
   @Override
+  @Deprecated
   public HTableDescriptor getTableDescriptor() throws IOException {
     StringBuilder sb = new StringBuilder();
     sb.append('/');
@@ -366,28 +371,14 @@ public class RemoteHTable implements Table {
     return (result != null && !(result.isEmpty()));
   }
 
-  /**
-   * exists(List) is really a list of get() calls. Just use get().
-   * @param gets list of Get to test for the existence
-   */
   @Override
-  public boolean[] existsAll(List<Get> gets) throws IOException {
+  public boolean[] exists(List<Get> gets) throws IOException {
     LOG.warn("exists(List<Get>) is really list of get() calls, just use get()");
     boolean[] results = new boolean[gets.size()];
     for (int i = 0; i < results.length; i++) {
       results[i] = exists(gets.get(i));
     }
     return results;
-  }
-
-  @Deprecated
-  public Boolean[] exists(List<Get> gets) throws IOException {
-    boolean[] results = existsAll(gets);
-    Boolean[] objectResults = new Boolean[results.length];
-    for (int i = 0; i < results.length; ++i) {
-      objectResults[i] = results[i];
-    }
-    return objectResults;
   }
 
   @Override
@@ -425,13 +416,12 @@ public class RemoteHTable implements Table {
     // ignores the row specification in the URI
 
     // separate puts by row
-    TreeMap<byte[],List<Cell>> map =
-      new TreeMap<byte[],List<Cell>>(Bytes.BYTES_COMPARATOR);
+    TreeMap<byte[],List<Cell>> map = new TreeMap<>(Bytes.BYTES_COMPARATOR);
     for (Put put: puts) {
       byte[] row = put.getRow();
       List<Cell> cells = map.get(row);
       if (cells == null) {
-        cells = new ArrayList<Cell>();
+        cells = new ArrayList<>();
         map.put(row, cells);
       }
       for (List<Cell> l: put.getFamilyCellMap().values()) {
@@ -508,6 +498,11 @@ public class RemoteHTable implements Table {
 
   public void flushCommits() throws IOException {
     // no-op
+  }
+
+  @Override
+  public TableDescriptor getDescriptor() throws IOException {
+    return getTableDescriptor();
   }
 
   class Scanner implements ResultScanner {
@@ -642,6 +637,11 @@ public class RemoteHTable implements Table {
     public boolean renewLease() {
       throw new RuntimeException("renewLease() not supported");
     }
+
+    @Override
+    public ScanMetrics getScanMetrics() {
+      throw new RuntimeException("getScanMetrics() not supported");
+    }
   }
 
   @Override
@@ -669,7 +669,13 @@ public class RemoteHTable implements Table {
   }
 
   @Override
+  @Deprecated
   public boolean checkAndPut(byte[] row, byte[] family, byte[] qualifier,
+      byte[] value, Put put) throws IOException {
+    return doCheckAndPut(row, family, qualifier, value, put);
+  }
+
+  private boolean doCheckAndPut(byte[] row, byte[] family, byte[] qualifier,
       byte[] value, Put put) throws IOException {
     // column to check-the-value
     put.add(new KeyValue(row, family, qualifier, value));
@@ -684,7 +690,7 @@ public class RemoteHTable implements Table {
 
     for (int i = 0; i < maxRetries; i++) {
       Response response = client.put(sb.toString(),
-        Constants.MIMETYPE_PROTOBUF, model.createProtobufOutput());
+          Constants.MIMETYPE_PROTOBUF, model.createProtobufOutput());
       int code = response.getCode();
       switch (code) {
       case 200:
@@ -706,13 +712,26 @@ public class RemoteHTable implements Table {
   }
 
   @Override
+  @Deprecated
   public boolean checkAndPut(byte[] row, byte[] family, byte[] qualifier,
       CompareOp compareOp, byte[] value, Put put) throws IOException {
     throw new IOException("checkAndPut for non-equal comparison not implemented");
   }
 
   @Override
+  @Deprecated
+  public boolean checkAndPut(byte[] row, byte[] family, byte[] qualifier,
+                             CompareOperator compareOp, byte[] value, Put put) throws IOException {
+    throw new IOException("checkAndPut for non-equal comparison not implemented");
+  }
+
+  @Override
   public boolean checkAndDelete(byte[] row, byte[] family, byte[] qualifier,
+      byte[] value, Delete delete) throws IOException {
+    return doCheckAndDelete(row, family, qualifier, value, delete);
+  }
+
+  private boolean doCheckAndDelete(byte[] row, byte[] family, byte[] qualifier,
       byte[] value, Delete delete) throws IOException {
     Put put = new Put(row);
     put.setFamilyCellMap(delete.getFamilyCellMap());
@@ -728,7 +747,7 @@ public class RemoteHTable implements Table {
 
     for (int i = 0; i < maxRetries; i++) {
       Response response = client.put(sb.toString(),
-        Constants.MIMETYPE_PROTOBUF, model.createProtobufOutput());
+          Constants.MIMETYPE_PROTOBUF, model.createProtobufOutput());
       int code = response.getCode();
       switch (code) {
       case 200:
@@ -750,9 +769,36 @@ public class RemoteHTable implements Table {
   }
 
   @Override
+  @Deprecated
   public boolean checkAndDelete(byte[] row, byte[] family, byte[] qualifier,
       CompareOp compareOp, byte[] value, Delete delete) throws IOException {
     throw new IOException("checkAndDelete for non-equal comparison not implemented");
+  }
+
+  @Override
+  @Deprecated
+  public boolean checkAndDelete(byte[] row, byte[] family, byte[] qualifier,
+                                CompareOperator compareOp, byte[] value, Delete delete) throws IOException {
+    throw new IOException("checkAndDelete for non-equal comparison not implemented");
+  }
+
+  @Override
+  public CheckAndMutateBuilder checkAndMutate(byte[] row, byte[] family) {
+    return new CheckAndMutateBuilderImpl(row, family);
+  }
+
+  @Override
+  @Deprecated
+  public boolean checkAndMutate(byte[] row, byte[] family, byte[] qualifier,
+      CompareOp compareOp, byte[] value, RowMutations rm) throws IOException {
+    throw new UnsupportedOperationException("checkAndMutate not implemented");
+  }
+
+  @Override
+  @Deprecated
+  public boolean checkAndMutate(byte[] row, byte[] family, byte[] qualifier,
+      CompareOperator compareOp, byte[] value, RowMutations rm) throws IOException {
+    throw new UnsupportedOperationException("checkAndMutate not implemented");
   }
 
   @Override
@@ -813,16 +859,6 @@ public class RemoteHTable implements Table {
   }
 
   @Override
-  public long getWriteBufferSize() {
-    throw new UnsupportedOperationException("getWriteBufferSize not implemented");
-  }
-
-  @Override
-  public void setWriteBufferSize(long writeBufferSize) throws IOException {
-    throw new IOException("setWriteBufferSize not supported");
-  }
-
-  @Override
   public <R extends Message> Map<byte[], R> batchCoprocessorService(
       Descriptors.MethodDescriptor method, Message request,
       byte[] startKey, byte[] endKey, R responsePrototype) throws ServiceException, Throwable {
@@ -837,17 +873,14 @@ public class RemoteHTable implements Table {
     throw new UnsupportedOperationException("batchCoprocessorService not implemented");
   }
 
-  @Override public boolean checkAndMutate(byte[] row, byte[] family, byte[] qualifier,
-      CompareOp compareOp, byte[] value, RowMutations rm) throws IOException {
-    throw new UnsupportedOperationException("checkAndMutate not implemented");
-  }
-
   @Override
+  @Deprecated
   public void setOperationTimeout(int operationTimeout) {
     throw new UnsupportedOperationException();
   }
 
   @Override
+  @Deprecated
   public int getOperationTimeout() {
     throw new UnsupportedOperationException();
   }
@@ -859,28 +892,52 @@ public class RemoteHTable implements Table {
   }
 
   @Override
+  public long getReadRpcTimeout(TimeUnit unit) {
+    throw new UnsupportedOperationException();
+  }
+
+  @Override
   @Deprecated
   public int getRpcTimeout() {
     throw new UnsupportedOperationException();
   }
 
   @Override
+  public long getRpcTimeout(TimeUnit unit) {
+    throw new UnsupportedOperationException();
+  }
+
+  @Override
+  @Deprecated
   public int getReadRpcTimeout() {
     throw new UnsupportedOperationException();
   }
 
   @Override
+  @Deprecated
   public void setReadRpcTimeout(int readRpcTimeout) {
     throw new UnsupportedOperationException();
   }
 
   @Override
+  public long getWriteRpcTimeout(TimeUnit unit) {
+    throw new UnsupportedOperationException();
+  }
+
+  @Override
+  @Deprecated
   public int getWriteRpcTimeout() {
     throw new UnsupportedOperationException();
   }
 
   @Override
+  @Deprecated
   public void setWriteRpcTimeout(int writeRpcTimeout) {
+    throw new UnsupportedOperationException();
+  }
+
+  @Override
+  public long getOperationTimeout(TimeUnit unit) {
     throw new UnsupportedOperationException();
   }
 
@@ -896,6 +953,64 @@ public class RemoteHTable implements Table {
       return URLEncoder.encode(new String(row, "UTF-8"), "UTF-8");
     } catch (UnsupportedEncodingException e) {
       throw new IllegalStateException("URLEncoder doesn't support UTF-8", e);
+    }
+  }
+
+  private class CheckAndMutateBuilderImpl implements CheckAndMutateBuilder {
+
+    private final byte[] row;
+    private final byte[] family;
+    private byte[] qualifier;
+    private byte[] value;
+
+    CheckAndMutateBuilderImpl(byte[] row, byte[] family) {
+      this.row = Preconditions.checkNotNull(row, "row is null");
+      this.family = Preconditions.checkNotNull(family, "family is null");
+    }
+
+    @Override
+    public CheckAndMutateBuilder qualifier(byte[] qualifier) {
+      this.qualifier = Preconditions.checkNotNull(qualifier, "qualifier is null. Consider using" +
+          " an empty byte array, or just do not call this method if you want a null qualifier");
+      return this;
+    }
+
+    @Override
+    public CheckAndMutateBuilder ifNotExists() {
+      throw new UnsupportedOperationException("CheckAndMutate for non-equal comparison "
+          + "not implemented");
+    }
+
+    @Override
+    public CheckAndMutateBuilder ifMatches(CompareOperator compareOp, byte[] value) {
+      if (compareOp == CompareOperator.EQUAL) {
+        this.value = Preconditions.checkNotNull(value, "value is null");
+        return this;
+      } else {
+        throw new UnsupportedOperationException("CheckAndMutate for non-equal comparison " +
+            "not implemented");
+      }
+    }
+
+    @Override
+    public CheckAndMutateBuilder ifEquals(byte[] value) {
+      this.value = Preconditions.checkNotNull(value, "value is null");
+      return this;
+    }
+
+    @Override
+    public boolean thenPut(Put put) throws IOException {
+      return doCheckAndPut(row, family, qualifier, value, put);
+    }
+
+    @Override
+    public boolean thenDelete(Delete delete) throws IOException {
+      return doCheckAndDelete(row, family, qualifier, value, delete);
+    }
+
+    @Override
+    public boolean thenMutate(RowMutations mutation) throws IOException {
+      throw new UnsupportedOperationException("thenMutate not implemented");
     }
   }
 }

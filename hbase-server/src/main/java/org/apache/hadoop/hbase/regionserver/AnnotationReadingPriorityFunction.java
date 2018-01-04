@@ -21,11 +21,11 @@ import java.lang.reflect.Method;
 import java.util.HashMap;
 import java.util.Map;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.hbase.ipc.PriorityFunction;
 import org.apache.hadoop.hbase.ipc.QosPriority;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.CloseRegionRequest;
@@ -33,16 +33,15 @@ import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.CompactRegi
 import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.FlushRegionRequest;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.GetRegionInfoRequest;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.GetStoreFileRequest;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.SplitRegionRequest;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos.GetRequest;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos.MutateRequest;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos.ScanRequest;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos.RegionSpecifier;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.RPCProtos.RequestHeader;
 
-import com.google.common.annotations.VisibleForTesting;
-import org.apache.hadoop.hbase.shaded.com.google.protobuf.Message;
-import org.apache.hadoop.hbase.shaded.com.google.protobuf.TextFormat;
+import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
+import org.apache.hbase.thirdparty.com.google.protobuf.Message;
+import org.apache.hbase.thirdparty.com.google.protobuf.TextFormat;
 import org.apache.hadoop.hbase.security.User;
 
 /**
@@ -68,8 +67,8 @@ import org.apache.hadoop.hbase.security.User;
 //to figure out whether it is a meta region or not.
 @InterfaceAudience.Private
 public class AnnotationReadingPriorityFunction implements PriorityFunction {
-  private static final Log LOG =
-    LogFactory.getLog(AnnotationReadingPriorityFunction.class.getName());
+  private static final Logger LOG =
+    LoggerFactory.getLogger(AnnotationReadingPriorityFunction.class.getName());
 
   /** Used to control the scan delay, currently sqrt(numNextCall * weight) */
   public static final String SCAN_VTIME_WEIGHT_CONF_KEY = "hbase.ipc.server.scan.vtime.weight";
@@ -84,7 +83,6 @@ public class AnnotationReadingPriorityFunction implements PriorityFunction {
       GetStoreFileRequest.class,
       CloseRegionRequest.class,
       FlushRegionRequest.class,
-      SplitRegionRequest.class,
       CompactRegionRequest.class,
       GetRequest.class,
       MutateRequest.class,
@@ -92,10 +90,8 @@ public class AnnotationReadingPriorityFunction implements PriorityFunction {
   };
 
   // Some caches for helping performance
-  private final Map<String, Class<? extends Message>> argumentToClassMap =
-    new HashMap<String, Class<? extends Message>>();
-  private final Map<String, Map<Class<? extends Message>, Method>> methodMap =
-    new HashMap<String, Map<Class<? extends Message>, Method>>();
+  private final Map<String, Class<? extends Message>> argumentToClassMap = new HashMap<>();
+  private final Map<String, Map<Class<? extends Message>, Method>> methodMap = new HashMap<>();
 
   private final float scanVirtualTimeWeight;
 
@@ -121,7 +117,7 @@ public class AnnotationReadingPriorityFunction implements PriorityFunction {
    */
   public AnnotationReadingPriorityFunction(final RSRpcServices rpcServices,
       Class<? extends RSRpcServices> clz) {
-    Map<String,Integer> qosMap = new HashMap<String,Integer>();
+    Map<String,Integer> qosMap = new HashMap<>();
     for (Method m : clz.getMethods()) {
       QosPriority p = m.getAnnotation(QosPriority.class);
       if (p != null) {
@@ -137,8 +133,8 @@ public class AnnotationReadingPriorityFunction implements PriorityFunction {
     this.rpcServices = rpcServices;
     this.annotatedQos = qosMap;
     if (methodMap.get("getRegion") == null) {
-      methodMap.put("hasRegion", new HashMap<Class<? extends Message>, Method>());
-      methodMap.put("getRegion", new HashMap<Class<? extends Message>, Method>());
+      methodMap.put("hasRegion", new HashMap<>());
+      methodMap.put("getRegion", new HashMap<>());
     }
     for (Class<? extends Message> cls : knownArgumentClasses) {
       argumentToClassMap.put(cls.getName(), cls);
@@ -222,7 +218,7 @@ public class AnnotationReadingPriorityFunction implements PriorityFunction {
         Method getRegion = methodMap.get("getRegion").get(rpcArgClass);
         regionSpecifier = (RegionSpecifier)getRegion.invoke(param, (Object[])null);
         Region region = rpcServices.getRegion(regionSpecifier);
-        if (region.getRegionInfo().isSystemTable()) {
+        if (region.getRegionInfo().getTable().isSystemTable()) {
           if (LOG.isTraceEnabled()) {
             LOG.trace("High priority because region=" +
               region.getRegionInfo().getRegionNameAsString());
@@ -243,7 +239,7 @@ public class AnnotationReadingPriorityFunction implements PriorityFunction {
         return HConstants.NORMAL_QOS;
       }
       RegionScanner scanner = rpcServices.getScanner(request.getScannerId());
-      if (scanner != null && scanner.getRegionInfo().isSystemTable()) {
+      if (scanner != null && scanner.getRegionInfo().getTable().isSystemTable()) {
         if (LOG.isTraceEnabled()) {
           // Scanner requests are small in size so TextFormat version should not overwhelm log.
           LOG.trace("High priority scanner request " + TextFormat.shortDebugString(request));

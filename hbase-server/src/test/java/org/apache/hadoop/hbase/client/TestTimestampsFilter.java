@@ -25,8 +25,6 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.*;
 import org.apache.hadoop.hbase.filter.Filter;
 import org.apache.hadoop.hbase.filter.TimestampsFilter;
@@ -37,8 +35,12 @@ import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.Before;
 import org.junit.BeforeClass;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.junit.rules.TestName;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Run tests related to {@link TimestampsFilter} using HBase client APIs.
@@ -47,8 +49,11 @@ import org.junit.experimental.categories.Category;
  */
 @Category({MediumTests.class, ClientTests.class})
 public class TestTimestampsFilter {
-  private static final Log LOG = LogFactory.getLog(TestTimestampsFilter.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestTimestampsFilter.class);
   private final static HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
+
+  @Rule
+  public TestName name = new TestName();
 
   /**
    * @throws java.lang.Exception
@@ -92,7 +97,7 @@ public class TestTimestampsFilter {
    */
   @Test
   public void testTimestampsFilter() throws Exception {
-    byte [] TABLE = Bytes.toBytes("testTimestampsFilter");
+    final byte [] TABLE = Bytes.toBytes(name.getMethodName());
     byte [] FAMILY = Bytes.toBytes("event_log");
     byte [][] FAMILIES = new byte[][] { FAMILY };
     Cell kvs[];
@@ -140,7 +145,7 @@ public class TestTimestampsFilter {
 
     // Request an empty list of versions using the Timestamps filter;
     // Should return none.
-    kvs = getNVersions(ht, FAMILY, 2, 2, new ArrayList<Long>());
+    kvs = getNVersions(ht, FAMILY, 2, 2, new ArrayList<>());
     assertEquals(0, kvs == null? 0: kvs.length);
 
     //
@@ -168,7 +173,7 @@ public class TestTimestampsFilter {
 
   @Test
   public void testMultiColumns() throws Exception {
-    byte [] TABLE = Bytes.toBytes("testTimestampsFilterMultiColumns");
+    final byte [] TABLE = Bytes.toBytes(name.getMethodName());
     byte [] FAMILY = Bytes.toBytes("event_log");
     byte [][] FAMILIES = new byte[][] { FAMILY };
 
@@ -187,7 +192,7 @@ public class TestTimestampsFilter {
     p.addColumn(FAMILY, Bytes.toBytes("column4"), (long) 3, Bytes.toBytes("value4-3"));
     ht.put(p);
 
-    ArrayList<Long> timestamps = new ArrayList<Long>();
+    ArrayList<Long> timestamps = new ArrayList<>();
     timestamps.add(new Long(3));
     TimestampsFilter filter = new TimestampsFilter(timestamps);
 
@@ -227,7 +232,7 @@ public class TestTimestampsFilter {
   }
 
   private void testWithVersionDeletes(boolean flushTables) throws IOException {
-    byte [] TABLE = Bytes.toBytes("testWithVersionDeletes_" +
+    final byte [] TABLE = Bytes.toBytes(name.getMethodName() + "_" +
                                    (flushTables ? "flush" : "noflush")); 
     byte [] FAMILY = Bytes.toBytes("event_log");
     byte [][] FAMILIES = new byte[][] { FAMILY };

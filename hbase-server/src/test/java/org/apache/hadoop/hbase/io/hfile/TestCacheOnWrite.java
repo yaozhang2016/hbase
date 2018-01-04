@@ -34,13 +34,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.Random;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.ArrayBackedTag;
-import org.apache.hadoop.hbase.CellComparator;
+import org.apache.hadoop.hbase.CellComparatorImpl;
+import org.apache.hadoop.hbase.HBaseCommonTestingUtility;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HConstants;
@@ -70,8 +69,9 @@ import org.junit.experimental.categories.Category;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 import org.junit.runners.Parameterized.Parameters;
-
-import com.google.common.collect.Lists;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.apache.hbase.thirdparty.com.google.common.collect.Lists;
 
 /**
  * Tests {@link HFile} cache-on-write functionality for the following block
@@ -81,7 +81,7 @@ import com.google.common.collect.Lists;
 @Category({IOTests.class, MediumTests.class})
 public class TestCacheOnWrite {
 
-  private static final Log LOG = LogFactory.getLog(TestCacheOnWrite.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestCacheOnWrite.class);
 
   private static final HBaseTestingUtility TEST_UTIL = HBaseTestingUtility.createLocalHTU();
   private Configuration conf;
@@ -154,7 +154,7 @@ public class TestCacheOnWrite {
 
   private static List<BlockCache> getBlockCaches() throws IOException {
     Configuration conf = TEST_UTIL.getConfiguration();
-    List<BlockCache> blockcaches = new ArrayList<BlockCache>();
+    List<BlockCache> blockcaches = new ArrayList<>();
     // default
     blockcaches.add(new CacheConfig(conf).getBlockCache());
 
@@ -176,10 +176,10 @@ public class TestCacheOnWrite {
 
   @Parameters
   public static Collection<Object[]> getParameters() throws IOException {
-    List<Object[]> params = new ArrayList<Object[]>();
+    List<Object[]> params = new ArrayList<>();
     for (BlockCache blockCache : getBlockCaches()) {
       for (CacheOnWriteType cowType : CacheOnWriteType.values()) {
-        for (Compression.Algorithm compress : HBaseTestingUtility.COMPRESSION_ALGORITHMS) {
+        for (Compression.Algorithm compress : HBaseCommonTestingUtility.COMPRESSION_ALGORITHMS) {
           for (boolean cacheCompressedData : new boolean[] { false, true }) {
             params.add(new Object[] { cowType, compress, cacheCompressedData, blockCache });
           }
@@ -229,7 +229,7 @@ public class TestCacheOnWrite {
         new CacheConfig(blockCache, true, true, cowType.shouldBeCached(BlockType.DATA),
         cowType.shouldBeCached(BlockType.LEAF_INDEX),
         cowType.shouldBeCached(BlockType.BLOOM_CHUNK), false, cacheCompressedData,
-            false, false, false);
+            false, false);
   }
 
   @After
@@ -248,7 +248,7 @@ public class TestCacheOnWrite {
   }
 
   private void readStoreFile(boolean useTags) throws IOException {
-    HFile.Reader reader = HFile.createReader(fs, storeFilePath, cacheConf, conf);
+    HFile.Reader reader = HFile.createReader(fs, storeFilePath, cacheConf, true, conf);
     LOG.info("HFile information: " + reader);
     HFileContext meta = new HFileContextBuilder().withCompression(compress)
       .withBytesPerCheckSum(CKBYTES).withChecksumType(ChecksumType.NULL)
@@ -261,12 +261,11 @@ public class TestCacheOnWrite {
     assertTrue(testDescription, scanner.seekTo());
 
     long offset = 0;
-    EnumMap<BlockType, Integer> blockCountByType =
-        new EnumMap<BlockType, Integer>(BlockType.class);
+    EnumMap<BlockType, Integer> blockCountByType = new EnumMap<>(BlockType.class);
 
     DataBlockEncoding encodingInCache = NoOpDataBlockEncoder.INSTANCE.getDataBlockEncoding();
-    List<Long> cachedBlocksOffset = new ArrayList<Long>();
-    Map<Long, HFileBlock> cachedBlocks = new HashMap<Long, HFileBlock>();
+    List<Long> cachedBlocksOffset = new ArrayList<>();
+    Map<Long, HFileBlock> cachedBlocks = new HashMap<>();
     while (offset < reader.getTrailer().getLoadOnOpenDataOffset()) {
       // Flags: don't cache the block, use pread, this is not a compaction.
       // Also, pass null for expected block type to avoid checking it.
@@ -372,7 +371,7 @@ public class TestCacheOnWrite {
         .withDataBlockEncoding(NoOpDataBlockEncoder.INSTANCE.getDataBlockEncoding())
         .withIncludesTags(useTags).build();
     StoreFileWriter sfw = new StoreFileWriter.Builder(conf, cacheConf, fs)
-        .withOutputDir(storeFileParentDir).withComparator(CellComparator.COMPARATOR)
+        .withOutputDir(storeFileParentDir).withComparator(CellComparatorImpl.COMPARATOR)
         .withFileContext(meta)
         .withBloomType(BLOOM_TYPE).withMaxKeyCount(NUM_KV).build();
     byte[] cf = Bytes.toBytes("fam");
@@ -383,7 +382,7 @@ public class TestCacheOnWrite {
       KeyValue kv;
       if(useTags) {
         Tag t = new ArrayBackedTag((byte) 1, "visibility");
-        List<Tag> tagList = new ArrayList<Tag>();
+        List<Tag> tagList = new ArrayList<>();
         tagList.add(t);
         Tag[] tags = new Tag[1];
         tags[0] = t;
@@ -411,7 +410,7 @@ public class TestCacheOnWrite {
     final String cf = "myCF";
     final byte[] cfBytes = Bytes.toBytes(cf);
     final int maxVersions = 3;
-    Region region = TEST_UTIL.createTestRegion(table, 
+    HRegion region = TEST_UTIL.createTestRegion(table,
         new HColumnDescriptor(cf)
             .setCompressionType(compress)
             .setBloomFilterType(BLOOM_TYPE)

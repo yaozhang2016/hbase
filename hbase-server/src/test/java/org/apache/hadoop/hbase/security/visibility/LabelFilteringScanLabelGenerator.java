@@ -20,7 +20,7 @@ package org.apache.hadoop.hbase.security.visibility;
 import java.util.ArrayList;
 import java.util.List;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.security.User;
 
@@ -44,7 +44,7 @@ public class LabelFilteringScanLabelGenerator implements ScanLabelGenerator {
   public List<String> getLabels(User user, Authorizations authorizations) {
     if (authorizations != null) {
       if (labelToFilter == null) return authorizations.getLabels();
-      List<String> newAuths = new ArrayList<String>();
+      List<String> newAuths = new ArrayList<>();
       for (String auth : authorizations.getLabels()) {
         if (!labelToFilter.equals(auth)) newAuths.add(auth);
       }

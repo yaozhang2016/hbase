@@ -36,20 +36,16 @@ import java.util.Set;
 
 import org.apache.hadoop.hbase.client.Get;
 import org.apache.hadoop.hbase.client.Scan;
-import org.apache.hadoop.hbase.exceptions.DeserializationException;
 import org.apache.hadoop.hbase.filter.BinaryComparator;
-import org.apache.hadoop.hbase.filter.CompareFilter.CompareOp;
 import org.apache.hadoop.hbase.filter.Filter;
 import org.apache.hadoop.hbase.filter.PrefixFilter;
 import org.apache.hadoop.hbase.filter.RowFilter;
 import org.apache.hadoop.hbase.io.TimeRange;
 import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.ZooKeeperProtos.SplitLogTask.RecoveryMode;
 import org.apache.hadoop.hbase.testclassification.MiscTests;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.apache.hadoop.hbase.util.Bytes;
-import org.apache.hadoop.hbase.util.Writables;
 import org.apache.hadoop.io.DataInputBuffer;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
@@ -121,17 +117,8 @@ public class TestSerialization {
 
   }
 
-  @Test
-  public void testSplitLogTask() throws DeserializationException {
-    SplitLogTask slt = new SplitLogTask.Unassigned(ServerName.valueOf("mgr,1,1"), 
-      RecoveryMode.LOG_REPLAY);
-    byte [] bytes = slt.toByteArray();
-    SplitLogTask sltDeserialized = SplitLogTask.parseFrom(bytes);
-    assertTrue(slt.equals(sltDeserialized));
-  }
-
   @Test public void testCompareFilter() throws Exception {
-    Filter f = new RowFilter(CompareOp.EQUAL,
+    Filter f = new RowFilter(CompareOperator.EQUAL,
       new BinaryComparator(Bytes.toBytes("testRowOne-2")));
     byte [] bytes = f.toByteArray();
     Filter ff = RowFilter.parseFrom(bytes);
@@ -571,7 +558,7 @@ public class TestSerialization {
   protected static final byte [][] COLUMNS = {fam1, fam2, fam3};
 
   /**
-   * Create a table of name <code>name</code> with {@link COLUMNS} for
+   * Create a table of name <code>name</code> with {@link #COLUMNS} for
    * families.
    * @param name Name to give table.
    * @return Column descriptor.
@@ -581,7 +568,7 @@ public class TestSerialization {
   }
 
   /**
-   * Create a table of name <code>name</code> with {@link COLUMNS} for
+   * Create a table of name <code>name</code> with {@link #COLUMNS} for
    * families.
    * @param name Name to give table.
    * @param versions How many versions to allow per column.

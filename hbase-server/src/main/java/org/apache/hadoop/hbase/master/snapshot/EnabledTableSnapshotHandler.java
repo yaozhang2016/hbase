@@ -22,20 +22,20 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.ServerName;
+import org.apache.hadoop.hbase.client.RegionInfo;
 import org.apache.hadoop.hbase.errorhandling.ForeignException;
 import org.apache.hadoop.hbase.master.MasterServices;
+import org.apache.hadoop.hbase.mob.MobUtils;
 import org.apache.hadoop.hbase.procedure.Procedure;
 import org.apache.hadoop.hbase.procedure.ProcedureCoordinator;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos.SnapshotDescription;
 import org.apache.hadoop.hbase.snapshot.HBaseSnapshotException;
 import org.apache.hadoop.hbase.util.Pair;
-
-import com.google.common.collect.Lists;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.apache.hbase.thirdparty.com.google.common.collect.Lists;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.SnapshotProtos.SnapshotDescription;
 
 /**
  * Handle the master side of taking a snapshot of an online table, regardless of snapshot type.
@@ -45,7 +45,7 @@ import com.google.common.collect.Lists;
 @InterfaceAudience.Private
 public class EnabledTableSnapshotHandler extends TakeSnapshotHandler {
 
-  private static final Log LOG = LogFactory.getLog(EnabledTableSnapshotHandler.class);
+  private static final Logger LOG = LoggerFactory.getLogger(EnabledTableSnapshotHandler.class);
   private final ProcedureCoordinator coordinator;
 
   public EnabledTableSnapshotHandler(SnapshotDescription snapshot, MasterServices master,
@@ -68,12 +68,12 @@ public class EnabledTableSnapshotHandler extends TakeSnapshotHandler {
    * phases to complete.
    */
   @Override
-  protected void snapshotRegions(List<Pair<HRegionInfo, ServerName>> regions)
+  protected void snapshotRegions(List<Pair<RegionInfo, ServerName>> regions)
       throws HBaseSnapshotException, IOException {
-    Set<String> regionServers = new HashSet<String>(regions.size());
-    for (Pair<HRegionInfo, ServerName> region : regions) {
+    Set<String> regionServers = new HashSet<>(regions.size());
+    for (Pair<RegionInfo, ServerName> region : regions) {
       if (region != null && region.getFirst() != null && region.getSecond() != null) {
-        HRegionInfo hri = region.getFirst();
+        RegionInfo hri = region.getFirst();
         if (hri.isOffline() && (hri.isSplit() || hri.isSplitParent())) continue;
         regionServers.add(region.getSecond().toString());
       }
@@ -96,12 +96,20 @@ public class EnabledTableSnapshotHandler extends TakeSnapshotHandler {
       LOG.info("Done waiting - online snapshot for " + this.snapshot.getName());
 
       // Take the offline regions as disabled
-      for (Pair<HRegionInfo, ServerName> region : regions) {
-        HRegionInfo regionInfo = region.getFirst();
+      for (Pair<RegionInfo, ServerName> region : regions) {
+        RegionInfo regionInfo = region.getFirst();
         if (regionInfo.isOffline() && (regionInfo.isSplit() || regionInfo.isSplitParent())) {
           LOG.info("Take disabled snapshot of offline region=" + regionInfo);
           snapshotDisabledRegion(regionInfo);
         }
+      }
+      // handle the mob files if any.
+      boolean mobEnabled = MobUtils.hasMobColumns(htd);
+      if (mobEnabled) {
+        LOG.info("Taking snapshot for mob files in table " + htd.getTableName());
+        // snapshot the mob files as a offline region.
+        RegionInfo mobRegionInfo = MobUtils.getMobRegionInfo(htd.getTableName());
+        snapshotMobRegion(mobRegionInfo);
       }
     } catch (InterruptedException e) {
       ForeignException ee =
@@ -111,5 +119,15 @@ public class EnabledTableSnapshotHandler extends TakeSnapshotHandler {
     } catch (ForeignException e) {
       monitor.receive(e);
     }
+  }
+
+  /**
+   * Takes a snapshot of the mob region
+   */
+  private void snapshotMobRegion(final RegionInfo regionInfo)
+      throws IOException {
+    snapshotManifest.addMobRegion(regionInfo);
+    monitor.rethrowException();
+    status.setStatus("Completed referencing HFiles for the mob region of table: " + snapshotTable);
   }
 }

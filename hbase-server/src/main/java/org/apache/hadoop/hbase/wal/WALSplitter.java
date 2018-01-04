@@ -1,4 +1,4 @@
-/**
+/*
  *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -24,9 +24,9 @@ import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.text.ParseException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
-import java.util.HashSet;
-import java.util.LinkedList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.NavigableSet;
@@ -43,14 +43,14 @@ import java.util.concurrent.Future;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.apache.commons.collections.CollectionUtils;
+import org.apache.commons.collections.MapUtils;
+import org.apache.commons.lang3.ArrayUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileAlreadyExistsException;
 import org.apache.hadoop.fs.FileStatus;
@@ -60,55 +60,26 @@ import org.apache.hadoop.fs.PathFilter;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellScanner;
 import org.apache.hadoop.hbase.CellUtil;
-import org.apache.hadoop.hbase.CoordinatedStateManager;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.HRegionInfo;
-import org.apache.hadoop.hbase.HRegionLocation;
-import org.apache.hadoop.hbase.MetaTableAccessor;
-import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
-import org.apache.hadoop.hbase.TableNotFoundException;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.client.ClusterConnection;
-import org.apache.hadoop.hbase.client.ConnectionFactory;
-import org.apache.hadoop.hbase.client.ConnectionUtils;
 import org.apache.hadoop.hbase.client.Delete;
 import org.apache.hadoop.hbase.client.Durability;
 import org.apache.hadoop.hbase.client.Mutation;
 import org.apache.hadoop.hbase.client.Put;
-import org.apache.hadoop.hbase.client.TableState;
-import org.apache.hadoop.hbase.coordination.BaseCoordinatedStateManager;
-import org.apache.hadoop.hbase.coordination.ZKSplitLogManagerCoordination;
-import org.apache.hadoop.hbase.exceptions.RegionOpeningException;
+import org.apache.hadoop.hbase.coordination.SplitLogWorkerCoordination;
 import org.apache.hadoop.hbase.io.HeapSize;
+import org.apache.hadoop.hbase.log.HBaseMarkers;
 import org.apache.hadoop.hbase.master.SplitLogManager;
 import org.apache.hadoop.hbase.monitoring.MonitoredTask;
 import org.apache.hadoop.hbase.monitoring.TaskMonitor;
 import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.LastSequenceId;
 import org.apache.hadoop.hbase.regionserver.wal.AbstractFSWAL;
-import org.apache.hadoop.hbase.regionserver.wal.HLogKey;
 import org.apache.hadoop.hbase.regionserver.wal.WALCellCodec;
-import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
-import org.apache.hadoop.hbase.regionserver.wal.WALEditsReplaySink;
-import org.apache.hadoop.hbase.shaded.com.google.protobuf.TextFormat;
-import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.shaded.protobuf.RequestConverter;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.AdminService.BlockingInterface;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.GetRegionInfoRequest;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.GetRegionInfoResponse;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.WALEntry;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos.MutationProto.MutationType;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.ClusterStatusProtos.RegionStoreSequenceIds;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.ClusterStatusProtos.StoreSequenceId;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.WALProtos.CompactionDescriptor;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.ZooKeeperProtos.SplitLogTask.RecoveryMode;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.CancelableProgressable;
 import org.apache.hadoop.hbase.util.ClassSize;
-import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.hadoop.hbase.util.FSUtils;
 import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.hbase.util.Threads;
@@ -118,19 +89,28 @@ import org.apache.hadoop.hbase.wal.WALProvider.Writer;
 import org.apache.hadoop.hbase.zookeeper.ZKSplitLog;
 import org.apache.hadoop.io.MultipleIOException;
 import org.apache.hadoop.ipc.RemoteException;
+import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
+import org.apache.hbase.thirdparty.com.google.common.base.Preconditions;
+import org.apache.hbase.thirdparty.com.google.common.collect.Lists;
+import org.apache.hbase.thirdparty.com.google.protobuf.TextFormat;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Preconditions;
-import com.google.common.collect.Lists;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.WALEntry;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos.MutationProto.MutationType;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ClusterStatusProtos.RegionStoreSequenceIds;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ClusterStatusProtos.StoreSequenceId;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos;
 
 /**
  * This class is responsible for splitting up a bunch of regionserver commit log
- * files that are no longer being written to, into new files, one per region for
- * region to replay on startup. Delete the old log files when finished.
+ * files that are no longer being written to, into new files, one per region, for
+ * recovering data on startup. Delete the old log files when finished.
  */
 @InterfaceAudience.Private
 public class WALSplitter {
-  private static final Log LOG = LogFactory.getLog(WALSplitter.class);
+  private static final Logger LOG = LoggerFactory.getLogger(WALSplitter.class);
 
   /** By default we retry errors in splitting, rather than skipping. */
   public static final boolean SPLIT_SKIP_ERRORS_DEFAULT = false;
@@ -142,13 +122,10 @@ public class WALSplitter {
 
   // Major subcomponents of the split process.
   // These are separated into inner classes to make testing easier.
-  PipelineController controller;
   OutputSink outputSink;
-  EntryBuffers entryBuffers;
+  private EntryBuffers entryBuffers;
 
-  private Map<TableName, TableState> tableStatesCache =
-      new ConcurrentHashMap<>();
-  private BaseCoordinatedStateManager csm;
+  private SplitLogWorkerCoordination splitLogWorkerCoordination;
   private final WALFactory walFactory;
 
   private MonitoredTask status;
@@ -156,31 +133,25 @@ public class WALSplitter {
   // For checking the latest flushed sequence id
   protected final LastSequenceId sequenceIdChecker;
 
-  protected boolean distributedLogReplay;
-
   // Map encodedRegionName -> lastFlushedSequenceId
-  protected Map<String, Long> lastFlushedSequenceIds = new ConcurrentHashMap<String, Long>();
+  protected Map<String, Long> lastFlushedSequenceIds = new ConcurrentHashMap<>();
 
   // Map encodedRegionName -> maxSeqIdInStores
-  protected Map<String, Map<byte[], Long>> regionMaxSeqIdInStores =
-      new ConcurrentHashMap<String, Map<byte[], Long>>();
-
-  // Failed region server that the wal file being split belongs to
-  protected String failedServerName = "";
-
-  // Number of writer threads
-  private final int numWriterThreads;
-
-  // Min batch size when replay WAL edits
-  private final int minBatchSize;
+  protected Map<String, Map<byte[], Long>> regionMaxSeqIdInStores = new ConcurrentHashMap<>();
 
   // the file being split currently
   private FileStatus fileBeingSplit;
 
+  // if we limit the number of writers opened for sinking recovered edits
+  private final boolean splitWriterCreationBounded;
+
+  public final static String SPLIT_WRITER_CREATION_BOUNDED = "hbase.split.writer.creation.bounded";
+
+
   @VisibleForTesting
   WALSplitter(final WALFactory factory, Configuration conf, Path rootDir,
       FileSystem fs, LastSequenceId idChecker,
-      CoordinatedStateManager csm, RecoveryMode mode) {
+      SplitLogWorkerCoordination splitLogWorkerCoordination) {
     this.conf = HBaseConfiguration.create(conf);
     String codecClassName = conf
         .get(WALCellCodec.WAL_CELL_CODEC_CLASS_KEY, WALCellCodec.class.getName());
@@ -188,30 +159,24 @@ public class WALSplitter {
     this.rootDir = rootDir;
     this.fs = fs;
     this.sequenceIdChecker = idChecker;
-    this.csm = (BaseCoordinatedStateManager)csm;
+    this.splitLogWorkerCoordination = splitLogWorkerCoordination;
+
     this.walFactory = factory;
-    this.controller = new PipelineController();
+    PipelineController controller = new PipelineController();
+
+    this.splitWriterCreationBounded = conf.getBoolean(SPLIT_WRITER_CREATION_BOUNDED, false);
 
     entryBuffers = new EntryBuffers(controller,
-        this.conf.getInt("hbase.regionserver.hlog.splitlog.buffersize",
-            128*1024*1024));
+        this.conf.getInt("hbase.regionserver.hlog.splitlog.buffersize", 128 * 1024 * 1024),
+        splitWriterCreationBounded);
 
-    // a larger minBatchSize may slow down recovery because replay writer has to wait for
-    // enough edits before replaying them
-    this.minBatchSize = this.conf.getInt("hbase.regionserver.wal.logreplay.batch.size", 64);
-    this.distributedLogReplay = (RecoveryMode.LOG_REPLAY == mode);
-
-    this.numWriterThreads = this.conf.getInt("hbase.regionserver.hlog.splitlog.writer.threads", 3);
-    if (csm != null && this.distributedLogReplay) {
-      outputSink = new LogReplayOutputSink(controller, entryBuffers, numWriterThreads);
-    } else {
-      if (this.distributedLogReplay) {
-        LOG.info("ZooKeeperWatcher is passed in as NULL so disable distrubitedLogRepaly.");
-      }
-      this.distributedLogReplay = false;
+    int numWriterThreads = this.conf.getInt("hbase.regionserver.hlog.splitlog.writer.threads", 3);
+    if(splitWriterCreationBounded){
+      outputSink = new BoundedLogWriterCreationOutputSink(
+          controller, entryBuffers, numWriterThreads);
+    }else {
       outputSink = new LogRecoveredEditsOutputSink(controller, entryBuffers, numWriterThreads);
     }
-
   }
 
   /**
@@ -220,20 +185,14 @@ public class WALSplitter {
    * <p>
    * If the log file has N regions then N recovered.edits files will be produced.
    * <p>
-   * @param rootDir
-   * @param logfile
-   * @param fs
-   * @param conf
-   * @param reporter
-   * @param idChecker
-   * @param cp coordination state manager
    * @return false if it is interrupted by the progress-able.
-   * @throws IOException
    */
   public static boolean splitLogFile(Path rootDir, FileStatus logfile, FileSystem fs,
       Configuration conf, CancelableProgressable reporter, LastSequenceId idChecker,
-      CoordinatedStateManager cp, RecoveryMode mode, final WALFactory factory) throws IOException {
-    WALSplitter s = new WALSplitter(factory, conf, rootDir, fs, idChecker, cp, mode);
+      SplitLogWorkerCoordination splitLogWorkerCoordination, final WALFactory factory)
+      throws IOException {
+    WALSplitter s = new WALSplitter(factory, conf, rootDir, fs, idChecker,
+        splitLogWorkerCoordination);
     return s.splitLogFile(logfile, reporter);
   }
 
@@ -246,11 +205,10 @@ public class WALSplitter {
       FileSystem fs, Configuration conf, final WALFactory factory) throws IOException {
     final FileStatus[] logfiles = SplitLogManager.getFileList(conf,
         Collections.singletonList(logDir), null);
-    List<Path> splits = new ArrayList<Path>();
-    if (logfiles != null && logfiles.length > 0) {
+    List<Path> splits = new ArrayList<>();
+    if (ArrayUtils.isNotEmpty(logfiles)) {
       for (FileStatus logfile: logfiles) {
-        WALSplitter s = new WALSplitter(factory, conf, rootDir, fs, null, null,
-            RecoveryMode.LOG_SPLITTING);
+        WALSplitter s = new WALSplitter(factory, conf, rootDir, fs, null, null);
         if (s.splitLogFile(logfile, null)) {
           finishSplitLogFile(rootDir, oldLogDir, logfile.getPath(), conf);
           if (s.outputSink.splits != null) {
@@ -284,29 +242,21 @@ public class WALSplitter {
     int editsCount = 0;
     int editsSkipped = 0;
 
-    status =
-        TaskMonitor.get().createStatus(
+    status = TaskMonitor.get().createStatus(
           "Splitting log file " + logfile.getPath() + "into a temporary staging area.");
-    Reader in = null;
+    Reader logFileReader = null;
     this.fileBeingSplit = logfile;
     try {
       long logLength = logfile.getLen();
-      LOG.info("Splitting wal: " + logPath + ", length=" + logLength);
-      LOG.info("DistributedLogReplay = " + this.distributedLogReplay);
+      LOG.info("Splitting WAL={}, length={}", logPath, logLength);
       status.setStatus("Opening log file");
       if (reporter != null && !reporter.progress()) {
         progress_failed = true;
         return false;
       }
-      try {
-        in = getReader(logfile, skipErrors, reporter);
-      } catch (CorruptedLogFileException e) {
-        LOG.warn("Could not get reader, corrupted log file " + logPath, e);
-        ZKSplitLog.markCorrupted(rootDir, logfile.getPath().getName(), fs);
-        isCorrupted = true;
-      }
-      if (in == null) {
-        LOG.warn("Nothing to split in log file " + logPath);
+      logFileReader = getReader(logfile, skipErrors, reporter);
+      if (logFileReader == null) {
+        LOG.warn("Nothing to split in WAL={}", logPath);
         return true;
       }
       int numOpenedFilesBeforeReporting = conf.getInt("hbase.splitlog.report.openedfiles", 3);
@@ -316,27 +266,14 @@ public class WALSplitter {
       outputSinkStarted = true;
       Entry entry;
       Long lastFlushedSequenceId = -1L;
-      ServerName serverName = AbstractFSWALProvider.getServerNameFromWALDirectoryName(logPath);
-      failedServerName = (serverName == null) ? "" : serverName.getServerName();
-      while ((entry = getNextLogLine(in, logPath, skipErrors)) != null) {
+      while ((entry = getNextLogLine(logFileReader, logPath, skipErrors)) != null) {
         byte[] region = entry.getKey().getEncodedRegionName();
         String encodedRegionNameAsStr = Bytes.toString(region);
         lastFlushedSequenceId = lastFlushedSequenceIds.get(encodedRegionNameAsStr);
         if (lastFlushedSequenceId == null) {
-          if (this.distributedLogReplay) {
-            RegionStoreSequenceIds ids =
-                csm.getSplitLogWorkerCoordination().getRegionFlushedSequenceId(failedServerName,
-                  encodedRegionNameAsStr);
-            if (ids != null) {
-              lastFlushedSequenceId = ids.getLastFlushedSequenceId();
-              if (LOG.isDebugEnabled()) {
-                LOG.debug("DLR Last flushed sequenceid for " + encodedRegionNameAsStr + ": " +
-                  TextFormat.shortDebugString(ids));
-              }
-            }
-          } else if (sequenceIdChecker != null) {
+          if (sequenceIdChecker != null) {
             RegionStoreSequenceIds ids = sequenceIdChecker.getLastSequenceId(region);
-            Map<byte[], Long> maxSeqIdInStores = new TreeMap<byte[], Long>(Bytes.BYTES_COMPARATOR);
+            Map<byte[], Long> maxSeqIdInStores = new TreeMap<>(Bytes.BYTES_COMPARATOR);
             for (StoreSequenceId storeSeqId : ids.getStoreSequenceIdList()) {
               maxSeqIdInStores.put(storeSeqId.getFamilyName().toByteArray(),
                 storeSeqId.getSequenceId());
@@ -383,25 +320,26 @@ public class WALSplitter {
       iie.initCause(ie);
       throw iie;
     } catch (CorruptedLogFileException e) {
-      LOG.warn("Could not parse, corrupted log file " + logPath, e);
-      if (this.csm != null) {
+      LOG.warn("Could not parse, corrupted WAL={}", logPath, e);
+      if (splitLogWorkerCoordination != null) {
         // Some tests pass in a csm of null.
-        this.csm.getSplitLogWorkerCoordination().markCorrupted(rootDir,
-          logfile.getPath().getName(), fs);
+        splitLogWorkerCoordination.markCorrupted(rootDir, logfile.getPath().getName(), fs);
+      } else {
+        // for tests only
+        ZKSplitLog.markCorrupted(rootDir, logfile.getPath().getName(), fs);
       }
       isCorrupted = true;
     } catch (IOException e) {
       e = e instanceof RemoteException ? ((RemoteException) e).unwrapRemoteException() : e;
       throw e;
     } finally {
-      LOG.debug("Finishing writing output logs and closing down.");
+      LOG.debug("Finishing writing output logs and closing down");
       try {
-        if (null != in) {
-          in.close();
+        if (null != logFileReader) {
+          logFileReader.close();
         }
       } catch (IOException exception) {
-        LOG.warn("Could not close wal reader: " + exception.getMessage());
-        LOG.debug("exception details", exception);
+        LOG.warn("Could not close WAL reader", exception);
       }
       try {
         if (outputSinkStarted) {
@@ -436,7 +374,7 @@ public class WALSplitter {
    */
   public static void finishSplitLogFile(String logfile,
       Configuration conf)  throws IOException {
-    Path rootdir = FSUtils.getRootDir(conf);
+    Path rootdir = FSUtils.getWALRootDir(conf);
     Path oldLogDir = new Path(rootdir, HConstants.HREGION_OLDLOGDIR_NAME);
     Path logPath;
     if (FSUtils.isStartingWithPath(rootdir, logfile)) {
@@ -449,8 +387,8 @@ public class WALSplitter {
 
   private static void finishSplitLogFile(Path rootdir, Path oldLogDir,
       Path logPath, Configuration conf) throws IOException {
-    List<Path> processedLogs = new ArrayList<Path>();
-    List<Path> corruptedLogs = new ArrayList<Path>();
+    List<Path> processedLogs = new ArrayList<>();
+    List<Path> corruptedLogs = new ArrayList<>();
     FileSystem fs;
     fs = rootdir.getFileSystem(conf);
     if (ZKSplitLog.isCorrupted(rootdir, logPath.getName(), fs)) {
@@ -479,13 +417,13 @@ public class WALSplitter {
       final List<Path> corruptedLogs,
       final List<Path> processedLogs, final Path oldLogDir,
       final FileSystem fs, final Configuration conf) throws IOException {
-    final Path corruptDir = new Path(FSUtils.getRootDir(conf), HConstants.CORRUPT_DIR_NAME);
+    final Path corruptDir = new Path(FSUtils.getWALRootDir(conf), HConstants.CORRUPT_DIR_NAME);
     if (conf.get("hbase.regionserver.hlog.splitlog.corrupt.dir") != null) {
-      LOG.warn("hbase.regionserver.hlog.splitlog.corrupt.dir is deprecated. Default to "
-          + corruptDir);
+      LOG.warn("hbase.regionserver.hlog.splitlog.corrupt.dir is deprecated. Default to {}",
+          corruptDir);
     }
     if (!fs.mkdirs(corruptDir)) {
-      LOG.info("Unable to mkdir " + corruptDir);
+      LOG.info("Unable to mkdir {}", corruptDir);
     }
     fs.mkdirs(oldLogDir);
 
@@ -495,9 +433,9 @@ public class WALSplitter {
       Path p = new Path(corruptDir, corrupted.getName());
       if (fs.exists(corrupted)) {
         if (!fs.rename(corrupted, p)) {
-          LOG.warn("Unable to move corrupted log " + corrupted + " to " + p);
+          LOG.warn("Unable to move corrupted log {} to {}", corrupted, p);
         } else {
-          LOG.warn("Moved corrupted log " + corrupted + " to " + p);
+          LOG.warn("Moved corrupted log {} to {}", corrupted, p);
         }
       }
     }
@@ -506,9 +444,9 @@ public class WALSplitter {
       Path newPath = AbstractFSWAL.getWALArchivePath(oldLogDir, p);
       if (fs.exists(p)) {
         if (!FSUtils.renameAndSetModifyTime(fs, p, newPath)) {
-          LOG.warn("Unable to move  " + p + " to " + newPath);
+          LOG.warn("Unable to move {} to {}", p, newPath);
         } else {
-          LOG.info("Archived processed log " + p + " to " + newPath);
+          LOG.info("Archived processed log {} to {}", p, newPath);
         }
       }
     }
@@ -538,9 +476,9 @@ public class WALSplitter {
     Path dir = getRegionDirRecoveredEditsDir(regiondir);
 
     if (!fs.exists(regiondir)) {
-      LOG.info("This region's directory doesn't exist: "
-          + regiondir.toString() + ". It is very likely that it was" +
-          " already split so it's safe to discard those edits.");
+      LOG.info("This region's directory does not exist: {}."
+          + "It is very likely that it was already split so it is "
+          + "safe to discard those edits.", regiondir);
       return null;
     }
     if (fs.exists(dir) && fs.isFile(dir)) {
@@ -550,16 +488,16 @@ public class WALSplitter {
       }
       tmp = new Path(tmp,
         HConstants.RECOVERED_EDITS_DIR + "_" + encodedRegionName);
-      LOG.warn("Found existing old file: " + dir + ". It could be some "
+      LOG.warn("Found existing old file: {}. It could be some "
         + "leftover of an old installation. It should be a folder instead. "
-        + "So moving it to " + tmp);
+        + "So moving it to {}", dir, tmp);
       if (!fs.rename(dir, tmp)) {
-        LOG.warn("Failed to sideline old file " + dir);
+        LOG.warn("Failed to sideline old file {}", dir);
       }
     }
 
     if (!fs.exists(dir) && !fs.mkdirs(dir)) {
-      LOG.warn("mkdir failed on " + dir);
+      LOG.warn("mkdir failed on {}", dir);
     }
     // Append fileBeingSplit to prevent name conflict since we may have duplicate wal entries now.
     // Append file name ends with RECOVERED_LOG_TMPFILE_SUFFIX to ensure
@@ -616,10 +554,11 @@ public class WALSplitter {
    */
   public static NavigableSet<Path> getSplitEditFilesSorted(final FileSystem fs,
       final Path regiondir) throws IOException {
-    NavigableSet<Path> filesSorted = new TreeSet<Path>();
+    NavigableSet<Path> filesSorted = new TreeSet<>();
     Path editsdir = getRegionDirRecoveredEditsDir(regiondir);
-    if (!fs.exists(editsdir))
+    if (!fs.exists(editsdir)) {
       return filesSorted;
+    }
     FileStatus[] files = FSUtils.listStatus(fs, editsdir, new PathFilter() {
       @Override
       public boolean accept(Path p) {
@@ -641,16 +580,13 @@ public class WALSplitter {
             result = false;
           }
         } catch (IOException e) {
-          LOG.warn("Failed isFile check on " + p);
+          LOG.warn("Failed isFile check on {}", p, e);
         }
         return result;
       }
     });
-    if (files == null) {
-      return filesSorted;
-    }
-    for (FileStatus status : files) {
-      filesSorted.add(status.getPath());
+    if (ArrayUtils.isNotEmpty(files)) {
+      Arrays.asList(files).forEach(status -> filesSorted.add(status.getPath()));
     }
     return filesSorted;
   }
@@ -669,7 +605,7 @@ public class WALSplitter {
     Path moveAsideName = new Path(edits.getParent(), edits.getName() + "."
         + System.currentTimeMillis());
     if (!fs.rename(edits, moveAsideName)) {
-      LOG.warn("Rename failed from " + edits + " to " + moveAsideName);
+      LOG.warn("Rename failed from {} to {}", edits, moveAsideName);
     }
     return moveAsideName;
   }
@@ -692,13 +628,14 @@ public class WALSplitter {
    * @param fs
    * @param regiondir
    * @param newSeqId
-   * @param saftyBumper
+   * @param safetyBumper
    * @return long new sequence Id value
    * @throws IOException
    */
   public static long writeRegionSequenceIdFile(final FileSystem fs, final Path regiondir,
-      long newSeqId, long saftyBumper) throws IOException {
-
+      long newSeqId, long safetyBumper) throws IOException {
+    // TODO: Why are we using a method in here as part of our normal region open where
+    // there is no splitting involved? Fix. St.Ack 01/20/2017.
     Path editsdir = WALSplitter.getRegionDirRecoveredEditsDir(regiondir);
     long maxSeqId = 0;
     FileStatus[] files = null;
@@ -713,11 +650,12 @@ public class WALSplitter {
         for (FileStatus status : files) {
           String fileName = status.getPath().getName();
           try {
-            Long tmpSeqId = Long.parseLong(fileName.substring(0, fileName.length()
+            long tmpSeqId =
+                Long.parseLong(fileName.substring(0, fileName.length()
                 - SEQUENCE_ID_FILE_SUFFIX_LENGTH));
             maxSeqId = Math.max(tmpSeqId, maxSeqId);
           } catch (NumberFormatException ex) {
-            LOG.warn("Invalid SeqId File Name=" + fileName);
+            LOG.warn("Invalid SeqId File Name={}", fileName);
           }
         }
       }
@@ -725,7 +663,7 @@ public class WALSplitter {
     if (maxSeqId > newSeqId) {
       newSeqId = maxSeqId;
     }
-    newSeqId += saftyBumper; // bump up SeqId
+    newSeqId += safetyBumper; // bump up SeqId
 
     // write a new seqId file
     Path newSeqIdFile = new Path(editsdir, newSeqId + SEQUENCE_ID_FILE_SUFFIX);
@@ -734,10 +672,8 @@ public class WALSplitter {
         if (!fs.createNewFile(newSeqIdFile) && !fs.exists(newSeqIdFile)) {
           throw new IOException("Failed to create SeqId file:" + newSeqIdFile);
         }
-        if (LOG.isDebugEnabled()) {
-          LOG.debug("Wrote region seqId=" + newSeqIdFile + " to file, newSeqId=" + newSeqId
-              + ", maxSeqId=" + maxSeqId);
-        }
+        LOG.debug("Wrote file={}, newSeqId={}, maxSeqId={}", newSeqIdFile,
+            newSeqId, maxSeqId);
       } catch (FileAlreadyExistsException ignored) {
         // latest hdfs throws this exception. it's all right if newSeqIdFile already exists
       }
@@ -745,10 +681,9 @@ public class WALSplitter {
     // remove old ones
     if (files != null) {
       for (FileStatus status : files) {
-        if (newSeqIdFile.equals(status.getPath())) {
-          continue;
+        if (!newSeqIdFile.equals(status.getPath())) {
+          fs.delete(status.getPath(), false);
         }
-        fs.delete(status.getPath(), false);
       }
     }
     return newSeqId;
@@ -772,7 +707,7 @@ public class WALSplitter {
     // zero length even if the file has been sync'd. Revisit if HDFS-376 or
     // HDFS-878 is committed.
     if (length <= 0) {
-      LOG.warn("File " + path + " might be still open, length is 0");
+      LOG.warn("File {} might be still open, length is 0", path);
     }
 
     try {
@@ -786,17 +721,15 @@ public class WALSplitter {
           // ignore if this is the last log in sequence.
           // TODO is this scenario still possible if the log has been
           // recovered (i.e. closed)
-          LOG.warn("Could not open " + path + " for reading. File is empty", e);
-          return null;
-        } else {
-          // EOFException being ignored
-          return null;
+          LOG.warn("Could not open {} for reading. File is empty", path, e);
         }
+        // EOFException being ignored
+        return null;
       }
     } catch (IOException e) {
       if (e instanceof FileNotFoundException) {
         // A wal file may not exist anymore. Nothing can be recovered so move on
-        LOG.warn("File " + path + " doesn't exist anymore.", e);
+        LOG.warn("File {} does not exist anymore", path, e);
         return null;
       }
       if (!skipErrors || e instanceof InterruptedIOException) {
@@ -817,7 +750,7 @@ public class WALSplitter {
       return in.next();
     } catch (EOFException eof) {
       // truncated files are expected if a RS crashes (see HBASE-2643)
-      LOG.info("EOF from wal " + path + ".  continuing");
+      LOG.info("EOF from wal {}. Continuing.", path);
       return null;
     } catch (IOException e) {
       // If the IOE resulted from bad file format,
@@ -825,8 +758,7 @@ public class WALSplitter {
       if (e.getCause() != null &&
           (e.getCause() instanceof ParseException ||
            e.getCause() instanceof org.apache.hadoop.fs.ChecksumException)) {
-        LOG.warn("Parse exception " + e.getCause().toString() + " from wal "
-           + path + ".  continuing");
+        LOG.warn("Parse exception from wal {}. Continuing", path, e);
         return null;
       }
       if (!skipErrors) {
@@ -874,7 +806,7 @@ public class WALSplitter {
   public static class PipelineController {
     // If an exception is thrown by one of the other threads, it will be
     // stored here.
-    AtomicReference<Throwable> thrown = new AtomicReference<Throwable>();
+    AtomicReference<Throwable> thrown = new AtomicReference<>();
 
     // Wait/notify for when data has been produced by the writer thread,
     // consumed by the reader thread, or an exception occurred
@@ -908,20 +840,26 @@ public class WALSplitter {
   public static class EntryBuffers {
     PipelineController controller;
 
-    Map<byte[], RegionEntryBuffer> buffers =
-      new TreeMap<byte[], RegionEntryBuffer>(Bytes.BYTES_COMPARATOR);
+    Map<byte[], RegionEntryBuffer> buffers = new TreeMap<>(Bytes.BYTES_COMPARATOR);
 
     /* Track which regions are currently in the middle of writing. We don't allow
        an IO thread to pick up bytes from a region if we're already writing
        data for that region in a different IO thread. */
-    Set<byte[]> currentlyWriting = new TreeSet<byte[]>(Bytes.BYTES_COMPARATOR);
+    Set<byte[]> currentlyWriting = new TreeSet<>(Bytes.BYTES_COMPARATOR);
 
     long totalBuffered = 0;
     long maxHeapUsage;
+    boolean splitWriterCreationBounded;
 
     public EntryBuffers(PipelineController controller, long maxHeapUsage) {
+      this(controller, maxHeapUsage, false);
+    }
+
+    public EntryBuffers(PipelineController controller, long maxHeapUsage,
+        boolean splitWriterCreationBounded){
       this.controller = controller;
       this.maxHeapUsage = maxHeapUsage;
+      this.splitWriterCreationBounded = splitWriterCreationBounded;
     }
 
     /**
@@ -949,8 +887,7 @@ public class WALSplitter {
       synchronized (controller.dataAvailable) {
         totalBuffered += incrHeap;
         while (totalBuffered > maxHeapUsage && controller.thrown.get() == null) {
-          LOG.debug("Used " + totalBuffered +
-              " bytes of buffered edits, waiting for IO threads...");
+          LOG.debug("Used {} bytes of buffered edits, waiting for IO threads", totalBuffered);
           controller.dataAvailable.wait(2000);
         }
         controller.dataAvailable.notifyAll();
@@ -959,9 +896,16 @@ public class WALSplitter {
     }
 
     /**
-     * @return RegionEntryBuffer a buffer of edits to be written or replayed.
+     * @return RegionEntryBuffer a buffer of edits to be written.
      */
     synchronized RegionEntryBuffer getChunkToWrite() {
+      // The core part of limiting opening writers is it doesn't return chunk only if the
+      // heap size is over maxHeapUsage. Thus it doesn't need to create a writer for each
+      // region during splitting. It will flush all the logs in the buffer after splitting
+      // through a threadpool, which means the number of writers it created is under control.
+      if (splitWriterCreationBounded && totalBuffered < maxHeapUsage) {
+        return null;
+      }
       long biggestSize = 0;
       byte[] biggestBufferKey = null;
 
@@ -1005,7 +949,7 @@ public class WALSplitter {
           try {
             controller.dataAvailable.wait(2000);
           } catch (InterruptedException e) {
-            LOG.warn("Got intrerrupted while waiting for EntryBuffers is drained");
+            LOG.warn("Got interrupted while waiting for EntryBuffers is drained");
             Thread.interrupted();
             break;
           }
@@ -1029,7 +973,7 @@ public class WALSplitter {
     RegionEntryBuffer(TableName tableName, byte[] region) {
       this.tableName = tableName;
       this.encodedRegionName = region;
-      this.entryBuffer = new LinkedList<Entry>();
+      this.entryBuffer = new ArrayList<>();
     }
 
     long appendEntry(Entry entry) {
@@ -1043,7 +987,7 @@ public class WALSplitter {
     }
 
     private void internify(Entry entry) {
-      WALKey k = entry.getKey();
+      WALKeyImpl k = entry.getKey();
       k.internTableName(this.tableName);
       k.internEncodedRegionName(this.encodedRegionName);
     }
@@ -1090,7 +1034,7 @@ public class WALSplitter {
     }
 
     private void doRun() throws IOException {
-      if (LOG.isTraceEnabled()) LOG.trace("Writer thread starting");
+      LOG.trace("Writer thread starting");
       while (true) {
         RegionEntryBuffer buffer = entryBuffers.getChunkToWrite();
         if (buffer == null) {
@@ -1132,25 +1076,24 @@ public class WALSplitter {
   }
 
   /**
-   * The following class is an abstraction class to provide a common interface to support both
-   * existing recovered edits file sink and region server WAL edits replay sink
+   * The following class is an abstraction class to provide a common interface to support
+   * different ways of consuming recovered edits.
    */
   public static abstract class OutputSink {
 
     protected PipelineController controller;
     protected EntryBuffers entryBuffers;
 
-    protected Map<byte[], SinkWriter> writers = Collections
-        .synchronizedMap(new TreeMap<byte[], SinkWriter>(Bytes.BYTES_COMPARATOR));;
+    protected ConcurrentHashMap<String, SinkWriter> writers = new ConcurrentHashMap<>();
+    protected ConcurrentHashMap<String, Long> regionMaximumEditLogSeqNum =
+        new ConcurrentHashMap<>();
 
-    protected final Map<byte[], Long> regionMaximumEditLogSeqNum = Collections
-        .synchronizedMap(new TreeMap<byte[], Long>(Bytes.BYTES_COMPARATOR));
 
     protected final List<WriterThread> writerThreads = Lists.newArrayList();
 
     /* Set of regions which we've decided should not output edits */
     protected final Set<byte[]> blacklistedRegions = Collections
-        .synchronizedSet(new TreeSet<byte[]>(Bytes.BYTES_COMPARATOR));
+        .synchronizedSet(new TreeSet<>(Bytes.BYTES_COMPARATOR));
 
     protected boolean closeAndCleanCompleted = false;
 
@@ -1191,17 +1134,12 @@ public class WALSplitter {
      */
     void updateRegionMaximumEditLogSeqNum(Entry entry) {
       synchronized (regionMaximumEditLogSeqNum) {
-        Long currentMaxSeqNum = regionMaximumEditLogSeqNum.get(entry.getKey()
-            .getEncodedRegionName());
+        String regionName = Bytes.toString(entry.getKey().getEncodedRegionName());
+        Long currentMaxSeqNum = regionMaximumEditLogSeqNum.get(regionName);
         if (currentMaxSeqNum == null || entry.getKey().getSequenceId() > currentMaxSeqNum) {
-          regionMaximumEditLogSeqNum.put(entry.getKey().getEncodedRegionName(), entry.getKey()
-              .getSequenceId());
+          regionMaximumEditLogSeqNum.put(regionName, entry.getKey().getSequenceId());
         }
       }
-    }
-
-    Long getRegionMaximumEditLogSeqNum(byte[] region) {
-      return regionMaximumEditLogSeqNum.get(region);
     }
 
     /**
@@ -1245,7 +1183,7 @@ public class WALSplitter {
         }
       }
       controller.checkForErrors();
-      LOG.info(this.writerThreads.size() + " split writers finished; closing...");
+      LOG.info("{} split writers finished; closing.", this.writerThreads.size());
       return (!progress_failed);
     }
 
@@ -1312,7 +1250,7 @@ public class WALSplitter {
       } finally {
         result = close();
         List<IOException> thrown = closeLogWriters(null);
-        if (thrown != null && !thrown.isEmpty()) {
+        if (CollectionUtils.isNotEmpty(thrown)) {
           throw MultipleIOException.createIOException(thrown);
         }
       }
@@ -1331,25 +1269,22 @@ public class WALSplitter {
           dstMinLogSeqNum = entry.getKey().getSequenceId();
         }
       } catch (EOFException e) {
-        if (LOG.isDebugEnabled()) {
-          LOG.debug(
-            "Got EOF when reading first WAL entry from " + dst + ", an empty or broken WAL file?",
-            e);
-        }
+        LOG.debug("Got EOF when reading first WAL entry from {}, an empty or broken WAL file?",
+            dst, e);
       }
       if (wap.minLogSeqNum < dstMinLogSeqNum) {
         LOG.warn("Found existing old edits file. It could be the result of a previous failed"
             + " split attempt or we have duplicated wal entries. Deleting " + dst + ", length="
             + fs.getFileStatus(dst).getLen());
         if (!fs.delete(dst, false)) {
-          LOG.warn("Failed deleting of old " + dst);
+          LOG.warn("Failed deleting of old {}", dst);
           throw new IOException("Failed deleting of old " + dst);
         }
       } else {
         LOG.warn("Found existing old edits file and we have less entries. Deleting " + wap.p
             + ", length=" + fs.getFileStatus(wap.p).getLen());
         if (!fs.delete(wap.p, false)) {
-          LOG.warn("Failed deleting of " + wap.p);
+          LOG.warn("Failed deleting of {}", wap.p);
           throw new IOException("Failed deleting of " + wap.p);
         }
       }
@@ -1359,88 +1294,24 @@ public class WALSplitter {
      * Close all of the output streams.
      * @return the list of paths written.
      */
-    private List<Path> close() throws IOException {
+    List<Path> close() throws IOException {
       Preconditions.checkState(!closeAndCleanCompleted);
 
-      final List<Path> paths = new ArrayList<Path>();
+      final List<Path> paths = new ArrayList<>();
       final List<IOException> thrown = Lists.newArrayList();
-      ThreadPoolExecutor closeThreadPool = Threads.getBoundedCachedThreadPool(numThreads, 30L,
-        TimeUnit.SECONDS, new ThreadFactory() {
-          private int count = 1;
+      ThreadPoolExecutor closeThreadPool = Threads
+          .getBoundedCachedThreadPool(numThreads, 30L, TimeUnit.SECONDS, new ThreadFactory() {
+            private int count = 1;
 
-          @Override
-          public Thread newThread(Runnable r) {
-            Thread t = new Thread(r, "split-log-closeStream-" + count++);
-            return t;
-          }
-        });
-      CompletionService<Void> completionService =
-        new ExecutorCompletionService<Void>(closeThreadPool);
-      for (final Map.Entry<byte[], SinkWriter> writersEntry : writers.entrySet()) {
-        if (LOG.isTraceEnabled()) {
-          LOG.trace("Submitting close of " + ((WriterAndPath)writersEntry.getValue()).p);
-        }
-        completionService.submit(new Callable<Void>() {
-          @Override
-          public Void call() throws Exception {
-            WriterAndPath wap = (WriterAndPath) writersEntry.getValue();
-            if (LOG.isTraceEnabled()) LOG.trace("Closing " + wap.p);
-            try {
-              wap.w.close();
-            } catch (IOException ioe) {
-              LOG.error("Couldn't close log at " + wap.p, ioe);
-              thrown.add(ioe);
-              return null;
+            @Override public Thread newThread(Runnable r) {
+              Thread t = new Thread(r, "split-log-closeStream-" + count++);
+              return t;
             }
-            if (LOG.isDebugEnabled()) {
-              LOG.debug("Closed wap " + wap.p + " (wrote " + wap.editsWritten
-                + " edits, skipped " + wap.editsSkipped + " edits in "
-                + (wap.nanosSpent / 1000 / 1000) + "ms");
-            }
-            if (wap.editsWritten == 0) {
-              // just remove the empty recovered.edits file
-              if (fs.exists(wap.p) && !fs.delete(wap.p, false)) {
-                LOG.warn("Failed deleting empty " + wap.p);
-                throw new IOException("Failed deleting empty  " + wap.p);
-              }
-              return null;
-            }
-
-            Path dst = getCompletedRecoveredEditsFilePath(wap.p,
-              regionMaximumEditLogSeqNum.get(writersEntry.getKey()));
-            try {
-              if (!dst.equals(wap.p) && fs.exists(dst)) {
-                deleteOneWithFewerEntries(wap, dst);
-              }
-              // Skip the unit tests which create a splitter that reads and
-              // writes the data without touching disk.
-              // TestHLogSplit#testThreading is an example.
-              if (fs.exists(wap.p)) {
-                if (!fs.rename(wap.p, dst)) {
-                  throw new IOException("Failed renaming " + wap.p + " to " + dst);
-                }
-                LOG.info("Rename " + wap.p + " to " + dst);
-              }
-            } catch (IOException ioe) {
-              LOG.error("Couldn't rename " + wap.p + " to " + dst, ioe);
-              thrown.add(ioe);
-              return null;
-            }
-            paths.add(dst);
-            return null;
-          }
-        });
-      }
-
-      boolean progress_failed = false;
+          });
+      CompletionService<Void> completionService = new ExecutorCompletionService<>(closeThreadPool);
+      boolean progress_failed;
       try {
-        for (int i = 0, n = this.writers.size(); i < n; i++) {
-          Future<Void> future = completionService.take();
-          future.get();
-          if (!progress_failed && reporter != null && !reporter.progress()) {
-            progress_failed = true;
-          }
-        }
+        progress_failed = executeCloseTask(completionService, thrown, paths);
       } catch (InterruptedException e) {
         IOException iie = new InterruptedIOException();
         iie.initCause(e);
@@ -1450,7 +1321,6 @@ public class WALSplitter {
       } finally {
         closeThreadPool.shutdownNow();
       }
-
       if (!thrown.isEmpty()) {
         throw MultipleIOException.createIOException(thrown);
       }
@@ -1462,11 +1332,90 @@ public class WALSplitter {
       return paths;
     }
 
+    /**
+     * @param completionService threadPool to execute the closing tasks
+     * @param thrown store the exceptions
+     * @param paths arrayList to store the paths written
+     * @return if close tasks executed successful
+     */
+    boolean executeCloseTask(CompletionService<Void> completionService,
+        List<IOException> thrown, List<Path> paths)
+        throws InterruptedException, ExecutionException {
+      for (final Map.Entry<String, SinkWriter> writersEntry : writers.entrySet()) {
+        if (LOG.isTraceEnabled()) {
+          LOG.trace("Submitting close of " + ((WriterAndPath) writersEntry.getValue()).p);
+        }
+        completionService.submit(new Callable<Void>() {
+          @Override public Void call() throws Exception {
+            WriterAndPath wap = (WriterAndPath) writersEntry.getValue();
+            Path dst = closeWriter(writersEntry.getKey(), wap, thrown);
+            paths.add(dst);
+            return null;
+          }
+        });
+      }
+      boolean progress_failed = false;
+      for (int i = 0, n = this.writers.size(); i < n; i++) {
+        Future<Void> future = completionService.take();
+        future.get();
+        if (!progress_failed && reporter != null && !reporter.progress()) {
+          progress_failed = true;
+        }
+      }
+      return progress_failed;
+    }
+
+    Path closeWriter(String encodedRegionName, WriterAndPath wap,
+        List<IOException> thrown) throws IOException{
+      LOG.trace("Closing {}", wap.p);
+      try {
+        wap.w.close();
+      } catch (IOException ioe) {
+        LOG.error("Could not close log at {}", wap.p, ioe);
+        thrown.add(ioe);
+        return null;
+      }
+      if (LOG.isDebugEnabled()) {
+        LOG.debug("Closed wap " + wap.p + " (wrote " + wap.editsWritten
+            + " edits, skipped " + wap.editsSkipped + " edits in "
+            + (wap.nanosSpent / 1000 / 1000) + "ms");
+      }
+      if (wap.editsWritten == 0) {
+        // just remove the empty recovered.edits file
+        if (fs.exists(wap.p) && !fs.delete(wap.p, false)) {
+          LOG.warn("Failed deleting empty {}", wap.p);
+          throw new IOException("Failed deleting empty  " + wap.p);
+        }
+        return null;
+      }
+
+      Path dst = getCompletedRecoveredEditsFilePath(wap.p,
+          regionMaximumEditLogSeqNum.get(encodedRegionName));
+      try {
+        if (!dst.equals(wap.p) && fs.exists(dst)) {
+          deleteOneWithFewerEntries(wap, dst);
+        }
+        // Skip the unit tests which create a splitter that reads and
+        // writes the data without touching disk.
+        // TestHLogSplit#testThreading is an example.
+        if (fs.exists(wap.p)) {
+          if (!fs.rename(wap.p, dst)) {
+            throw new IOException("Failed renaming " + wap.p + " to " + dst);
+          }
+          LOG.info("Rename {} to {}", wap.p, dst);
+        }
+      } catch (IOException ioe) {
+        LOG.error("Could not rename {} to {}", wap.p, dst, ioe);
+        thrown.add(ioe);
+        return null;
+      }
+      return dst;
+    }
+
     private List<IOException> closeLogWriters(List<IOException> thrown) throws IOException {
       if (writersClosed) {
         return thrown;
       }
-
       if (thrown == null) {
         thrown = Lists.newArrayList();
       }
@@ -1485,20 +1434,19 @@ public class WALSplitter {
           }
         }
       } finally {
-        synchronized (writers) {
-          WriterAndPath wap = null;
-          for (SinkWriter tmpWAP : writers.values()) {
-            try {
-              wap = (WriterAndPath) tmpWAP;
-              wap.w.close();
-            } catch (IOException ioe) {
-              LOG.error("Couldn't close log at " + wap.p, ioe);
-              thrown.add(ioe);
-              continue;
-            }
-            LOG.info("Closed log " + wap.p + " (wrote " + wap.editsWritten + " edits in "
-                + (wap.nanosSpent / 1000 / 1000) + "ms)");
+        WriterAndPath wap = null;
+        for (SinkWriter tmpWAP : writers.values()) {
+          try {
+            wap = (WriterAndPath) tmpWAP;
+            wap.w.close();
+          } catch (IOException ioe) {
+            LOG.error("Couldn't close log at {}", wap.p, ioe);
+            thrown.add(ioe);
+            continue;
           }
+          LOG.info(
+              "Closed log " + wap.p + " (wrote " + wap.editsWritten + " edits in " + (wap.nanosSpent
+                  / 1000 / 1000) + "ms)");
         }
         writersClosed = true;
       }
@@ -1511,9 +1459,10 @@ public class WALSplitter {
      * long as multiple threads are always acting on different regions.
      * @return null if this region shouldn't output any logs
      */
-    private WriterAndPath getWriterAndPath(Entry entry) throws IOException {
+    WriterAndPath getWriterAndPath(Entry entry, boolean reusable) throws IOException {
       byte region[] = entry.getKey().getEncodedRegionName();
-      WriterAndPath ret = (WriterAndPath) writers.get(region);
+      String regionName = Bytes.toString(region);
+      WriterAndPath ret = (WriterAndPath) writers.get(regionName);
       if (ret != null) {
         return ret;
       }
@@ -1527,14 +1476,16 @@ public class WALSplitter {
         blacklistedRegions.add(region);
         return null;
       }
-      writers.put(region, ret);
+      if(reusable) {
+        writers.put(regionName, ret);
+      }
       return ret;
     }
 
     /**
      * @return a path with a write for that path. caller should close.
      */
-    private WriterAndPath createWAP(byte[] region, Entry entry, Path rootdir) throws IOException {
+    WriterAndPath createWAP(byte[] region, Entry entry, Path rootdir) throws IOException {
       Path regionedits = getRegionSplitEditsPath(fs, entry, rootdir, fileBeingSplit.getPath().getName());
       if (regionedits == null) {
         return null;
@@ -1544,23 +1495,23 @@ public class WALSplitter {
             + "result of a previous failed split attempt. Deleting " + regionedits + ", length="
             + fs.getFileStatus(regionedits).getLen());
         if (!fs.delete(regionedits, false)) {
-          LOG.warn("Failed delete of old " + regionedits);
+          LOG.warn("Failed delete of old {}", regionedits);
         }
       }
       Writer w = createWriter(regionedits);
-      LOG.debug("Creating writer path=" + regionedits);
+      LOG.debug("Creating writer path={}", regionedits);
       return new WriterAndPath(regionedits, w, entry.getKey().getSequenceId());
     }
 
-    private void filterCellByStore(Entry logEntry) {
+    void filterCellByStore(Entry logEntry) {
       Map<byte[], Long> maxSeqIdInStores =
           regionMaxSeqIdInStores.get(Bytes.toString(logEntry.getKey().getEncodedRegionName()));
-      if (maxSeqIdInStores == null || maxSeqIdInStores.isEmpty()) {
+      if (MapUtils.isEmpty(maxSeqIdInStores)) {
         return;
       }
       // Create the array list for the cells that aren't filtered.
       // We make the assumption that most cells will be kept.
-      ArrayList<Cell> keptCells = new ArrayList<Cell>(logEntry.getEdit().getCells().size());
+      ArrayList<Cell> keptCells = new ArrayList<>(logEntry.getEdit().getCells().size());
       for (Cell cell : logEntry.getEdit().getCells()) {
         if (CellUtil.matchingFamily(cell, WALEdit.METAFAMILY)) {
           keptCells.add(cell);
@@ -1583,10 +1534,14 @@ public class WALSplitter {
 
     @Override
     public void append(RegionEntryBuffer buffer) throws IOException {
+      appendBuffer(buffer, true);
+    }
+
+    WriterAndPath appendBuffer(RegionEntryBuffer buffer, boolean reusable) throws IOException{
       List<Entry> entries = buffer.entryBuffer;
       if (entries.isEmpty()) {
         LOG.warn("got an empty buffer, skipping");
-        return;
+        return null;
       }
 
       WriterAndPath wap = null;
@@ -1597,12 +1552,12 @@ public class WALSplitter {
 
         for (Entry logEntry : entries) {
           if (wap == null) {
-            wap = getWriterAndPath(logEntry);
+            wap = getWriterAndPath(logEntry, reusable);
             if (wap == null) {
-              if (LOG.isDebugEnabled()) {
-                LOG.debug("getWriterAndPath decided we don't need to write edits for " + logEntry);
-              }
-              return;
+              // This log spews the full edit. Can be massive in the log. Enable only debugging
+              // WAL lost edit issues.
+              LOG.trace("getWriterAndPath decided we don't need to write edits for {}", logEntry);
+              return null;
             }
           }
           filterCellByStore(logEntry);
@@ -1620,16 +1575,17 @@ public class WALSplitter {
       } catch (IOException e) {
           e = e instanceof RemoteException ?
                   ((RemoteException)e).unwrapRemoteException() : e;
-        LOG.fatal(" Got while writing log entry to log", e);
+        LOG.error(HBaseMarkers.FATAL, "Got while writing log entry to log", e);
         throw e;
       }
+      return wap;
     }
 
     @Override
     public boolean keepRegionEvent(Entry entry) {
       ArrayList<Cell> cells = entry.getEdit().getCells();
-      for (int i = 0; i < cells.size(); i++) {
-        if (WALEdit.isCompactionMarker(cells.get(i))) {
+      for (Cell cell : cells) {
+        if (WALEdit.isCompactionMarker(cell)) {
           return true;
         }
       }
@@ -1641,11 +1597,9 @@ public class WALSplitter {
      */
     @Override
     public Map<byte[], Long> getOutputCounts() {
-      TreeMap<byte[], Long> ret = new TreeMap<byte[], Long>(Bytes.BYTES_COMPARATOR);
-      synchronized (writers) {
-        for (Map.Entry<byte[], SinkWriter> entry : writers.entrySet()) {
-          ret.put(entry.getKey(), entry.getValue().editsWritten);
-        }
+      TreeMap<byte[], Long> ret = new TreeMap<>(Bytes.BYTES_COMPARATOR);
+      for (Map.Entry<String, SinkWriter> entry : writers.entrySet()) {
+        ret.put(Bytes.toBytes(entry.getKey()), entry.getValue().editsWritten);
       }
       return ret;
     }
@@ -1653,6 +1607,114 @@ public class WALSplitter {
     @Override
     public int getNumberOfRecoveredRegions() {
       return writers.size();
+    }
+  }
+
+  /**
+   *
+   */
+  class BoundedLogWriterCreationOutputSink extends LogRecoveredEditsOutputSink {
+
+    private ConcurrentHashMap<String, Long> regionRecoverStatMap = new ConcurrentHashMap<>();
+
+    public BoundedLogWriterCreationOutputSink(PipelineController controller,
+        EntryBuffers entryBuffers, int numWriters) {
+      super(controller, entryBuffers, numWriters);
+    }
+
+    @Override
+    public List<Path> finishWritingAndClose() throws IOException {
+      boolean isSuccessful;
+      List<Path> result;
+      try {
+        isSuccessful = finishWriting(false);
+      } finally {
+        result = close();
+      }
+      if (isSuccessful) {
+        splits = result;
+      }
+      return splits;
+    }
+
+    @Override
+    boolean executeCloseTask(CompletionService<Void> completionService,
+        List<IOException> thrown, List<Path> paths)
+        throws InterruptedException, ExecutionException {
+      for (final Map.Entry<byte[], RegionEntryBuffer> buffer : entryBuffers.buffers.entrySet()) {
+        LOG.info("Submitting writeThenClose of {}", buffer.getValue().encodedRegionName);
+        completionService.submit(new Callable<Void>() {
+          public Void call() throws Exception {
+            Path dst = writeThenClose(buffer.getValue());
+            paths.add(dst);
+            return null;
+          }
+        });
+      }
+      boolean progress_failed = false;
+      for (int i = 0, n = entryBuffers.buffers.size(); i < n; i++) {
+        Future<Void> future = completionService.take();
+        future.get();
+        if (!progress_failed && reporter != null && !reporter.progress()) {
+          progress_failed = true;
+        }
+      }
+
+      return progress_failed;
+    }
+
+    /**
+     * since the splitting process may create multiple output files, we need a map
+     * regionRecoverStatMap to track the output count of each region.
+     * @return a map from encoded region ID to the number of edits written out for that region.
+     */
+    @Override
+    public Map<byte[], Long> getOutputCounts() {
+      Map<byte[], Long> regionRecoverStatMapResult = new HashMap<>();
+      for(Map.Entry<String, Long> entry: regionRecoverStatMap.entrySet()){
+        regionRecoverStatMapResult.put(Bytes.toBytes(entry.getKey()), entry.getValue());
+      }
+      return regionRecoverStatMapResult;
+    }
+
+    /**
+     * @return the number of recovered regions
+     */
+    @Override
+    public int getNumberOfRecoveredRegions() {
+      return regionRecoverStatMap.size();
+    }
+
+    /**
+     * Append the buffer to a new recovered edits file, then close it after all done
+     * @param buffer contain all entries of a certain region
+     * @throws IOException when closeWriter failed
+     */
+    @Override
+    public void append(RegionEntryBuffer buffer) throws IOException {
+      writeThenClose(buffer);
+    }
+
+    private Path writeThenClose(RegionEntryBuffer buffer) throws IOException {
+      WriterAndPath wap = appendBuffer(buffer, false);
+      if(wap != null) {
+        String encodedRegionName = Bytes.toString(buffer.encodedRegionName);
+        Long value = regionRecoverStatMap.putIfAbsent(encodedRegionName, wap.editsWritten);
+        if (value != null) {
+          Long newValue = regionRecoverStatMap.get(encodedRegionName) + wap.editsWritten;
+          regionRecoverStatMap.put(encodedRegionName, newValue);
+        }
+      }
+
+      Path dst = null;
+      List<IOException> thrown = new ArrayList<>();
+      if(wap != null){
+        dst = closeWriter(Bytes.toString(buffer.encodedRegionName), wap, thrown);
+      }
+      if (!thrown.isEmpty()) {
+        throw MultipleIOException.createIOException(thrown);
+      }
+      return dst;
     }
   }
 
@@ -1696,585 +1758,6 @@ public class WALSplitter {
     }
   }
 
-  /**
-   * Class that manages to replay edits from WAL files directly to assigned fail over region servers
-   */
-  class LogReplayOutputSink extends OutputSink {
-    private static final double BUFFER_THRESHOLD = 0.35;
-    private static final String KEY_DELIMITER = "#";
-
-    private final long waitRegionOnlineTimeOut;
-    private final Set<String> recoveredRegions = Collections.synchronizedSet(new HashSet<String>());
-    private final Map<String, RegionServerWriter> writers = new ConcurrentHashMap<>();
-    // online encoded region name -> region location map
-    private final Map<String, HRegionLocation> onlineRegions =
-        new ConcurrentHashMap<String, HRegionLocation>();
-
-    private final Map<TableName, ClusterConnection> tableNameToHConnectionMap = Collections
-        .synchronizedMap(new TreeMap<TableName, ClusterConnection>());
-    /**
-     * Map key -> value layout
-     * {@literal <servername>:<table name> -> Queue<Row>}
-     */
-    private final Map<String, List<Pair<HRegionLocation, Entry>>> serverToBufferQueueMap =
-        new ConcurrentHashMap<>();
-    private final List<Throwable> thrown = new ArrayList<>();
-
-    // The following sink is used in distrubitedLogReplay mode for entries of regions in a disabling
-    // table. It's a limitation of distributedLogReplay. Because log replay needs a region is
-    // assigned and online before it can replay wal edits while regions of disabling/disabled table
-    // won't be assigned by AM. We can retire this code after HBASE-8234.
-    private final LogRecoveredEditsOutputSink logRecoveredEditsOutputSink;
-    private boolean hasEditsInDisablingOrDisabledTables = false;
-
-    public LogReplayOutputSink(PipelineController controller, EntryBuffers entryBuffers,
-        int numWriters) {
-      super(controller, entryBuffers, numWriters);
-      this.waitRegionOnlineTimeOut =
-          conf.getInt(HConstants.HBASE_SPLITLOG_MANAGER_TIMEOUT,
-            ZKSplitLogManagerCoordination.DEFAULT_TIMEOUT);
-      this.logRecoveredEditsOutputSink = new LogRecoveredEditsOutputSink(controller,
-        entryBuffers, numWriters);
-      this.logRecoveredEditsOutputSink.setReporter(reporter);
-    }
-
-    @Override
-    public void append(RegionEntryBuffer buffer) throws IOException {
-      List<Entry> entries = buffer.entryBuffer;
-      if (entries.isEmpty()) {
-        LOG.warn("got an empty buffer, skipping");
-        return;
-      }
-
-      // check if current region in a disabling or disabled table
-      if (isTableDisabledOrDisabling(buffer.tableName)) {
-        // need fall back to old way
-        logRecoveredEditsOutputSink.append(buffer);
-        hasEditsInDisablingOrDisabledTables = true;
-        // store regions we have recovered so far
-        addToRecoveredRegions(Bytes.toString(buffer.encodedRegionName));
-        return;
-      }
-
-      // group entries by region servers
-      groupEditsByServer(entries);
-
-      // process workitems
-      String maxLocKey = null;
-      int maxSize = 0;
-      List<Pair<HRegionLocation, Entry>> maxQueue = null;
-      synchronized (this.serverToBufferQueueMap) {
-        for (Map.Entry<String, List<Pair<HRegionLocation, Entry>>> entry :
-            this.serverToBufferQueueMap.entrySet()) {
-          List<Pair<HRegionLocation, Entry>> curQueue = entry.getValue();
-          if (curQueue.size() > maxSize) {
-            maxSize = curQueue.size();
-            maxQueue = curQueue;
-            maxLocKey = entry.getKey();
-          }
-        }
-        if (maxSize < minBatchSize
-            && entryBuffers.totalBuffered < BUFFER_THRESHOLD * entryBuffers.maxHeapUsage) {
-          // buffer more to process
-          return;
-        } else if (maxSize > 0) {
-          this.serverToBufferQueueMap.remove(maxLocKey);
-        }
-      }
-
-      if (maxSize > 0) {
-        processWorkItems(maxLocKey, maxQueue);
-      }
-    }
-
-    private void addToRecoveredRegions(String encodedRegionName) {
-      if (!recoveredRegions.contains(encodedRegionName)) {
-        recoveredRegions.add(encodedRegionName);
-      }
-    }
-
-    /**
-     * Helper function to group WALEntries to individual region servers
-     * @throws IOException
-     */
-    private void groupEditsByServer(List<Entry> entries) throws IOException {
-      Set<TableName> nonExistentTables = null;
-      Long cachedLastFlushedSequenceId = -1l;
-      for (Entry entry : entries) {
-        WALEdit edit = entry.getEdit();
-        TableName table = entry.getKey().getTablename();
-        // clear scopes which isn't needed for recovery
-        entry.getKey().serializeReplicationScope(false);
-        String encodeRegionNameStr = Bytes.toString(entry.getKey().getEncodedRegionName());
-        // skip edits of non-existent tables
-        if (nonExistentTables != null && nonExistentTables.contains(table)) {
-          this.skippedEdits.incrementAndGet();
-          continue;
-        }
-
-        Map<byte[], Long> maxStoreSequenceIds = null;
-        boolean needSkip = false;
-        HRegionLocation loc = null;
-        String locKey = null;
-        List<Cell> cells = edit.getCells();
-        List<Cell> skippedCells = new ArrayList<>();
-        ClusterConnection cconn = this.getConnectionByTableName(table);
-
-        for (Cell cell : cells) {
-          byte[] row = CellUtil.cloneRow(cell);
-          byte[] family = CellUtil.cloneFamily(cell);
-          boolean isCompactionEntry = false;
-          if (CellUtil.matchingFamily(cell, WALEdit.METAFAMILY)) {
-            CompactionDescriptor compaction = WALEdit.getCompaction(cell);
-            if (compaction != null && compaction.hasRegionName()) {
-              try {
-                byte[][] regionName = HRegionInfo.parseRegionName(compaction.getRegionName()
-                  .toByteArray());
-                row = regionName[1]; // startKey of the region
-                family = compaction.getFamilyName().toByteArray();
-                isCompactionEntry = true;
-              } catch (Exception ex) {
-                LOG.warn("Unexpected exception received, ignoring " + ex);
-                skippedCells.add(cell);
-                continue;
-              }
-            } else {
-              skippedCells.add(cell);
-              continue;
-            }
-          }
-
-          try {
-            loc =
-                locateRegionAndRefreshLastFlushedSequenceId(cconn, table, row,
-                  encodeRegionNameStr);
-            // skip replaying the compaction if the region is gone
-            if (isCompactionEntry && !encodeRegionNameStr.equalsIgnoreCase(
-              loc.getRegionInfo().getEncodedName())) {
-              LOG.info("Not replaying a compaction marker for an older region: "
-                  + encodeRegionNameStr);
-              needSkip = true;
-            }
-          } catch (TableNotFoundException ex) {
-            // table has been deleted so skip edits of the table
-            LOG.info("Table " + table + " doesn't exist. Skip log replay for region "
-                + encodeRegionNameStr);
-            lastFlushedSequenceIds.put(encodeRegionNameStr, Long.MAX_VALUE);
-            if (nonExistentTables == null) {
-              nonExistentTables = new TreeSet<TableName>();
-            }
-            nonExistentTables.add(table);
-            this.skippedEdits.incrementAndGet();
-            needSkip = true;
-            break;
-          }
-
-          cachedLastFlushedSequenceId =
-              lastFlushedSequenceIds.get(loc.getRegionInfo().getEncodedName());
-          if (cachedLastFlushedSequenceId != null
-              && cachedLastFlushedSequenceId >= entry.getKey().getLogSeqNum()) {
-            // skip the whole WAL entry
-            this.skippedEdits.incrementAndGet();
-            needSkip = true;
-            break;
-          } else {
-            if (maxStoreSequenceIds == null) {
-              maxStoreSequenceIds =
-                  regionMaxSeqIdInStores.get(loc.getRegionInfo().getEncodedName());
-            }
-            if (maxStoreSequenceIds != null) {
-              Long maxStoreSeqId = maxStoreSequenceIds.get(family);
-              if (maxStoreSeqId == null || maxStoreSeqId >= entry.getKey().getSequenceId()) {
-                // skip current kv if column family doesn't exist anymore or already flushed
-                skippedCells.add(cell);
-                continue;
-              }
-            }
-          }
-        }
-
-        // skip the edit
-        if (loc == null || needSkip) continue;
-
-        if (!skippedCells.isEmpty()) {
-          cells.removeAll(skippedCells);
-        }
-
-        synchronized (serverToBufferQueueMap) {
-          locKey = loc.getHostnamePort() + KEY_DELIMITER + table;
-          List<Pair<HRegionLocation, Entry>> queue = serverToBufferQueueMap.get(locKey);
-          if (queue == null) {
-            queue =
-                Collections.synchronizedList(new ArrayList<Pair<HRegionLocation, Entry>>());
-            serverToBufferQueueMap.put(locKey, queue);
-          }
-          queue.add(new Pair<HRegionLocation, Entry>(loc, entry));
-        }
-        // store regions we have recovered so far
-        addToRecoveredRegions(loc.getRegionInfo().getEncodedName());
-      }
-    }
-
-    /**
-     * Locate destination region based on table name & row. This function also makes sure the
-     * destination region is online for replay.
-     * @throws IOException
-     */
-    private HRegionLocation locateRegionAndRefreshLastFlushedSequenceId(ClusterConnection cconn,
-        TableName table, byte[] row, String originalEncodedRegionName) throws IOException {
-      // fetch location from cache
-      HRegionLocation loc = onlineRegions.get(originalEncodedRegionName);
-      if(loc != null) return loc;
-      // fetch location from hbase:meta directly without using cache to avoid hit old dead server
-      loc = cconn.getRegionLocation(table, row, true);
-      if (loc == null) {
-        throw new IOException("Can't locate location for row:" + Bytes.toString(row)
-            + " of table:" + table);
-      }
-      // check if current row moves to a different region due to region merge/split
-      if (!originalEncodedRegionName.equalsIgnoreCase(loc.getRegionInfo().getEncodedName())) {
-        // originalEncodedRegionName should have already flushed
-        lastFlushedSequenceIds.put(originalEncodedRegionName, Long.MAX_VALUE);
-        HRegionLocation tmpLoc = onlineRegions.get(loc.getRegionInfo().getEncodedName());
-        if (tmpLoc != null) return tmpLoc;
-      }
-
-      Long lastFlushedSequenceId = -1L;
-      AtomicBoolean isRecovering = new AtomicBoolean(true);
-      loc = waitUntilRegionOnline(loc, row, this.waitRegionOnlineTimeOut, isRecovering);
-      if (!isRecovering.get()) {
-        // region isn't in recovering at all because WAL file may contain a region that has
-        // been moved to somewhere before hosting RS fails
-        lastFlushedSequenceIds.put(loc.getRegionInfo().getEncodedName(), Long.MAX_VALUE);
-        LOG.info("logReplay skip region: " + loc.getRegionInfo().getEncodedName()
-            + " because it's not in recovering.");
-      } else {
-        Long cachedLastFlushedSequenceId =
-            lastFlushedSequenceIds.get(loc.getRegionInfo().getEncodedName());
-
-        // retrieve last flushed sequence Id from ZK. Because region postOpenDeployTasks will
-        // update the value for the region
-        RegionStoreSequenceIds ids =
-            csm.getSplitLogWorkerCoordination().getRegionFlushedSequenceId(failedServerName,
-              loc.getRegionInfo().getEncodedName());
-        if (ids != null) {
-          lastFlushedSequenceId = ids.getLastFlushedSequenceId();
-          Map<byte[], Long> storeIds = new TreeMap<byte[], Long>(Bytes.BYTES_COMPARATOR);
-          List<StoreSequenceId> maxSeqIdInStores = ids.getStoreSequenceIdList();
-          for (StoreSequenceId id : maxSeqIdInStores) {
-            storeIds.put(id.getFamilyName().toByteArray(), id.getSequenceId());
-          }
-          regionMaxSeqIdInStores.put(loc.getRegionInfo().getEncodedName(), storeIds);
-        }
-
-        if (cachedLastFlushedSequenceId == null
-            || lastFlushedSequenceId > cachedLastFlushedSequenceId) {
-          lastFlushedSequenceIds.put(loc.getRegionInfo().getEncodedName(), lastFlushedSequenceId);
-        }
-      }
-
-      onlineRegions.put(loc.getRegionInfo().getEncodedName(), loc);
-      return loc;
-    }
-
-    private void processWorkItems(String key, List<Pair<HRegionLocation, Entry>> actions)
-        throws IOException {
-      RegionServerWriter rsw = null;
-
-      long startTime = System.nanoTime();
-      try {
-        rsw = getRegionServerWriter(key);
-        rsw.sink.replayEntries(actions);
-
-        // Pass along summary statistics
-        rsw.incrementEdits(actions.size());
-        rsw.incrementNanoTime(System.nanoTime() - startTime);
-      } catch (IOException e) {
-        e = e instanceof RemoteException ? ((RemoteException) e).unwrapRemoteException() : e;
-        LOG.fatal(" Got while writing log entry to log", e);
-        throw e;
-      }
-    }
-
-    /**
-     * Wait until region is online on the destination region server
-     * @param loc
-     * @param row
-     * @param timeout How long to wait
-     * @param isRecovering Recovering state of the region interested on destination region server.
-     * @return True when region is online on the destination region server
-     * @throws InterruptedException
-     */
-    private HRegionLocation waitUntilRegionOnline(HRegionLocation loc, byte[] row,
-        final long timeout, AtomicBoolean isRecovering)
-        throws IOException {
-      final long endTime = EnvironmentEdgeManager.currentTime() + timeout;
-      final long pause = conf.getLong(HConstants.HBASE_CLIENT_PAUSE,
-        HConstants.DEFAULT_HBASE_CLIENT_PAUSE);
-      boolean reloadLocation = false;
-      TableName tableName = loc.getRegionInfo().getTable();
-      int tries = 0;
-      Throwable cause = null;
-      while (endTime > EnvironmentEdgeManager.currentTime()) {
-        try {
-          // Try and get regioninfo from the hosting server.
-          ClusterConnection cconn = getConnectionByTableName(tableName);
-          if(reloadLocation) {
-            loc = cconn.getRegionLocation(tableName, row, true);
-          }
-          BlockingInterface remoteSvr = cconn.getAdmin(loc.getServerName());
-          HRegionInfo region = loc.getRegionInfo();
-          try {
-            GetRegionInfoRequest request =
-                RequestConverter.buildGetRegionInfoRequest(region.getRegionName());
-            GetRegionInfoResponse response = remoteSvr.getRegionInfo(null, request);
-            if (HRegionInfo.convert(response.getRegionInfo()) != null) {
-              isRecovering.set((response.hasIsRecovering()) ? response.getIsRecovering() : true);
-              return loc;
-            }
-          } catch (org.apache.hadoop.hbase.shaded.com.google.protobuf.ServiceException e) {
-            throw ProtobufUtil.handleRemoteException(e);
-          }
-        } catch (IOException e) {
-          cause = e.getCause();
-          if(!(cause instanceof RegionOpeningException)) {
-            reloadLocation = true;
-          }
-        }
-        long expectedSleep = ConnectionUtils.getPauseTime(pause, tries);
-        try {
-          Thread.sleep(expectedSleep);
-        } catch (InterruptedException e) {
-          throw new IOException("Interrupted when waiting region " +
-              loc.getRegionInfo().getEncodedName() + " online.", e);
-        }
-        tries++;
-      }
-
-      throw new IOException("Timeout when waiting region " + loc.getRegionInfo().getEncodedName() +
-        " online for " + timeout + " milliseconds.", cause);
-    }
-
-    @Override
-    public boolean flush() throws IOException {
-      String curLoc = null;
-      int curSize = 0;
-      List<Pair<HRegionLocation, Entry>> curQueue = null;
-      synchronized (this.serverToBufferQueueMap) {
-        for (Map.Entry<String, List<Pair<HRegionLocation, Entry>>> entry :
-                this.serverToBufferQueueMap.entrySet()) {
-          curQueue = entry.getValue();
-          if (!curQueue.isEmpty()) {
-            curSize = curQueue.size();
-            curLoc = entry.getKey();
-            break;
-          }
-        }
-        if (curSize > 0) {
-          this.serverToBufferQueueMap.remove(curLoc);
-        }
-      }
-
-      if (curSize > 0) {
-        this.processWorkItems(curLoc, curQueue);
-        // We should already have control of the monitor; ensure this is the case.
-        synchronized(controller.dataAvailable) {
-          controller.dataAvailable.notifyAll();
-        }
-        return true;
-      }
-      return false;
-    }
-
-    @Override
-    public boolean keepRegionEvent(Entry entry) {
-      return true;
-    }
-
-    void addWriterError(Throwable t) {
-      thrown.add(t);
-    }
-
-    @Override
-    public List<Path> finishWritingAndClose() throws IOException {
-      try {
-        if (!finishWriting(false)) {
-          return null;
-        }
-        if (hasEditsInDisablingOrDisabledTables) {
-          splits = logRecoveredEditsOutputSink.finishWritingAndClose();
-        } else {
-          splits = new ArrayList<Path>();
-        }
-        // returns an empty array in order to keep interface same as old way
-        return splits;
-      } finally {
-        List<IOException> thrown = closeRegionServerWriters();
-        if (thrown != null && !thrown.isEmpty()) {
-          throw MultipleIOException.createIOException(thrown);
-        }
-      }
-    }
-
-    @Override
-    int getNumOpenWriters() {
-      return this.writers.size() + this.logRecoveredEditsOutputSink.getNumOpenWriters();
-    }
-
-    private List<IOException> closeRegionServerWriters() throws IOException {
-      List<IOException> result = null;
-      if (!writersClosed) {
-        result = Lists.newArrayList();
-        try {
-          for (WriterThread t : writerThreads) {
-            while (t.isAlive()) {
-              t.shouldStop = true;
-              t.interrupt();
-              try {
-                t.join(10);
-              } catch (InterruptedException e) {
-                IOException iie = new InterruptedIOException();
-                iie.initCause(e);
-                throw iie;
-              }
-            }
-          }
-        } finally {
-          synchronized (writers) {
-            for (Map.Entry<String, RegionServerWriter> entry : writers.entrySet()) {
-              RegionServerWriter tmpW = entry.getValue();
-              try {
-                tmpW.close();
-              } catch (IOException ioe) {
-                LOG.error("Couldn't close writer for region server:" + entry.getKey(), ioe);
-                result.add(ioe);
-              }
-            }
-          }
-
-          // close connections
-          synchronized (this.tableNameToHConnectionMap) {
-            for (Map.Entry<TableName, ClusterConnection> entry :
-                    this.tableNameToHConnectionMap.entrySet()) {
-              ClusterConnection cconn = entry.getValue();
-              try {
-                cconn.clearRegionCache();
-                cconn.close();
-              } catch (IOException ioe) {
-                result.add(ioe);
-              }
-            }
-          }
-          writersClosed = true;
-        }
-      }
-      return result;
-    }
-
-    @Override
-    public Map<byte[], Long> getOutputCounts() {
-      TreeMap<byte[], Long> ret = new TreeMap<>(Bytes.BYTES_COMPARATOR);
-      synchronized (writers) {
-        for (Map.Entry<String, RegionServerWriter> entry : writers.entrySet()) {
-          ret.put(Bytes.toBytes(entry.getKey()), entry.getValue().editsWritten);
-        }
-      }
-      return ret;
-    }
-
-    @Override
-    public int getNumberOfRecoveredRegions() {
-      return this.recoveredRegions.size();
-    }
-
-    private boolean isTableDisabledOrDisabling(TableName tableName) {
-      if (csm == null)
-        return false; // we can't get state without CoordinatedStateManager
-      if (tableName.isSystemTable())
-        return false; // assume that system tables never can be disabled
-      TableState tableState = tableStatesCache.get(tableName);
-      if (tableState == null) {
-        try {
-          tableState =
-              MetaTableAccessor.getTableState(csm.getServer().getConnection(), tableName);
-          if (tableState != null)
-            tableStatesCache.put(tableName, tableState);
-        } catch (IOException e) {
-          LOG.warn("State is not accessible for table " + tableName, e);
-        }
-      }
-      return tableState != null && tableState
-          .inStates(TableState.State.DISABLED, TableState.State.DISABLING);
-    }
-
-    /**
-     * Get a writer and path for a log starting at the given entry. This function is threadsafe so
-     * long as multiple threads are always acting on different regions.
-     * @return null if this region shouldn't output any logs
-     */
-    private RegionServerWriter getRegionServerWriter(String loc) throws IOException {
-      RegionServerWriter ret = writers.get(loc);
-      if (ret != null) {
-        return ret;
-      }
-
-      TableName tableName = getTableFromLocationStr(loc);
-      if(tableName == null){
-        throw new IOException("Invalid location string:" + loc + " found. Replay aborted.");
-      }
-
-      ClusterConnection hconn = getConnectionByTableName(tableName);
-      synchronized (writers) {
-        ret = writers.get(loc);
-        if (ret == null) {
-          ret = new RegionServerWriter(conf, tableName, hconn);
-          writers.put(loc, ret);
-        }
-      }
-      return ret;
-    }
-
-    private ClusterConnection getConnectionByTableName(final TableName tableName) throws IOException {
-      ClusterConnection cconn = this.tableNameToHConnectionMap.get(tableName);
-      if (cconn == null) {
-        synchronized (this.tableNameToHConnectionMap) {
-          cconn = this.tableNameToHConnectionMap.get(tableName);
-          if (cconn == null) {
-            cconn = (ClusterConnection) ConnectionFactory.createConnection(conf);
-            this.tableNameToHConnectionMap.put(tableName, cconn);
-          }
-        }
-      }
-      return cconn;
-    }
-    private TableName getTableFromLocationStr(String loc) {
-      /**
-       * location key is in format {@literal <server name:port>#<table name>}
-       */
-      String[] splits = loc.split(KEY_DELIMITER);
-      if (splits.length != 2) {
-        return null;
-      }
-      return TableName.valueOf(splits[1]);
-    }
-  }
-
-  /**
-   * Private data structure that wraps a receiving RS and collecting statistics about the data
-   * written to this newly assigned RS.
-   */
-  private final static class RegionServerWriter extends SinkWriter {
-    final WALEditsReplaySink sink;
-
-    RegionServerWriter(final Configuration conf, final TableName tableName, final ClusterConnection conn)
-        throws IOException {
-      this.sink = new WALEditsReplaySink(conf, tableName, conn);
-    }
-
-    void close() throws IOException {
-    }
-  }
-
   static class CorruptedLogFileException extends Exception {
     private static final long serialVersionUID = 1L;
 
@@ -2284,7 +1767,7 @@ public class WALSplitter {
   }
 
   /** A struct used by getMutationsFromWALEntry */
-  public static class MutationReplay {
+  public static class MutationReplay implements Comparable<MutationReplay> {
     public MutationReplay(MutationType type, Mutation mutation, long nonceGroup, long nonce) {
       this.type = type;
       this.mutation = mutation;
@@ -2300,6 +1783,25 @@ public class WALSplitter {
     public final Mutation mutation;
     public final long nonceGroup;
     public final long nonce;
+
+    @Override
+    public int compareTo(final MutationReplay d) {
+      return this.mutation.compareTo(d.mutation);
+    }
+
+    @Override
+    public boolean equals(Object obj) {
+      if(!(obj instanceof MutationReplay)) {
+        return false;
+      } else {
+        return this.compareTo((MutationReplay)obj) == 0;
+      }
+    }
+
+    @Override
+    public int hashCode() {
+      return this.mutation.hashCode();
+    }
   }
 
   /**
@@ -2318,18 +1820,20 @@ public class WALSplitter {
 
     if (entry == null) {
       // return an empty array
-      return new ArrayList<MutationReplay>();
+      return Collections.emptyList();
     }
 
     long replaySeqId = (entry.getKey().hasOrigSequenceNumber()) ?
       entry.getKey().getOrigSequenceNumber() : entry.getKey().getLogSequenceNumber();
     int count = entry.getAssociatedCellCount();
-    List<MutationReplay> mutations = new ArrayList<MutationReplay>();
+    List<MutationReplay> mutations = new ArrayList<>();
     Cell previousCell = null;
     Mutation m = null;
-    WALKey key = null;
+    WALKeyImpl key = null;
     WALEdit val = null;
-    if (logEntry != null) val = new WALEdit();
+    if (logEntry != null) {
+      val = new WALEdit();
+    }
 
     for (int i = 0; i < count; i++) {
       // Throw index out of bounds if our cell count is off
@@ -2341,7 +1845,7 @@ public class WALSplitter {
 
       boolean isNewRowOrType =
           previousCell == null || previousCell.getTypeByte() != cell.getTypeByte()
-              || !CellUtil.matchingRow(previousCell, cell);
+              || !CellUtil.matchingRows(previousCell, cell);
       if (isNewRowOrType) {
         // Create new mutation
         if (CellUtil.isDelete(cell)) {
@@ -2359,7 +1863,7 @@ public class WALSplitter {
         }
       }
       if (CellUtil.isDelete(cell)) {
-        ((Delete) m).addDeleteMarker(cell);
+        ((Delete) m).add(cell);
       } else {
         ((Put) m).add(cell);
       }
@@ -2371,12 +1875,11 @@ public class WALSplitter {
     if (logEntry != null) {
       org.apache.hadoop.hbase.shaded.protobuf.generated.WALProtos.WALKey walKeyProto =
           entry.getKey();
-      List<UUID> clusterIds = new ArrayList<UUID>(walKeyProto.getClusterIdsCount());
+      List<UUID> clusterIds = new ArrayList<>(walKeyProto.getClusterIdsCount());
       for (HBaseProtos.UUID uuid : entry.getKey().getClusterIdsList()) {
         clusterIds.add(new UUID(uuid.getMostSigBits(), uuid.getLeastSigBits()));
       }
-      // we use HLogKey here instead of WALKey directly to support legacy coprocessors.
-      key = new HLogKey(walKeyProto.getEncodedRegionName().toByteArray(), TableName.valueOf(
+      key = new WALKeyImpl(walKeyProto.getEncodedRegionName().toByteArray(), TableName.valueOf(
               walKeyProto.getTableName().toByteArray()), replaySeqId, walKeyProto.getWriteTime(),
               clusterIds, walKeyProto.getNonceGroup(), walKeyProto.getNonce(), null);
       logEntry.setFirst(key);

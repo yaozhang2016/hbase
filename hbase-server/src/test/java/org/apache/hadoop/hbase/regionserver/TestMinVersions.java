@@ -68,7 +68,7 @@ public class TestMinVersions {
   public void testGetClosestBefore() throws Exception {
     HTableDescriptor htd =
         hbu.createTableDescriptor(name.getMethodName(), 1, 1000, 1, KeepDeletedCells.FALSE);
-    Region region = hbu.createLocalHRegion(htd, null, null);
+    HRegion region = hbu.createLocalHRegion(htd, null, null);
     try {
 
       // 2s in the past
@@ -118,7 +118,7 @@ public class TestMinVersions {
     // keep 3 versions minimum
     HTableDescriptor htd =
         hbu.createTableDescriptor(name.getMethodName(), 3, 1000, 1, KeepDeletedCells.FALSE);
-    Region region = hbu.createLocalHRegion(htd, null, null);
+    HRegion region = hbu.createLocalHRegion(htd, null, null);
     // 2s in the past
     long ts = EnvironmentEdgeManager.currentTime() - 2000;
 
@@ -173,7 +173,7 @@ public class TestMinVersions {
   public void testDelete() throws Exception {
     HTableDescriptor htd =
         hbu.createTableDescriptor(name.getMethodName(), 3, 1000, 1, KeepDeletedCells.FALSE);
-    Region region = hbu.createLocalHRegion(htd, null, null);
+    HRegion region = hbu.createLocalHRegion(htd, null, null);
 
     // 2s in the past
     long ts = EnvironmentEdgeManager.currentTime() - 2000;
@@ -232,7 +232,7 @@ public class TestMinVersions {
   public void testMemStore() throws Exception {
     HTableDescriptor htd =
         hbu.createTableDescriptor(name.getMethodName(), 2, 1000, 1, KeepDeletedCells.FALSE);
-    Region region = hbu.createLocalHRegion(htd, null, null);
+    HRegion region = hbu.createLocalHRegion(htd, null, null);
 
     // 2s in the past
     long ts = EnvironmentEdgeManager.currentTime() - 2000;
@@ -308,7 +308,7 @@ public class TestMinVersions {
     // 1 version minimum, 1000 versions maximum, ttl = 1s
     HTableDescriptor htd =
         hbu.createTableDescriptor(name.getMethodName(), 2, 1000, 1, KeepDeletedCells.FALSE);
-    Region region = hbu.createLocalHRegion(htd, null, null);
+    HRegion region = hbu.createLocalHRegion(htd, null, null);
     try {
 
       // 2s in the past
@@ -400,7 +400,7 @@ public class TestMinVersions {
   public void testFilters() throws Exception {
     HTableDescriptor htd =
         hbu.createTableDescriptor(name.getMethodName(), 2, 1000, 1, KeepDeletedCells.FALSE);
-    Region region = hbu.createLocalHRegion(htd, null, null);
+    HRegion region = hbu.createLocalHRegion(htd, null, null);
     final byte [] c1 = COLUMNS[1];
 
     // 2s in the past
@@ -427,28 +427,31 @@ public class TestMinVersions {
       p.addColumn(c1, c1, T3);
       region.put(p);
 
-      List<Long> tss = new ArrayList<Long>();
+      List<Long> tss = new ArrayList<>();
       tss.add(ts-1);
       tss.add(ts-2);
 
+      // Sholud only get T2, versions is 2, so T1 is gone from user view.
       Get g = new Get(T1);
       g.addColumn(c1,c1);
       g.setFilter(new TimestampsFilter(tss));
       g.setMaxVersions();
       Result r = region.get(g);
-      checkResult(r, c1, T2,T1);
+      checkResult(r, c1, T2);
 
+      // Sholud only get T2, versions is 2, so T1 is gone from user view.
       g = new Get(T1);
       g.addColumn(c0,c0);
       g.setFilter(new TimestampsFilter(tss));
       g.setMaxVersions();
       r = region.get(g);
-      checkResult(r, c0, T2,T1);
+      checkResult(r, c0, T2);
 
       // now flush/compact
       region.flush(true);
       region.compact(true);
 
+      // After flush/compact, the result should be consistent with previous result
       g = new Get(T1);
       g.addColumn(c1,c1);
       g.setFilter(new TimestampsFilter(tss));
@@ -456,6 +459,7 @@ public class TestMinVersions {
       r = region.get(g);
       checkResult(r, c1, T2);
 
+      // After flush/compact, the result should be consistent with previous result
       g = new Get(T1);
       g.addColumn(c0,c0);
       g.setFilter(new TimestampsFilter(tss));

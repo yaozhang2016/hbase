@@ -27,6 +27,7 @@ import org.apache.hadoop.hbase.ipc.HBaseRpcController;
 import org.apache.hadoop.hbase.ipc.RpcControllerFactory;
 import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * A RetryingCallable for Master RPC operations.
@@ -41,6 +42,7 @@ import org.apache.hadoop.hbase.util.Bytes;
  * it has to deal with Coprocessor Endpoints.
  * @param <V> return type
  */
+@InterfaceAudience.Private
 abstract class MasterCallable<V> implements RetryingCallable<V>, Closeable {
   protected final ClusterConnection connection;
   protected MasterKeepAliveConnection master;
@@ -80,7 +82,7 @@ abstract class MasterCallable<V> implements RetryingCallable<V>, Closeable {
   }
 
   /**
-   * Override that changes the {@link Callable#call()} Exception from {@link Exception} to
+   * Override that changes the {@link java.util.concurrent.Callable#call()} Exception from {@link Exception} to
    * {@link IOException}. It also does setup of an rpcController and calls through to the rpcCall()
    * method which callers are expected to implement. If rpcController is an instance of
    * PayloadCarryingRpcController, we will set a timeout on it.

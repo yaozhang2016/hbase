@@ -89,21 +89,21 @@ public class TestBlocksScanned extends HBaseTestCase {
   }
 
   private void _testBlocksScanned(HTableDescriptor table) throws Exception {
-    Region r = createNewHRegion(table, START_KEY, END_KEY, TEST_UTIL.getConfiguration());
+    HRegion r = createNewHRegion(table, START_KEY, END_KEY, TEST_UTIL.getConfiguration());
     addContent(r, FAMILY, COL);
     r.flush(true);
 
     CacheStats stats = new CacheConfig(TEST_UTIL.getConfiguration()).getBlockCache().getStats();
     long before = stats.getHitCount() + stats.getMissCount();
     // Do simple test of getting one row only first.
-    Scan scan = new Scan(Bytes.toBytes("aaa"), Bytes.toBytes("aaz"));
+    Scan scan = new Scan().withStartRow(Bytes.toBytes("aaa")).withStopRow(Bytes.toBytes("aaz"))
+        .setReadType(Scan.ReadType.PREAD);
     scan.addColumn(FAMILY, COL);
     scan.setMaxVersions(1);
 
     InternalScanner s = r.getScanner(scan);
-    List<Cell> results = new ArrayList<Cell>();
-    while (s.next(results))
-      ;
+    List<Cell> results = new ArrayList<>();
+    while (s.next(results));
     s.close();
 
     int expectResultSize = 'z' - 'a';

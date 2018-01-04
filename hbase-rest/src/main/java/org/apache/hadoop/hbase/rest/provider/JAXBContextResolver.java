@@ -27,7 +27,7 @@ import javax.ws.rs.ext.ContextResolver;
 import javax.ws.rs.ext.Provider;
 import javax.xml.bind.JAXBContext;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.hbase.rest.model.CellModel;
 import org.apache.hadoop.hbase.rest.model.CellSetModel;
 import org.apache.hadoop.hbase.rest.model.ColumnSchemaModel;
@@ -43,9 +43,6 @@ import org.apache.hadoop.hbase.rest.model.TableModel;
 import org.apache.hadoop.hbase.rest.model.TableRegionModel;
 import org.apache.hadoop.hbase.rest.model.TableSchemaModel;
 import org.apache.hadoop.hbase.rest.model.VersionModel;
-
-import com.sun.jersey.api.json.JSONConfiguration;
-import com.sun.jersey.api.json.JSONJAXBContext;
 
 /**
  * Plumbing for hooking up Jersey's JSON entity body encoding and decoding
@@ -82,8 +79,7 @@ public class JAXBContextResolver implements ContextResolver<JAXBContext> {
   @SuppressWarnings("unchecked")
   public JAXBContextResolver() throws Exception {
     this.types = new HashSet(Arrays.asList(cTypes));
-    this.context = new JSONJAXBContext(JSONConfiguration.natural().build(),
-      cTypes);
+    context = JAXBContext.newInstance(cTypes);
   }
 
   @Override

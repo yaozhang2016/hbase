@@ -1,4 +1,4 @@
-/*
+/**
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -16,6 +16,9 @@
  * limitations under the License.
  */
 package org.apache.hadoop.hbase.regionserver;
+
+import static org.apache.hadoop.hbase.regionserver.HStoreFile.BULKLOAD_TIME_KEY;
+import static org.apache.hadoop.hbase.regionserver.HStoreFile.MAX_SEQ_ID_KEY;
 
 import java.io.IOException;
 import java.util.List;
@@ -40,20 +43,24 @@ import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.io.hfile.HFile;
 import org.apache.hadoop.hbase.io.hfile.HFileContext;
-import org.apache.hadoop.hbase.mapreduce.LoadIncrementalHFiles;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.testclassification.RegionServerTests;
+import org.apache.hadoop.hbase.tool.LoadIncrementalHFiles;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.junit.AfterClass;
+import org.junit.Assert;
 import org.junit.BeforeClass;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
-
-import junit.framework.Assert;
+import org.junit.rules.TestName;
 
 @Category({RegionServerTests.class, MediumTests.class})
 public class TestScannerWithBulkload {
   private final static HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
+
+  @Rule
+  public TestName name = new TestName();
 
   @BeforeClass
   public static void setUpBeforeClass() throws Exception {
@@ -70,9 +77,9 @@ public class TestScannerWithBulkload {
 
   @Test
   public void testBulkLoad() throws Exception {
-    TableName tableName = TableName.valueOf("testBulkLoad");
+    final TableName tableName = TableName.valueOf(name.getMethodName());
     long l = System.currentTimeMillis();
-    Admin admin = TEST_UTIL.getHBaseAdmin();
+    Admin admin = TEST_UTIL.getAdmin();
     createTable(admin, tableName);
     Scan scan = createScan();
     final Table table = init(admin, l, scan, tableName);
@@ -167,10 +174,10 @@ public class TestScannerWithBulkload {
       // Set a big MAX_SEQ_ID_KEY. Scan should not look at this seq id in a bulk loaded file.
       // Scan should only look at the seq id appended at the bulk load time, and not skip its
       // kv.
-      writer.appendFileInfo(StoreFile.MAX_SEQ_ID_KEY, Bytes.toBytes(new Long(9999999)));
+      writer.appendFileInfo(MAX_SEQ_ID_KEY, Bytes.toBytes(new Long(9999999)));
     }
     else {
-    writer.appendFileInfo(StoreFile.BULKLOAD_TIME_KEY, Bytes.toBytes(System.currentTimeMillis()));
+    writer.appendFileInfo(BULKLOAD_TIME_KEY, Bytes.toBytes(System.currentTimeMillis()));
     }
     writer.close();
     return hfilePath;
@@ -208,11 +215,12 @@ public class TestScannerWithBulkload {
 
   @Test
   public void testBulkLoadWithParallelScan() throws Exception {
-    final TableName tableName = TableName.valueOf("testBulkLoadWithParallelScan");
+    final TableName tableName = TableName.valueOf(name.getMethodName());
       final long l = System.currentTimeMillis();
-    final Admin admin = TEST_UTIL.getHBaseAdmin();
+    final Admin admin = TEST_UTIL.getAdmin();
     createTable(admin, tableName);
     Scan scan = createScan();
+    scan.setCaching(1);
     final Table table = init(admin, l, scan, tableName);
     // use bulkload
     final Path hfilePath = writeToHFile(l, "/temp/testBulkLoadWithParallelScan/",
@@ -221,6 +229,7 @@ public class TestScannerWithBulkload {
     conf.setBoolean("hbase.mapreduce.bulkload.assign.sequenceNumbers", true);
     final LoadIncrementalHFiles bulkload = new LoadIncrementalHFiles(conf);
     ResultScanner scanner = table.getScanner(scan);
+    Result result = scanner.next();
     // Create a scanner and then do bulk load
     final CountDownLatch latch = new CountDownLatch(1);
     new Thread() {
@@ -242,7 +251,6 @@ public class TestScannerWithBulkload {
     latch.await();
     // By the time we do next() the bulk loaded files are also added to the kv
     // scanner
-    Result result = scanner.next();
     scanAfterBulkLoad(scanner, result, "version1");
     scanner.close();
     table.close();
@@ -250,9 +258,9 @@ public class TestScannerWithBulkload {
 
   @Test
   public void testBulkLoadNativeHFile() throws Exception {
-    TableName tableName = TableName.valueOf("testBulkLoadNativeHFile");
+    final TableName tableName = TableName.valueOf(name.getMethodName());
     long l = System.currentTimeMillis();
-    Admin admin = TEST_UTIL.getHBaseAdmin();
+    Admin admin = TEST_UTIL.getAdmin();
     createTable(admin, tableName);
     Scan scan = createScan();
     final Table table = init(admin, l, scan, tableName);

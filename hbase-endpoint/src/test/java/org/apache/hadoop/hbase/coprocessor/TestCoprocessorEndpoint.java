@@ -30,8 +30,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HColumnDescriptor;
@@ -59,6 +57,8 @@ import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import com.google.protobuf.RpcController;
 import com.google.protobuf.ServiceException;
@@ -68,7 +68,7 @@ import com.google.protobuf.ServiceException;
  */
 @Category({CoprocessorTests.class, MediumTests.class})
 public class TestCoprocessorEndpoint {
-  private static final Log LOG = LogFactory.getLog(TestCoprocessorEndpoint.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestCoprocessorEndpoint.class);
 
   private static final TableName TEST_TABLE =
       TableName.valueOf("TestCoprocessorEndpoint");
@@ -94,7 +94,7 @@ public class TestCoprocessorEndpoint {
     conf.setStrings(CoprocessorHost.MASTER_COPROCESSOR_CONF_KEY,
         ProtobufCoprocessorService.class.getName());
     util.startMiniCluster(2);
-    Admin admin = util.getHBaseAdmin();
+    Admin admin = util.getAdmin();
     HTableDescriptor desc = new HTableDescriptor(TEST_TABLE);
     desc.addFamily(new HColumnDescriptor(TEST_FAMILY));
     admin.createTable(desc, new byte[][]{ROWS[rowSeperator1], ROWS[rowSeperator2]});
@@ -124,7 +124,7 @@ public class TestCoprocessorEndpoint {
         public Long call(ColumnAggregationProtos.ColumnAggregationService instance)
         throws IOException {
           CoprocessorRpcUtils.BlockingRpcCallback<ColumnAggregationProtos.SumResponse> rpcCallback =
-              new CoprocessorRpcUtils.BlockingRpcCallback<ColumnAggregationProtos.SumResponse>();
+              new CoprocessorRpcUtils.BlockingRpcCallback<>();
           ColumnAggregationProtos.SumRequest.Builder builder =
             ColumnAggregationProtos.SumRequest.newBuilder();
           builder.setFamily(ByteStringer.wrap(family));
@@ -193,7 +193,7 @@ public class TestCoprocessorEndpoint {
                 throws IOException {
               LOG.debug("Default response is " + TestProtos.EchoRequestProto.getDefaultInstance());
               CoprocessorRpcUtils.BlockingRpcCallback<TestProtos.EchoResponseProto> callback =
-                  new CoprocessorRpcUtils.BlockingRpcCallback<TestProtos.EchoResponseProto>();
+                  new CoprocessorRpcUtils.BlockingRpcCallback<>();
               instance.echo(controller, request, callback);
               TestProtos.EchoResponseProto response = callback.get();
               LOG.debug("Batch.Call returning result " + response);
@@ -226,7 +226,7 @@ public class TestCoprocessorEndpoint {
                 throws IOException {
               LOG.debug("Default response is " + TestProtos.EchoRequestProto.getDefaultInstance());
               CoprocessorRpcUtils.BlockingRpcCallback<TestProtos.EchoResponseProto> callback =
-                  new CoprocessorRpcUtils.BlockingRpcCallback<TestProtos.EchoResponseProto>();
+                  new CoprocessorRpcUtils.BlockingRpcCallback<>();
               instance.echo(controller, request, callback);
               TestProtos.EchoResponseProto response = callback.get();
               LOG.debug("Batch.Call returning result " + response);
@@ -271,7 +271,7 @@ public class TestCoprocessorEndpoint {
             public String call(TestRpcServiceProtos.TestProtobufRpcProto instance)
                 throws IOException {
               CoprocessorRpcUtils.BlockingRpcCallback<TestProtos.EchoResponseProto> callback =
-                  new CoprocessorRpcUtils.BlockingRpcCallback<TestProtos.EchoResponseProto>();
+                  new CoprocessorRpcUtils.BlockingRpcCallback<>();
               instance.echo(controller, request, callback);
               TestProtos.EchoResponseProto response = callback.get();
               LOG.debug("Batch.Call got result " + response);
@@ -296,7 +296,7 @@ public class TestCoprocessorEndpoint {
 
   @Test
   public void testMasterCoprocessorService() throws Throwable {
-    Admin admin = util.getHBaseAdmin();
+    Admin admin = util.getAdmin();
     final TestProtos.EchoRequestProto request =
         TestProtos.EchoRequestProto.newBuilder().setMessage("hello").build();
     TestRpcServiceProtos.TestProtobufRpcProto.BlockingInterface service =
@@ -327,7 +327,7 @@ public class TestCoprocessorEndpoint {
 
   @Test
   public void testMasterCoprocessorError() throws Throwable {
-    Admin admin = util.getHBaseAdmin();
+    Admin admin = util.getAdmin();
     TestRpcServiceProtos.TestProtobufRpcProto.BlockingInterface service =
         TestRpcServiceProtos.TestProtobufRpcProto.newBlockingStub(admin.coprocessorService());
     try {

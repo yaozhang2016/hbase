@@ -17,7 +17,6 @@
  */
 package org.apache.hadoop.hbase.regionserver.wal;
 
-import com.google.common.annotations.VisibleForTesting;
 import com.lmax.disruptor.BlockingWaitStrategy;
 import com.lmax.disruptor.EventHandler;
 import com.lmax.disruptor.ExceptionHandler;
@@ -26,7 +25,6 @@ import com.lmax.disruptor.TimeoutException;
 import com.lmax.disruptor.dsl.Disruptor;
 import com.lmax.disruptor.dsl.ProducerType;
 
-import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.util.Arrays;
@@ -37,34 +35,30 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.HRegionInfo;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.hadoop.hbase.client.RegionInfo;
+import org.apache.hadoop.hbase.trace.TraceUtil;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.ClassSize;
 import org.apache.hadoop.hbase.util.FSUtils;
 import org.apache.hadoop.hbase.util.HasThread;
 import org.apache.hadoop.hbase.util.Threads;
 import org.apache.hadoop.hbase.wal.FSHLogProvider;
-import org.apache.hadoop.hbase.wal.WALFactory;
-import org.apache.hadoop.hbase.wal.WALKey;
-import org.apache.hadoop.hbase.wal.WALPrettyPrinter;
+import org.apache.hadoop.hbase.wal.WALEdit;
+import org.apache.hadoop.hbase.wal.WALKeyImpl;
 import org.apache.hadoop.hbase.wal.WALProvider.Writer;
-import org.apache.hadoop.hbase.wal.WALSplitter;
 import org.apache.hadoop.hdfs.DFSOutputStream;
 import org.apache.hadoop.hdfs.client.HdfsDataOutputStream;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
-import org.apache.htrace.NullScope;
-import org.apache.htrace.Span;
-import org.apache.htrace.Trace;
-import org.apache.htrace.TraceScope;
+import org.apache.htrace.core.TraceScope;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
 
 /**
  * The default implementation of FSWAL.
@@ -106,7 +100,7 @@ public class FSHLog extends AbstractFSWAL<Writer> {
   // syncs and appends have completed -- so the log roller can swap the WAL out under it.
   //
   // We use ring buffer sequence as txid of FSWALEntry and SyncFuture.
-  private static final Log LOG = LogFactory.getLog(FSHLog.class);
+  private static final Logger LOG = LoggerFactory.getLogger(FSHLog.class);
 
   /**
    * The nexus at which all incoming handlers meet. Does appends and sync with an ordering. Appends
@@ -167,13 +161,13 @@ public class FSHLog extends AbstractFSWAL<Writer> {
 
     @Override
     public void handleOnStartException(Throwable ex) {
-      LOG.error(ex);
+      LOG.error(ex.toString(), ex);
       throw new RuntimeException(ex);
     }
 
     @Override
     public void handleOnShutdownException(Throwable ex) {
-      LOG.error(ex);
+      LOG.error(ex.toString(), ex);
       throw new RuntimeException(ex);
     }
   }
@@ -216,7 +210,7 @@ public class FSHLog extends AbstractFSWAL<Writer> {
       FSUtils.getDefaultReplication(fs, this.walDir));
     this.lowReplicationRollLimit = conf.getInt("hbase.regionserver.hlog.lowreplication.rolllimit",
       5);
-    this.closeErrorsTolerated = conf.getInt("hbase.regionserver.logroll.errors.tolerated", 0);
+    this.closeErrorsTolerated = conf.getInt("hbase.regionserver.logroll.errors.tolerated", 2);
 
     // rollWriter sets this.hdfs_out if it can.
     rollWriter();
@@ -226,7 +220,7 @@ public class FSHLog extends AbstractFSWAL<Writer> {
     String hostingThreadName = Thread.currentThread().getName();
     // Using BlockingWaitStrategy. Stuff that is going on here takes so long it makes no sense
     // spinning as other strategies do.
-    this.disruptor = new Disruptor<RingBufferTruck>(RingBufferTruck::new,
+    this.disruptor = new Disruptor<>(RingBufferTruck::new,
         getPreallocatedEventCount(), Threads.getNamedThreadFactory(hostingThreadName + ".append"),
         ProducerType.MULTI, new BlockingWaitStrategy());
     // Advance the ring buffer sequence so that it starts from 1 instead of 0,
@@ -244,8 +238,8 @@ public class FSHLog extends AbstractFSWAL<Writer> {
   /**
    * Currently, we need to expose the writer's OutputStream to tests so that they can manipulate the
    * default behavior (such as setting the maxRecoveryErrorCount value for example (see
-   * {@link AbstractTestWALReplay#testReplayEditsWrittenIntoWAL()}). This is done using reflection
-   * on the underlying HDFS OutputStream. NOTE: This could be removed once Hadoop1 support is
+   * {@see org.apache.hadoop.hbase.regionserver.wal.AbstractTestWALReplay#testReplayEditsWrittenIntoWAL()}). This is
+   * done using reflection on the underlying HDFS OutputStream. NOTE: This could be removed once Hadoop1 support is
    * removed.
    * @return null if underlying stream is not ready.
    */
@@ -338,7 +332,7 @@ public class FSHLog extends AbstractFSWAL<Writer> {
           // use assert to make sure no change breaks the logic that
           // sequence and zigzagLatch will be set together
           assert sequence > 0L : "Failed to get sequence from ring buffer";
-          Trace.addTimelineAnnotation("awaiting safepoint");
+          TraceUtil.addTimelineAnnotation("awaiting safepoint");
           syncFuture = zigzagLatch.waitSafePoint(publishSyncOnRingBuffer(sequence));
         }
       } catch (FailedSyncBeforeLogCloseException e) {
@@ -354,9 +348,9 @@ public class FSHLog extends AbstractFSWAL<Writer> {
       if (this.writer != null) {
         oldFileLen = this.writer.getLength();
         try {
-          Trace.addTimelineAnnotation("closing writer");
+          TraceUtil.addTimelineAnnotation("closing writer");
           this.writer.close();
-          Trace.addTimelineAnnotation("writer closed");
+          TraceUtil.addTimelineAnnotation("writer closed");
           this.closeErrorCount.set(0);
         } catch (IOException ioe) {
           int errors = closeErrorCount.incrementAndGet();
@@ -435,31 +429,10 @@ public class FSHLog extends AbstractFSWAL<Writer> {
   @edu.umd.cs.findbugs.annotations.SuppressWarnings(value = "NP_NULL_ON_SOME_PATH_EXCEPTION",
       justification = "Will never be null")
   @Override
-  public long append(final HRegionInfo hri,
-      final WALKey key, final WALEdit edits, final boolean inMemstore) throws IOException {
-    if (this.closed) {
-      throw new IOException("Cannot append; log is closed");
-    }
-    // Make a trace scope for the append. It is closed on other side of the ring buffer by the
-    // single consuming thread. Don't have to worry about it.
-    TraceScope scope = Trace.startSpan("FSHLog.append");
-
-    // This is crazy how much it takes to make an edit. Do we need all this stuff!!!!???? We need
-    // all this to make a key and then below to append the edit, we need to carry htd, info,
-    // etc. all over the ring buffer.
-    FSWALEntry entry = null;
-    long sequence = this.disruptor.getRingBuffer().next();
-    try {
-      RingBufferTruck truck = this.disruptor.getRingBuffer().get(sequence);
-      // Construction of FSWALEntry sets a latch. The latch is thrown just after we stamp the
-      // edit with its edit/sequence id.
-      // TODO: reuse FSWALEntry as we do SyncFuture rather create per append.
-      entry = new FSWALEntry(sequence, key, edits, hri, inMemstore);
-      truck.load(entry, scope.detach());
-    } finally {
-      this.disruptor.getRingBuffer().publish(sequence);
-    }
-    return sequence;
+  public long append(final RegionInfo hri, final WALKeyImpl key, final WALEdit edits,
+      final boolean inMemstore) throws IOException {
+    return stampSequenceIdAndPublishToRingBuffer(hri, key, edits, inMemstore,
+      disruptor.getRingBuffer());
   }
 
   /**
@@ -484,17 +457,6 @@ public class FSHLog extends AbstractFSWAL<Writer> {
     private final BlockingQueue<SyncFuture> syncFutures;
     private volatile SyncFuture takeSyncFuture = null;
 
-    /**
-     * UPDATE!
-     * @param syncs the batch of calls to sync that arrived as this thread was starting; when done,
-     *          we will put the result of the actual hdfs sync call as the result.
-     * @param sequence The sequence number on the ring buffer when this thread was set running. If
-     *          this actual writer sync completes then all appends up this point have been
-     *          flushed/synced/pushed to datanodes. If we fail, then the passed in
-     *          <code>syncs</code> futures will return the exception to their clients; some of the
-     *          edits may have made it out to data nodes but we will report all that were part of
-     *          this session as failed.
-     */
     SyncRunner(final String name, final int maxHandlersCount) {
       super(name);
       // LinkedBlockingQueue because of
@@ -510,7 +472,7 @@ public class FSHLog extends AbstractFSWAL<Writer> {
       // the meta table when succesful (i.e. sync), closing handlers -- etc. These are usually
       // much fewer in number than the user-space handlers so Q-size should be user handlers plus
       // some space for these other handlers. Lets multiply by 3 for good-measure.
-      this.syncFutures = new LinkedBlockingQueue<SyncFuture>(maxHandlersCount * 3);
+      this.syncFutures = new LinkedBlockingQueue<>(maxHandlersCount * 3);
     }
 
     void offer(final long sequence, final SyncFuture[] syncFutures, final int syncFutureCount) {
@@ -609,13 +571,14 @@ public class FSHLog extends AbstractFSWAL<Writer> {
           }
           // I got something. Lets run. Save off current sequence number in case it changes
           // while we run.
-          TraceScope scope = Trace.continueSpan(takeSyncFuture.getSpan());
+          //TODO handle htrace API change, see HBASE-18895
+          //TraceScope scope = Trace.continueSpan(takeSyncFuture.getSpan());
           long start = System.nanoTime();
           Throwable lastException = null;
           try {
-            Trace.addTimelineAnnotation("syncing writer");
+            TraceUtil.addTimelineAnnotation("syncing writer");
             writer.sync();
-            Trace.addTimelineAnnotation("writer synced");
+            TraceUtil.addTimelineAnnotation("writer synced");
             currentSequence = updateHighestSyncedSequence(currentSequence);
           } catch (IOException e) {
             LOG.error("Error syncing, request close of WAL", e);
@@ -625,7 +588,8 @@ public class FSHLog extends AbstractFSWAL<Writer> {
             lastException = e;
           } finally {
             // reattach the span to the future before releasing.
-            takeSyncFuture.setSpan(scope.detach());
+            //TODO handle htrace API change, see HBASE-18895
+            // takeSyncFuture.setSpan(scope.getSpan());
             // First release what we 'took' from the queue.
             syncCount += releaseSyncFuture(takeSyncFuture, currentSequence, lastException);
             // Can we release other syncs?
@@ -650,30 +614,27 @@ public class FSHLog extends AbstractFSWAL<Writer> {
   /**
    * Schedule a log roll if needed.
    */
-  void checkLogRoll() {
+  private void checkLogRoll() {
     // Will return immediately if we are in the middle of a WAL log roll currently.
     if (!rollWriterLock.tryLock()) {
       return;
     }
     boolean lowReplication;
     try {
-      lowReplication = checkLowReplication();
+      lowReplication = doCheckLogLowReplication();
     } finally {
       rollWriterLock.unlock();
     }
-    try {
-      if (lowReplication || writer != null && writer.getLength() > logrollsize) {
-        requestLogRoll(lowReplication);
-      }
-    } catch (IOException e) {
-      LOG.warn("Writer.getLength() failed; continuing", e);
+    if (lowReplication || writer != null && writer.getLength() > logrollsize) {
+      requestLogRoll(lowReplication);
     }
   }
 
   /**
    * @return true if number of replicas for the WAL is lower than threshold
    */
-  private boolean checkLowReplication() {
+  @Override
+  protected boolean doCheckLogLowReplication() {
     boolean logRollNeeded = false;
     // if the number of replicas in HDFS has fallen below the configured
     // value, then roll logs.
@@ -718,22 +679,18 @@ public class FSHLog extends AbstractFSWAL<Writer> {
     return logRollNeeded;
   }
 
-  private SyncFuture publishSyncOnRingBuffer(long sequence) {
-    return publishSyncOnRingBuffer(sequence, null);
-  }
-
   private long getSequenceOnRingBuffer() {
     return this.disruptor.getRingBuffer().next();
   }
 
-  private SyncFuture publishSyncOnRingBuffer(Span span) {
-    long sequence = this.disruptor.getRingBuffer().next();
-    return publishSyncOnRingBuffer(sequence, span);
+  private SyncFuture publishSyncOnRingBuffer() {
+    long sequence = getSequenceOnRingBuffer();
+    return publishSyncOnRingBuffer(sequence);
   }
 
-  private SyncFuture publishSyncOnRingBuffer(long sequence, Span span) {
+  private SyncFuture publishSyncOnRingBuffer(long sequence) {
     // here we use ring buffer sequence as transaction id
-    SyncFuture syncFuture = getSyncFuture(sequence, span);
+    SyncFuture syncFuture = getSyncFuture(sequence);
     try {
       RingBufferTruck truck = this.disruptor.getRingBuffer().get(sequence);
       truck.load(syncFuture);
@@ -744,8 +701,9 @@ public class FSHLog extends AbstractFSWAL<Writer> {
   }
 
   // Sync all known transactions
-  private Span publishSyncThenBlockOnCompletion(Span span) throws IOException {
-    return blockOnSync(publishSyncOnRingBuffer(span));
+  private void publishSyncThenBlockOnCompletion(TraceScope scope) throws IOException {
+    SyncFuture syncFuture = publishSyncOnRingBuffer();
+    blockOnSync(syncFuture);
   }
 
   /**
@@ -771,12 +729,8 @@ public class FSHLog extends AbstractFSWAL<Writer> {
 
   @Override
   public void sync() throws IOException {
-    TraceScope scope = Trace.startSpan("FSHLog.sync");
-    try {
-      scope = Trace.continueSpan(publishSyncThenBlockOnCompletion(scope.detach()));
-    } finally {
-      assert scope == NullScope.INSTANCE || !scope.isDetached();
-      scope.close();
+    try (TraceScope scope = TraceUtil.createTrace("FSHLog.sync")) {
+      publishSyncThenBlockOnCompletion(scope);
     }
   }
 
@@ -786,12 +740,8 @@ public class FSHLog extends AbstractFSWAL<Writer> {
       // Already sync'd.
       return;
     }
-    TraceScope scope = Trace.startSpan("FSHLog.sync");
-    try {
-      scope = Trace.continueSpan(publishSyncThenBlockOnCompletion(scope.detach()));
-    } finally {
-      assert scope == NullScope.INSTANCE || !scope.isDetached();
-      scope.close();
+    try (TraceScope scope = TraceUtil.createTrace("FSHLog.sync")) {
+      publishSyncThenBlockOnCompletion(scope);
     }
   }
 
@@ -803,20 +753,6 @@ public class FSHLog extends AbstractFSWAL<Writer> {
   public static final long FIXED_OVERHEAD = ClassSize
       .align(ClassSize.OBJECT + (5 * ClassSize.REFERENCE) + ClassSize.ATOMIC_INTEGER
           + Bytes.SIZEOF_INT + (3 * Bytes.SIZEOF_LONG));
-
-  private static void split(final Configuration conf, final Path p) throws IOException {
-    FileSystem fs = FileSystem.get(conf);
-    if (!fs.exists(p)) {
-      throw new FileNotFoundException(p.toString());
-    }
-    if (!fs.getFileStatus(p).isDirectory()) {
-      throw new IOException(p + " is not a directory");
-    }
-
-    final Path baseDir = FSUtils.getRootDir(conf);
-    final Path archiveDir = new Path(baseDir, HConstants.HREGION_OLDLOGDIR_NAME);
-    WALSplitter.split(baseDir, p, archiveDir, fs, conf, WALFactory.getInstance(conf));
-  }
 
   /**
    * This class is used coordinating two threads holding one thread at a 'safe point' while the
@@ -834,9 +770,9 @@ public class FSHLog extends AbstractFSWAL<Writer> {
    * To start up the drama, Thread A creates an instance of this class each time it would do this
    * zigzag dance and passes it to Thread B (these classes use Latches so it is one shot only).
    * Thread B notices the new instance (via reading a volatile reference or how ever) and it starts
-   * to work toward the 'safe point'. Thread A calls {@link #waitSafePoint()} when it cannot proceed
+   * to work toward the 'safe point'. Thread A calls {@link #waitSafePoint(SyncFuture)} when it cannot proceed
    * until the Thread B 'safe point' is attained. Thread A will be held inside in
-   * {@link #waitSafePoint()} until Thread B reaches the 'safe point'. Once there, Thread B frees
+   * {@link #waitSafePoint(SyncFuture)} until Thread B reaches the 'safe point'. Once there, Thread B frees
    * Thread A by calling {@link #safePointAttained()}. Thread A now knows Thread B is at the 'safe
    * point' and that it is holding there (When Thread B calls {@link #safePointAttained()} it blocks
    * here until Thread A calls {@link #releaseSafePoint()}). Thread A proceeds to do what it needs
@@ -853,6 +789,12 @@ public class FSHLog extends AbstractFSWAL<Writer> {
      */
     private volatile CountDownLatch safePointReleasedLatch = new CountDownLatch(1);
 
+    private void checkIfSyncFailed(SyncFuture syncFuture) throws FailedSyncBeforeLogCloseException {
+      if (syncFuture.isThrowable()) {
+        throw new FailedSyncBeforeLogCloseException(syncFuture.getThrowable());
+      }
+    }
+
     /**
      * For Thread A to call when it is ready to wait on the 'safe point' to be attained. Thread A
      * will be held in here until Thread B calls {@link #safePointAttained()}
@@ -860,16 +802,12 @@ public class FSHLog extends AbstractFSWAL<Writer> {
      *          exception, then something is up w/ our syncing.
      * @return The passed <code>syncFuture</code>
      */
-    SyncFuture waitSafePoint(final SyncFuture syncFuture) throws InterruptedException,
+    SyncFuture waitSafePoint(SyncFuture syncFuture) throws InterruptedException,
         FailedSyncBeforeLogCloseException {
-      while (true) {
-        if (this.safePointAttainedLatch.await(1, TimeUnit.MILLISECONDS)) {
-          break;
-        }
-        if (syncFuture.isThrowable()) {
-          throw new FailedSyncBeforeLogCloseException(syncFuture.getThrowable());
-        }
+      while (!this.safePointAttainedLatch.await(1, TimeUnit.MILLISECONDS)) {
+        checkIfSyncFailed(syncFuture);
       }
+      checkIfSyncFailed(syncFuture);
       return syncFuture;
     }
 
@@ -1007,16 +945,11 @@ public class FSHLog extends AbstractFSWAL<Writer> {
           }
         } else if (truck.type() == RingBufferTruck.Type.APPEND) {
           FSWALEntry entry = truck.unloadAppend();
-          TraceScope scope = Trace.continueSpan(entry.detachSpan());
+          //TODO handle htrace API change, see HBASE-18895
+          //TraceScope scope = Trace.continueSpan(entry.detachSpan());
           try {
 
             if (this.exception != null) {
-              // We got an exception on an earlier attempt at append. Do not let this append
-              // go through. Fail it but stamp the sequenceid into this append though failed.
-              // We need to do this to close the latch held down deep in WALKey...that is waiting
-              // on sequenceid assignment otherwise it will just hang out (The #append method
-              // called below does this also internally).
-              entry.stampRegionSequenceId();
               // Return to keep processing events coming off the ringbuffer
               return;
             }
@@ -1032,9 +965,6 @@ public class FSHLog extends AbstractFSWAL<Writer> {
                     : new DamagedWALException("On sync", this.exception));
             // Return to keep processing events coming off the ringbuffer
             return;
-          } finally {
-            assert scope == NullScope.INSTANCE || !scope.isDetached();
-            scope.close(); // append scope is complete
           }
         } else {
           // What is this if not an append or sync. Fail all up to this!!!
@@ -1154,52 +1084,6 @@ public class FSHLog extends AbstractFSWAL<Writer> {
       for (SyncRunner syncRunner : this.syncRunners) {
         syncRunner.interrupt();
       }
-    }
-  }
-
-  private static void usage() {
-    System.err.println("Usage: FSHLog <ARGS>");
-    System.err.println("Arguments:");
-    System.err.println(" --dump  Dump textual representation of passed one or more files");
-    System.err.println("         For example: "
-        + "FSHLog --dump hdfs://example.com:9000/hbase/.logs/MACHINE/LOGFILE");
-    System.err.println(" --split Split the passed directory of WAL logs");
-    System.err.println(
-      "         For example: " + "FSHLog --split hdfs://example.com:9000/hbase/.logs/DIR");
-  }
-
-  /**
-   * Pass one or more log file names and it will either dump out a text version on
-   * <code>stdout</code> or split the specified log files.
-   */
-  public static void main(String[] args) throws IOException {
-    if (args.length < 2) {
-      usage();
-      System.exit(-1);
-    }
-    // either dump using the WALPrettyPrinter or split, depending on args
-    if (args[0].compareTo("--dump") == 0) {
-      WALPrettyPrinter.run(Arrays.copyOfRange(args, 1, args.length));
-    } else if (args[0].compareTo("--perf") == 0) {
-      LOG.fatal("Please use the WALPerformanceEvaluation tool instead. i.e.:");
-      LOG.fatal(
-        "\thbase org.apache.hadoop.hbase.wal.WALPerformanceEvaluation --iterations " + args[1]);
-      System.exit(-1);
-    } else if (args[0].compareTo("--split") == 0) {
-      Configuration conf = HBaseConfiguration.create();
-      for (int i = 1; i < args.length; i++) {
-        try {
-          Path logPath = new Path(args[i]);
-          FSUtils.setFsDefault(conf, logPath);
-          split(conf, logPath);
-        } catch (IOException t) {
-          t.printStackTrace(System.err);
-          System.exit(-1);
-        }
-      }
-    } else {
-      usage();
-      System.exit(-1);
     }
   }
 

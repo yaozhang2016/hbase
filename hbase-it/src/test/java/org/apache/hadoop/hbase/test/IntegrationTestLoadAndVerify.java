@@ -27,8 +27,6 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import org.apache.commons.cli.CommandLine;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
@@ -44,6 +42,7 @@ import org.apache.hadoop.hbase.IntegrationTestBase;
 import org.apache.hadoop.hbase.IntegrationTestingUtility;
 import org.apache.hadoop.hbase.client.Connection;
 import org.apache.hadoop.hbase.client.ConnectionFactory;
+import org.apache.hadoop.hbase.mapreduce.TableMapReduceUtil;
 import org.apache.hadoop.hbase.testclassification.IntegrationTests;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Admin;
@@ -55,7 +54,6 @@ import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.client.ScannerCallable;
 import org.apache.hadoop.hbase.io.ImmutableBytesWritable;
 import org.apache.hadoop.hbase.mapreduce.NMapInputFormat;
-import org.apache.hadoop.hbase.mapreduce.TableMapReduceUtil;
 import org.apache.hadoop.hbase.mapreduce.TableMapper;
 import org.apache.hadoop.hbase.mapreduce.TableRecordReaderImpl;
 import org.apache.hadoop.hbase.util.AbstractHBaseTool;
@@ -69,7 +67,7 @@ import org.apache.hadoop.mapreduce.Mapper;
 import org.apache.hadoop.mapreduce.Reducer;
 import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
 import org.apache.hadoop.util.ToolRunner;
-import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
+import org.apache.hadoop.hbase.wal.WALEdit;
 import org.apache.hadoop.hbase.wal.WALKey;
 import org.apache.hadoop.hbase.mapreduce.WALPlayer;
 import org.apache.hadoop.hbase.client.Mutation;
@@ -84,8 +82,9 @@ import java.util.TreeSet;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
-
-import com.google.common.collect.Sets;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.apache.hbase.thirdparty.com.google.common.collect.Sets;
 
 /**
  * A large test which loads a lot of data that has internal references, and
@@ -107,7 +106,7 @@ import com.google.common.collect.Sets;
 @Category(IntegrationTests.class)
 public class IntegrationTestLoadAndVerify  extends IntegrationTestBase  {
 
-  private static final Log LOG = LogFactory.getLog(IntegrationTestLoadAndVerify.class);
+  private static final Logger LOG = LoggerFactory.getLogger(IntegrationTestLoadAndVerify.class);
 
   private static final String TEST_NAME = "IntegrationTestLoadAndVerify";
   private static final byte[] TEST_FAMILY = Bytes.toBytes("f1");
@@ -426,7 +425,7 @@ public void cleanUpCluster() throws Exception {
           try {
             LOG.info("Found cell=" + cell + " , walKey=" + context.getCurrentKey());
           } catch (IOException|InterruptedException e) {
-            LOG.warn(e);
+            LOG.warn(e.toString(), e);
           }
           if (rows.addAndGet(1) < MISSING_ROWS_TO_LOG) {
             context.getCounter(FOUND_GROUP_KEY, keyStr).increment(1);
@@ -456,7 +455,7 @@ public void cleanUpCluster() throws Exception {
       throws IOException, InterruptedException {
     Path keysInputDir = new Path(conf.get(SEARCHER_INPUTDIR_KEY));
     FileSystem fs = FileSystem.get(conf);
-    SortedSet<byte []> result = new TreeSet<byte []>(Bytes.BYTES_COMPARATOR);
+    SortedSet<byte []> result = new TreeSet<>(Bytes.BYTES_COMPARATOR);
     if (!fs.exists(keysInputDir)) {
       throw new FileNotFoundException(keysInputDir.toString());
     }
@@ -538,7 +537,7 @@ public void cleanUpCluster() throws Exception {
     HTableDescriptor htd = new HTableDescriptor(TableName.valueOf(TEST_NAME));
     htd.addFamily(new HColumnDescriptor(TEST_FAMILY));
 
-    Admin admin = getTestingUtil(getConf()).getHBaseAdmin();
+    Admin admin = getTestingUtil(getConf()).getAdmin();
     admin.createTable(htd, Bytes.toBytes(0L), Bytes.toBytes(-1L), 40);
 
     doLoad(getConf(), htd);

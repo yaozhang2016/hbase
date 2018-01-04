@@ -19,7 +19,7 @@
 
 package org.apache.hadoop.hbase.client;
 
-import com.google.common.annotations.VisibleForTesting;
+import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
 
 import java.io.IOException;
 import java.io.InterruptedIOException;
@@ -28,7 +28,6 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -38,16 +37,19 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.apache.hadoop.hbase.CallQueueTooBigException;
 import org.apache.hadoop.hbase.DoNotRetryIOException;
+import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.HRegionLocation;
 import org.apache.hadoop.hbase.RegionLocations;
 import org.apache.hadoop.hbase.RetryImmediatelyException;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.hadoop.hbase.trace.TraceUtil;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.hbase.client.backoff.ServerStatistics;
 import org.apache.hadoop.hbase.client.coprocessor.Batch;
 import org.apache.hadoop.hbase.exceptions.ClientExceptionsUtil;
@@ -55,7 +57,7 @@ import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
-import org.apache.htrace.Trace;
+import org.apache.htrace.core.Tracer;
 
 /**
  * The context, and return value, for a single submit/submitAll call.
@@ -69,7 +71,7 @@ import org.apache.htrace.Trace;
 @InterfaceAudience.Private
 class AsyncRequestFutureImpl<CResult> implements AsyncRequestFuture {
 
-  private static final Log LOG = LogFactory.getLog(AsyncRequestFutureImpl.class);
+  private static final Logger LOG = LoggerFactory.getLogger(AsyncRequestFutureImpl.class);
 
   private RetryingTimeTracker tracker;
 
@@ -101,9 +103,8 @@ class AsyncRequestFutureImpl<CResult> implements AsyncRequestFuture {
         }
       }
       if (done) return; // Done within primary timeout
-      Map<ServerName, MultiAction> actionsByServer =
-          new HashMap<ServerName, MultiAction>();
-      List<Action> unknownLocActions = new ArrayList<Action>();
+      Map<ServerName, MultiAction> actionsByServer = new HashMap<>();
+      List<Action> unknownLocActions = new ArrayList<>();
       if (replicaGetIndices == null) {
         for (int i = 0; i < results.length; ++i) {
           addReplicaActions(i, actionsByServer, unknownLocActions);
@@ -117,7 +118,7 @@ class AsyncRequestFutureImpl<CResult> implements AsyncRequestFuture {
         sendMultiAction(actionsByServer, 1, null, unknownLocActions.isEmpty());
       }
       if (!unknownLocActions.isEmpty()) {
-        actionsByServer = new HashMap<ServerName, MultiAction>();
+        actionsByServer = new HashMap<>();
         for (Action action : unknownLocActions) {
           addReplicaActionsAgain(action, actionsByServer);
         }
@@ -180,37 +181,20 @@ class AsyncRequestFutureImpl<CResult> implements AsyncRequestFuture {
    * Runnable (that can be submitted to thread pool) that submits MultiAction to a
    * single server. The server call is synchronous, therefore we do it on a thread pool.
    */
-  private final class SingleServerRequestRunnable implements Runnable {
+  @VisibleForTesting
+  final class SingleServerRequestRunnable implements Runnable {
     private final MultiAction multiAction;
     private final int numAttempt;
     private final ServerName server;
     private final Set<CancellableRegionServerCallable> callsInProgress;
-    private Long heapSize = null;
-    private SingleServerRequestRunnable(
+    @VisibleForTesting
+    SingleServerRequestRunnable(
         MultiAction multiAction, int numAttempt, ServerName server,
         Set<CancellableRegionServerCallable> callsInProgress) {
       this.multiAction = multiAction;
       this.numAttempt = numAttempt;
       this.server = server;
       this.callsInProgress = callsInProgress;
-    }
-
-    @VisibleForTesting
-    long heapSize() {
-      if (heapSize != null) {
-        return heapSize;
-      }
-      heapSize = 0L;
-      for (Map.Entry<byte[], List<Action>> e: this.multiAction.actions.entrySet()) {
-        List<Action> actions = e.getValue();
-        for (Action action: actions) {
-          Row row = action.getAction();
-          if (row instanceof Mutation) {
-            heapSize += ((Mutation) row).heapSize();
-          }
-        }
-      }
-      return heapSize;
     }
 
     @Override
@@ -299,11 +283,10 @@ class AsyncRequestFutureImpl<CResult> implements AsyncRequestFuture {
   private final int[] replicaGetIndices;
   private final boolean hasAnyReplicaGets;
   private final long nonceGroup;
-  private CancellableRegionServerCallable currentCallable;
-  private int operationTimeout;
-  private int rpcTimeout;
-  private final Map<ServerName, List<Long>> heapSizesByServer = new HashMap<>();
-  protected AsyncProcess asyncProcess;
+  private final CancellableRegionServerCallable currentCallable;
+  private final int operationTimeout;
+  private final int rpcTimeout;
+  private final AsyncProcess asyncProcess;
 
   /**
    * For {@link AsyncRequestFutureImpl#manageError(int, Row, Retry, Throwable, ServerName)}. Only
@@ -338,32 +321,27 @@ class AsyncRequestFutureImpl<CResult> implements AsyncRequestFuture {
     }
   }
 
-
-
-  public AsyncRequestFutureImpl(TableName tableName, List<Action> actions, long nonceGroup,
-      ExecutorService pool, boolean needResults, Object[] results, Batch.Callback<CResult> callback,
-      CancellableRegionServerCallable callable, int operationTimeout, int rpcTimeout,
-      AsyncProcess asyncProcess) {
-    this.pool = pool;
-    this.callback = callback;
+  public AsyncRequestFutureImpl(AsyncProcessTask task, List<Action> actions,
+      long nonceGroup, AsyncProcess asyncProcess) {
+    this.pool = task.getPool();
+    this.callback = task.getCallback();
     this.nonceGroup = nonceGroup;
-    this.tableName = tableName;
+    this.tableName = task.getTableName();
     this.actionsInProgress.set(actions.size());
-    if (results != null) {
-      assert needResults;
-      if (results.length != actions.size()) {
+    if (task.getResults() == null) {
+      results = task.getNeedResults() ? new Object[actions.size()] : null;
+    } else {
+      if (task.getResults().length != actions.size()) {
         throw new AssertionError("results.length");
       }
-      this.results = results;
+      this.results = task.getResults();
       for (int i = 0; i != this.results.length; ++i) {
         results[i] = null;
       }
-    } else {
-      this.results = needResults ? new Object[actions.size()] : null;
     }
     List<Integer> replicaGetIndices = null;
     boolean hasAnyReplicaGets = false;
-    if (needResults) {
+    if (results != null) {
       // Check to see if any requests might require replica calls.
       // We expect that many requests will consist of all or no multi-replica gets; in such
       // cases we would just use a boolean (hasAnyReplicaGets). If there's a mix, we will
@@ -377,7 +355,7 @@ class AsyncRequestFutureImpl<CResult> implements AsyncRequestFuture {
           hasAnyReplicaGets = true;
           if (hasAnyNonReplicaReqs) { // Mixed case
             if (replicaGetIndices == null) {
-              replicaGetIndices = new ArrayList<Integer>(actions.size() - 1);
+              replicaGetIndices = new ArrayList<>(actions.size() - 1);
             }
             replicaGetIndices.add(posInList);
           }
@@ -387,7 +365,7 @@ class AsyncRequestFutureImpl<CResult> implements AsyncRequestFuture {
           if (posInList > 0) {
             // Add all the previous requests to the index lists. We know they are all
             // replica-gets because this is the first non-multi-replica request in the list.
-            replicaGetIndices = new ArrayList<Integer>(actions.size() - 1);
+            replicaGetIndices = new ArrayList<>(actions.size() - 1);
             for (int i = 0; i < posInList; ++i) {
               replicaGetIndices.add(i);
             }
@@ -413,10 +391,10 @@ class AsyncRequestFutureImpl<CResult> implements AsyncRequestFuture {
     this.errorsByServer = createServerErrorTracker();
     this.errors = (asyncProcess.globalErrors != null)
         ? asyncProcess.globalErrors : new BatchErrors();
-    this.operationTimeout = operationTimeout;
-    this.rpcTimeout = rpcTimeout;
-    this.currentCallable = callable;
-    if (callable == null) {
+    this.operationTimeout = task.getOperationTimeout();
+    this.rpcTimeout = task.getRpcTimeout();
+    this.currentCallable = task.getCallable();
+    if (task.getCallable() == null) {
       tracker = new RetryingTimeTracker().start();
     }
   }
@@ -427,20 +405,11 @@ class AsyncRequestFutureImpl<CResult> implements AsyncRequestFuture {
   }
 
   @VisibleForTesting
-  Map<ServerName, List<Long>> getRequestHeapSize() {
-    return heapSizesByServer;
+  SingleServerRequestRunnable createSingleServerRequest(MultiAction multiAction, int numAttempt, ServerName server,
+        Set<CancellableRegionServerCallable> callsInProgress) {
+    return new SingleServerRequestRunnable(multiAction, numAttempt, server, callsInProgress);
   }
 
-  private SingleServerRequestRunnable addSingleServerRequestHeapSize(ServerName server,
-    SingleServerRequestRunnable runnable) {
-    List<Long> heapCount = heapSizesByServer.get(server);
-    if (heapCount == null) {
-      heapCount = new LinkedList<>();
-      heapSizesByServer.put(server, heapCount);
-    }
-    heapCount.add(runnable.heapSize());
-    return runnable;
-  }
   /**
    * Group a list of actions per region servers, and send them.
    *
@@ -448,8 +417,7 @@ class AsyncRequestFutureImpl<CResult> implements AsyncRequestFuture {
    * @param numAttempt - the current numAttempt (first attempt is 1)
    */
   void groupAndSendMultiAction(List<Action> currentActions, int numAttempt) {
-    Map<ServerName, MultiAction> actionsByServer =
-        new HashMap<ServerName, MultiAction>();
+    Map<ServerName, MultiAction> actionsByServer = new HashMap<>();
 
     boolean isReplica = false;
     List<Action> unknownReplicaActions = null;
@@ -466,7 +434,7 @@ class AsyncRequestFutureImpl<CResult> implements AsyncRequestFuture {
       if (loc == null || loc.getServerName() == null) {
         if (isReplica) {
           if (unknownReplicaActions == null) {
-            unknownReplicaActions = new ArrayList<Action>();
+            unknownReplicaActions = new ArrayList<>(1);
           }
           unknownReplicaActions.add(action);
         } else {
@@ -488,7 +456,7 @@ class AsyncRequestFutureImpl<CResult> implements AsyncRequestFuture {
     }
 
     if (hasUnknown) {
-      actionsByServer = new HashMap<ServerName, MultiAction>();
+      actionsByServer = new HashMap<>();
       for (Action action : unknownReplicaActions) {
         HRegionLocation loc = getReplicaLocationOrFail(action);
         if (loc == null) continue;
@@ -571,8 +539,11 @@ class AsyncRequestFutureImpl<CResult> implements AsyncRequestFuture {
       }
 
       // run all the runnables
+      // HBASE-17475: Do not reuse the thread after stack reach a certain depth to prevent stack overflow
+      // for now, we use HConstants.DEFAULT_HBASE_CLIENT_RETRIES_NUMBER to control the depth
       for (Runnable runnable : runnables) {
-        if ((--actionsRemaining == 0) && reuseThread) {
+        if ((--actionsRemaining == 0) && reuseThread
+            && numAttempt % HConstants.DEFAULT_HBASE_CLIENT_RETRIES_NUMBER != 0) {
           runnable.run();
         } else {
           try {
@@ -610,14 +581,19 @@ class AsyncRequestFutureImpl<CResult> implements AsyncRequestFuture {
         asyncProcess.connection.getConnectionMetrics().incrNormalRunners();
       }
       asyncProcess.incTaskCounters(multiAction.getRegions(), server);
-      SingleServerRequestRunnable runnable = addSingleServerRequestHeapSize(server,
-          new SingleServerRequestRunnable(multiAction, numAttempt, server, callsInProgress));
-      return Collections.singletonList(Trace.wrap("AsyncProcess.sendMultiAction", runnable));
+      SingleServerRequestRunnable runnable = createSingleServerRequest(
+              multiAction, numAttempt, server, callsInProgress);
+      Tracer tracer = Tracer.curThreadTracer();
+
+      if (tracer == null) {
+        return Collections.singletonList(runnable);
+      } else {
+        return Collections.singletonList(tracer.wrap(runnable, "AsyncProcess.sendMultiAction"));
+      }
     }
 
     // group the actions by the amount of delay
-    Map<Long, DelayingRunner> actions = new HashMap<Long, DelayingRunner>(multiAction
-        .size());
+    Map<Long, DelayingRunner> actions = new HashMap<>(multiAction.size());
 
     // split up the actions
     for (Map.Entry<byte[], List<Action>> e : multiAction.actions.entrySet()) {
@@ -630,12 +606,11 @@ class AsyncRequestFutureImpl<CResult> implements AsyncRequestFuture {
       }
     }
 
-    List<Runnable> toReturn = new ArrayList<Runnable>(actions.size());
+    List<Runnable> toReturn = new ArrayList<>(actions.size());
     for (DelayingRunner runner : actions.values()) {
       asyncProcess.incTaskCounters(runner.getActions().getRegions(), server);
       String traceText = "AsyncProcess.sendMultiAction";
-      Runnable runnable = addSingleServerRequestHeapSize(server,
-          new SingleServerRequestRunnable(runner.getActions(), numAttempt, server, callsInProgress));
+      Runnable runnable = createSingleServerRequest(runner.getActions(), numAttempt, server, callsInProgress);
       // use a delay runner only if we need to sleep for some time
       if (runner.getSleepTime() > 0) {
         runner.setRunner(runnable);
@@ -650,7 +625,7 @@ class AsyncRequestFutureImpl<CResult> implements AsyncRequestFuture {
           asyncProcess.connection.getConnectionMetrics().incrNormalRunners();
         }
       }
-      runnable = Trace.wrap(traceText, runnable);
+      runnable = TraceUtil.wrap(runnable, traceText);
       toReturn.add(runnable);
 
     }
@@ -736,7 +711,7 @@ class AsyncRequestFutureImpl<CResult> implements AsyncRequestFuture {
       asyncProcess.connection.clearCaches(server);
     }
     int failed = 0, stopped = 0;
-    List<Action> toReplay = new ArrayList<Action>();
+    List<Action> toReplay = new ArrayList<>();
     for (Map.Entry<byte[], List<Action>> e : rsActions.actions.entrySet()) {
       byte[] regionName = e.getKey();
       byte[] row = e.getValue().iterator().next().getAction().getRow();
@@ -788,8 +763,15 @@ class AsyncRequestFutureImpl<CResult> implements AsyncRequestFuture {
     //  we go for one.
     boolean retryImmediately = throwable instanceof RetryImmediatelyException;
     int nextAttemptNumber = retryImmediately ? numAttempt : numAttempt + 1;
-    long backOffTime = retryImmediately ? 0 :
-        errorsByServer.calculateBackoffTime(oldServer, asyncProcess.pause);
+    long backOffTime;
+    if (retryImmediately) {
+      backOffTime = 0;
+    } else if (throwable instanceof CallQueueTooBigException) {
+      // Give a special check on CQTBE, see #HBASE-17114
+      backOffTime = errorsByServer.calculateBackoffTime(oldServer, asyncProcess.pauseForCQTBE);
+    } else {
+      backOffTime = errorsByServer.calculateBackoffTime(oldServer, asyncProcess.pause);
+    }
     if (numAttempt > asyncProcess.startLogErrorsCnt) {
       // We use this value to have some logs when we have multiple failures, but not too many
       //  logs, as errors are to be expected when a region moves, splits and so on
@@ -843,7 +825,7 @@ class AsyncRequestFutureImpl<CResult> implements AsyncRequestFuture {
     //  - DoNotRetryIOException: we continue to retry for other actions
     //  - RegionMovedException: we update the cache with the new region location
 
-    List<Action> toReplay = new ArrayList<Action>();
+    List<Action> toReplay = new ArrayList<>();
     Throwable throwable = null;
     int failureCount = 0;
     boolean canRetry = true;
@@ -995,12 +977,12 @@ class AsyncRequestFutureImpl<CResult> implements AsyncRequestFuture {
                            Throwable error, long backOffTime, boolean willRetry, String startTime,
                            int failed, int stopped) {
     StringBuilder sb = new StringBuilder();
-    sb.append("#").append(asyncProcess.id).append(", table=").append(tableName).append(", ")
+    sb.append("id=").append(asyncProcess.id).append(", table=").append(tableName).append(", ")
         .append("attempt=").append(numAttempt)
         .append("/").append(asyncProcess.numTries).append(" ");
 
     if (failureCount > 0 || error != null){
-      sb.append("failed=").append(failureCount).append("ops").append(", last exception: ").
+      sb.append("failed=").append(failureCount).append("ops").append(", last exception=").
           append(error == null ? "null" : error);
     } else {
       sb.append("succeeded");
@@ -1238,9 +1220,6 @@ class AsyncRequestFutureImpl<CResult> implements AsyncRequestFuture {
           lastLog = now;
           LOG.info("#" + asyncProcess.id + ", waiting for " + currentInProgress
               + "  actions to finish on table: " + tableName);
-          if (currentInProgress <= asyncProcess.thresholdToLogUndoneTaskDetails) {
-            asyncProcess.logDetailsOfUndoneTasks(currentInProgress);
-          }
         }
       }
       synchronized (actionsInProgress) {
@@ -1295,6 +1274,6 @@ class AsyncRequestFutureImpl<CResult> implements AsyncRequestFuture {
   private MultiServerCallable createCallable(final ServerName server, TableName tableName,
       final MultiAction multi) {
     return new MultiServerCallable(asyncProcess.connection, tableName, server,
-        multi, asyncProcess.rpcFactory.newController(), rpcTimeout, tracker);
+        multi, asyncProcess.rpcFactory.newController(), rpcTimeout, tracker, multi.getPriority());
   }
 }

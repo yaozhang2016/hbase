@@ -18,9 +18,8 @@
 package org.apache.hadoop.hbase.client;
 
 
-import com.google.common.annotations.VisibleForTesting;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * Provide a way to access the inner buffer.
@@ -29,9 +28,7 @@ import org.apache.hadoop.hbase.classification.InterfaceStability;
  * @param <T>
  */
 @InterfaceAudience.Public
-@InterfaceStability.Evolving
-@VisibleForTesting
-interface RowAccess<T> extends Iterable<T> {
+public interface RowAccess<T> extends Iterable<T> {
   /**
    * @return true if there are no elements.
    */

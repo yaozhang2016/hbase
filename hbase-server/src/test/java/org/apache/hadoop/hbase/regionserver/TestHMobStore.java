@@ -18,13 +18,29 @@
  */
 package org.apache.hadoop.hbase.regionserver;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import static org.apache.hadoop.hbase.regionserver.Store.PRIORITY_USER;
+
+import java.io.IOException;
+import java.security.Key;
+import java.security.SecureRandom;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Date;
+import java.util.Iterator;
+import java.util.List;
+import java.util.NavigableSet;
+import java.util.Optional;
+import java.util.concurrent.ConcurrentSkipListSet;
+
+import javax.crypto.spec.SecretKeySpec;
+
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hbase.ArrayBackedTag;
 import org.apache.hadoop.hbase.Cell;
-import org.apache.hadoop.hbase.CellComparator;
+import org.apache.hadoop.hbase.CellComparatorImpl;
 import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
@@ -35,7 +51,6 @@ import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.Tag;
-import org.apache.hadoop.hbase.ArrayBackedTag;
 import org.apache.hadoop.hbase.TagType;
 import org.apache.hadoop.hbase.client.Get;
 import org.apache.hadoop.hbase.client.Scan;
@@ -46,6 +61,7 @@ import org.apache.hadoop.hbase.mob.MobConstants;
 import org.apache.hadoop.hbase.mob.MobUtils;
 import org.apache.hadoop.hbase.monitoring.MonitoredTask;
 import org.apache.hadoop.hbase.regionserver.compactions.CompactionContext;
+import org.apache.hadoop.hbase.regionserver.compactions.CompactionLifeCycleTracker;
 import org.apache.hadoop.hbase.regionserver.throttle.NoLimitThroughputController;
 import org.apache.hadoop.hbase.security.EncryptionUtil;
 import org.apache.hadoop.hbase.security.User;
@@ -60,23 +76,12 @@ import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.junit.rules.TestName;
 import org.mockito.Mockito;
-
-import javax.crypto.spec.SecretKeySpec;
-import java.io.IOException;
-import java.security.Key;
-import java.security.SecureRandom;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.Date;
-import java.util.Iterator;
-import java.util.List;
-import java.util.NavigableSet;
-import java.util.concurrent.ConcurrentSkipListSet;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Category(MediumTests.class)
 public class TestHMobStore {
-  public static final Log LOG = LogFactory.getLog(TestHMobStore.class);
+  public static final Logger LOG = LoggerFactory.getLogger(TestHMobStore.class);
   @Rule public TestName name = new TestName();
 
   private HMobStore store;
@@ -97,12 +102,11 @@ public class TestHMobStore {
   private byte[] value2 = Bytes.toBytes("value2");
   private Path mobFilePath;
   private Date currentDate = new Date();
-  private KeyValue seekKey1;
-  private KeyValue seekKey2;
-  private KeyValue seekKey3;
-  private NavigableSet<byte[]> qualifiers =
-    new ConcurrentSkipListSet<byte[]>(Bytes.BYTES_COMPARATOR);
-  private List<Cell> expected = new ArrayList<Cell>();
+  private Cell seekKey1;
+  private Cell seekKey2;
+  private Cell seekKey3;
+  private NavigableSet<byte[]> qualifiers = new ConcurrentSkipListSet<>(Bytes.BYTES_COMPARATOR);
+  private List<Cell> expected = new ArrayList<>();
   private long id = System.currentTimeMillis();
   private Get get = new Get(row);
   private final static HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
@@ -154,7 +158,7 @@ public class TestHMobStore {
 
     htd.addFamily(hcd);
     HRegionInfo info = new HRegionInfo(htd.getTableName(), null, null, false);
-
+    ChunkCreator.initialize(MemStoreLABImpl.CHUNK_SIZE_DEFAULT, false, 0, 0, 0, null);
     final Configuration walConf = new Configuration(conf);
     FSUtils.setRootDir(walConf, basedir);
     final WALFactory wals = new WALFactory(walConf, null, methodName);
@@ -180,7 +184,7 @@ public class TestHMobStore {
     KeyValue[] keys = new KeyValue[] { key1, key2, key3 };
     int maxKeyCount = keys.length;
     StoreFileWriter mobWriter = store.createWriterInTmp(currentDate, maxKeyCount,
-        hcd.getCompactionCompressionType(), region.getRegionInfo().getStartKey());
+        hcd.getCompactionCompressionType(), region.getRegionInfo().getStartKey(), false);
     mobFilePath = mobWriter.getPath();
 
     mobWriter.append(key1);
@@ -195,9 +199,9 @@ public class TestHMobStore {
     KeyValue kv1 = new KeyValue(row, family, qf1, Long.MAX_VALUE, referenceValue);
     KeyValue kv2 = new KeyValue(row, family, qf2, Long.MAX_VALUE, referenceValue);
     KeyValue kv3 = new KeyValue(row2, family, qf3, Long.MAX_VALUE, referenceValue);
-    seekKey1 = MobUtils.createMobRefKeyValue(kv1, referenceValue, tableNameTag);
-    seekKey2 = MobUtils.createMobRefKeyValue(kv2, referenceValue, tableNameTag);
-    seekKey3 = MobUtils.createMobRefKeyValue(kv3, referenceValue, tableNameTag);
+    seekKey1 = MobUtils.createMobRefCell(kv1, referenceValue, tableNameTag);
+    seekKey2 = MobUtils.createMobRefCell(kv2, referenceValue, tableNameTag);
+    seekKey3 = MobUtils.createMobRefCell(kv3, referenceValue, tableNameTag);
   }
 
   /**
@@ -219,12 +223,12 @@ public class TestHMobStore {
 
     Scan scan = new Scan(get);
     InternalScanner scanner = (InternalScanner) store.getScanner(scan,
-        scan.getFamilyMap().get(store.getFamily().getName()),
+        scan.getFamilyMap().get(store.getColumnFamilyDescriptor().getName()),
         0);
 
-    List<Cell> results = new ArrayList<Cell>();
+    List<Cell> results = new ArrayList<>();
     scanner.next(results);
-    Collections.sort(results, CellComparator.COMPARATOR);
+    Collections.sort(results, CellComparatorImpl.COMPARATOR);
     scanner.close();
 
     //Compare
@@ -264,12 +268,12 @@ public class TestHMobStore {
 
     Scan scan = new Scan(get);
     InternalScanner scanner = (InternalScanner) store.getScanner(scan,
-        scan.getFamilyMap().get(store.getFamily().getName()),
+        scan.getFamilyMap().get(store.getColumnFamilyDescriptor().getName()),
         0);
 
-    List<Cell> results = new ArrayList<Cell>();
+    List<Cell> results = new ArrayList<>();
     scanner.next(results);
-    Collections.sort(results, CellComparator.COMPARATOR);
+    Collections.sort(results, CellComparatorImpl.COMPARATOR);
     scanner.close();
 
     //Compare
@@ -309,12 +313,12 @@ public class TestHMobStore {
     Scan scan = new Scan(get);
     scan.setAttribute(MobConstants.MOB_SCAN_RAW, Bytes.toBytes(Boolean.TRUE));
     InternalScanner scanner = (InternalScanner) store.getScanner(scan,
-      scan.getFamilyMap().get(store.getFamily().getName()),
+      scan.getFamilyMap().get(store.getColumnFamilyDescriptor().getName()),
       0);
 
-    List<Cell> results = new ArrayList<Cell>();
+    List<Cell> results = new ArrayList<>();
     scanner.next(results);
-    Collections.sort(results, CellComparator.COMPARATOR);
+    Collections.sort(results, CellComparatorImpl.COMPARATOR);
     scanner.close();
 
     //Compare
@@ -354,12 +358,12 @@ public class TestHMobStore {
 
     Scan scan = new Scan(get);
     InternalScanner scanner = (InternalScanner) store.getScanner(scan,
-        scan.getFamilyMap().get(store.getFamily().getName()),
+        scan.getFamilyMap().get(store.getColumnFamilyDescriptor().getName()),
         0);
 
-    List<Cell> results = new ArrayList<Cell>();
+    List<Cell> results = new ArrayList<>();
     scanner.next(results);
-    Collections.sort(results, CellComparator.COMPARATOR);
+    Collections.sort(results, CellComparatorImpl.COMPARATOR);
     scanner.close();
 
     //Compare
@@ -406,12 +410,12 @@ public class TestHMobStore {
     Scan scan = new Scan(get);
     scan.setAttribute(MobConstants.MOB_SCAN_RAW, Bytes.toBytes(Boolean.TRUE));
     InternalScanner scanner = (InternalScanner) store.getScanner(scan,
-      scan.getFamilyMap().get(store.getFamily().getName()),
+      scan.getFamilyMap().get(store.getColumnFamilyDescriptor().getName()),
       0);
 
-    List<Cell> results = new ArrayList<Cell>();
+    List<Cell> results = new ArrayList<>();
     scanner.next(results);
-    Collections.sort(results, CellComparator.COMPARATOR);
+    Collections.sort(results, CellComparatorImpl.COMPARATOR);
     scanner.close();
 
     //Compare
@@ -421,7 +425,7 @@ public class TestHMobStore {
       //this is not mob reference cell.
       Assert.assertFalse(MobUtils.isMobReferenceCell(cell));
       Assert.assertEquals(expected.get(i), results.get(i));
-      Assert.assertEquals(100, store.getFamily().getMobThreshold());
+      Assert.assertEquals(100, store.getColumnFamilyDescriptor().getMobThreshold());
     }
   }
 
@@ -478,7 +482,7 @@ public class TestHMobStore {
    * @throws IOException
    */
   private static void flushStore(HMobStore store, long id) throws IOException {
-    StoreFlushContext storeFlushCtx = store.createFlushContext(id);
+    StoreFlushContext storeFlushCtx = store.createFlushContext(id, FlushLifeCycleTracker.DUMMY);
     storeFlushCtx.prepare();
     storeFlushCtx.flushCache(Mockito.mock(MonitoredTask.class));
     storeFlushCtx.commit(Mockito.mock(MonitoredTask.class));
@@ -516,18 +520,18 @@ public class TestHMobStore {
     this.store.add(new KeyValue(row, family, qf6, 1, value), null);
     flush(2);
 
-    Collection<StoreFile> storefiles = this.store.getStorefiles();
+    Collection<HStoreFile> storefiles = this.store.getStorefiles();
     checkMobHFileEncrytption(storefiles);
 
     // Scan the values
     Scan scan = new Scan(get);
     InternalScanner scanner = (InternalScanner) store.getScanner(scan,
-        scan.getFamilyMap().get(store.getFamily().getName()),
+        scan.getFamilyMap().get(store.getColumnFamilyDescriptor().getName()),
         0);
 
-    List<Cell> results = new ArrayList<Cell>();
+    List<Cell> results = new ArrayList<>();
     scanner.next(results);
-    Collections.sort(results, CellComparator.COMPARATOR);
+    Collections.sort(results, CellComparatorImpl.COMPARATOR);
     scanner.close();
     Assert.assertEquals(expected.size(), results.size());
     for(int i=0; i<results.size(); i++) {
@@ -536,16 +540,17 @@ public class TestHMobStore {
 
     // Trigger major compaction
     this.store.triggerMajorCompaction();
-    CompactionContext requestCompaction = this.store.requestCompaction(1, null);
-    this.store.compact(requestCompaction, NoLimitThroughputController.INSTANCE);
+    Optional<CompactionContext> requestCompaction =
+        this.store.requestCompaction(PRIORITY_USER, CompactionLifeCycleTracker.DUMMY, null);
+    this.store.compact(requestCompaction.get(), NoLimitThroughputController.INSTANCE, null);
     Assert.assertEquals(1, this.store.getStorefiles().size());
 
     //Check encryption after compaction
     checkMobHFileEncrytption(this.store.getStorefiles());
   }
 
-  private void checkMobHFileEncrytption(Collection<StoreFile> storefiles) {
-    StoreFile storeFile = storefiles.iterator().next();
+  private void checkMobHFileEncrytption(Collection<HStoreFile> storefiles) {
+    HStoreFile storeFile = storefiles.iterator().next();
     HFile.Reader reader = storeFile.getReader().getHFileReader();
     byte[] encryptionKey = reader.getTrailer().getEncryptionKey();
     Assert.assertTrue(null != encryptionKey);

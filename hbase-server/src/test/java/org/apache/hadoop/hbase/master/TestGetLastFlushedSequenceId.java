@@ -70,7 +70,7 @@ public class TestGetLastFlushedSequenceId {
 
   @Test
   public void test() throws IOException, InterruptedException {
-    testUtil.getHBaseAdmin().createNamespace(
+    testUtil.getAdmin().createNamespace(
       NamespaceDescriptor.create(tableName.getNamespaceAsString()).build());
     Table table = testUtil.createTable(tableName, families);
     table.put(new Put(Bytes.toBytes("k"))
@@ -80,7 +80,7 @@ public class TestGetLastFlushedSequenceId {
     Region region = null;
     for (int i = 0; i < cluster.getRegionServerThreads().size(); i++) {
       HRegionServer hrs = rsts.get(i).getRegionServer();
-      for (Region r : hrs.getOnlineRegions(tableName)) {
+      for (Region r : hrs.getRegions(tableName)) {
         region = r;
         break;
       }
@@ -94,7 +94,7 @@ public class TestGetLastFlushedSequenceId {
     // This will be the sequenceid just before that of the earliest edit in memstore.
     long storeSequenceId = ids.getStoreSequenceId(0).getSequenceId();
     assertTrue(storeSequenceId > 0);
-    testUtil.getHBaseAdmin().flush(tableName);
+    testUtil.getAdmin().flush(tableName);
     Thread.sleep(2000);
     ids =
         testUtil.getHBaseCluster().getMaster()

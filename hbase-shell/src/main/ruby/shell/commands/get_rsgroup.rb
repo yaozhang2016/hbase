@@ -1,6 +1,3 @@
-#
-# Copyright The Apache Software Foundation
-#
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements.  See the NOTICE file
 # distributed with this work for additional information
@@ -22,22 +19,30 @@ module Shell
   module Commands
     class GetRsgroup < Command
       def help
-        return <<-EOF
-Get a region server group's information.
+        <<-EOF
+Get a RegionServer group's information.
 
 Example:
 
   hbase> get_rsgroup 'default'
+
 EOF
       end
 
       def command(group_name)
-        now = Time.now
-        formatter.header(['GROUP INFORMATION'])
-        rsgroup_admin.get_rsgroup(group_name) do |s|
-          formatter.row([s])
+        group = rsgroup_admin.get_rsgroup(group_name)
+
+        formatter.header(['SERVERS'])
+        group.getServers.each do |server|
+          formatter.row([server.toString])
         end
-        formatter.footer(now)
+        formatter.footer
+
+        formatter.header(['TABLES'])
+        group.getTables.each do |table|
+          formatter.row([table.getNameAsString])
+        end
+        formatter.footer
       end
     end
   end

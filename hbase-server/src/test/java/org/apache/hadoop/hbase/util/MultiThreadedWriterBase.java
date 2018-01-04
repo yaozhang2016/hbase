@@ -28,17 +28,17 @@ import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HRegionLocation;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.util.test.LoadTestDataGenerator;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** Creates multiple threads that write key/values into the */
 public abstract class MultiThreadedWriterBase extends MultiThreadedAction {
-  private static final Log LOG = LogFactory.getLog(MultiThreadedWriterBase.class);
+  private static final Logger LOG = LoggerFactory.getLogger(MultiThreadedWriterBase.class);
 
   /**
    * A temporary place to keep track of inserted/updated keys. This is written to by
@@ -60,7 +60,7 @@ public abstract class MultiThreadedWriterBase extends MultiThreadedAction {
   protected AtomicLong wroteUpToKey = new AtomicLong();
 
   /** The sorted set of keys NOT inserted/updated by the writers */
-  protected Set<Long> failedKeySet = new ConcurrentSkipListSet<Long>();
+  protected Set<Long> failedKeySet = new ConcurrentSkipListSet<>();
 
   /**
    * The total size of the temporary inserted/updated key set that have not yet lined
@@ -79,7 +79,7 @@ public abstract class MultiThreadedWriterBase extends MultiThreadedAction {
   }
 
   protected BlockingQueue<Long> createWriteKeysQueue(Configuration conf) {
-    return new ArrayBlockingQueue<Long>(10000);
+    return new ArrayBlockingQueue<>(10000);
   }
 
   @Override
@@ -129,7 +129,7 @@ public abstract class MultiThreadedWriterBase extends MultiThreadedAction {
       Thread.currentThread().setName(getClass().getSimpleName());
       try {
         long expectedKey = startKey;
-        Queue<Long> sortedKeys = new PriorityQueue<Long>();
+        Queue<Long> sortedKeys = new PriorityQueue<>();
         while (expectedKey < endKey) {
           // Block until a new element is available.
           Long k;

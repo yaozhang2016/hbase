@@ -16,23 +16,29 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.hadoop.hbase.regionserver;
 
 import java.io.IOException;
 import java.util.List;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * If set of MapFile.Readers in Store change, implementors are notified.
  */
 @InterfaceAudience.Private
 public interface ChangedReadersObserver {
+
+  /**
+   * @return the read point of the current scan
+   */
+  long getReadPoint();
+
   /**
    * Notify observers.
+   * @param sfs The new files
+   * @param memStoreScanners scanner of current memstore
    * @throws IOException e
    */
-  void updateReaders(List<StoreFile> sfs) throws IOException;
+  void updateReaders(List<HStoreFile> sfs, List<KeyValueScanner> memStoreScanners) throws IOException;
 }

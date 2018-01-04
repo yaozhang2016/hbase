@@ -20,8 +20,6 @@ package org.apache.hadoop.hbase.mob;
 
 import junit.framework.TestCase;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
@@ -33,17 +31,19 @@ import org.apache.hadoop.hbase.io.hfile.CacheConfig;
 import org.apache.hadoop.hbase.io.hfile.HFileContext;
 import org.apache.hadoop.hbase.io.hfile.HFileContextBuilder;
 import org.apache.hadoop.hbase.regionserver.BloomType;
-import org.apache.hadoop.hbase.regionserver.StoreFile;
+import org.apache.hadoop.hbase.regionserver.HStoreFile;
 import org.apache.hadoop.hbase.regionserver.StoreFileScanner;
 import org.apache.hadoop.hbase.regionserver.StoreFileWriter;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Category(SmallTests.class)
 public class TestMobFile extends TestCase {
-  static final Log LOG = LogFactory.getLog(TestMobFile.class);
+  static final Logger LOG = LoggerFactory.getLogger(TestMobFile.class);
   private static final HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
   private Configuration conf = TEST_UTIL.getConfiguration();
   private CacheConfig cacheConf =  new CacheConfig(conf);
@@ -60,8 +60,8 @@ public class TestMobFile extends TestCase {
     String caseName = getName();
     MobTestUtil.writeStoreFile(writer, caseName);
 
-    MobFile mobFile = new MobFile(new StoreFile(fs, writer.getPath(),
-        conf, cacheConf, BloomType.NONE));
+    MobFile mobFile =
+        new MobFile(new HStoreFile(fs, writer.getPath(), conf, cacheConf, BloomType.NONE, true));
     byte[] family = Bytes.toBytes(caseName);
     byte[] qualify = Bytes.toBytes(caseName);
 
@@ -112,8 +112,8 @@ public class TestMobFile extends TestCase {
             .build();
     MobTestUtil.writeStoreFile(writer, getName());
 
-    MobFile mobFile = new MobFile(new StoreFile(fs, writer.getPath(),
-        conf, cacheConf, BloomType.NONE));
+    MobFile mobFile =
+        new MobFile(new HStoreFile(fs, writer.getPath(), conf, cacheConf, BloomType.NONE, true));
     assertNotNull(mobFile.getScanner());
     assertTrue(mobFile.getScanner() instanceof StoreFileScanner);
   }

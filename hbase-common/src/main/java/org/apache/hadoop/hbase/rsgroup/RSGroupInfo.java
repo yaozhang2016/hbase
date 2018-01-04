@@ -1,6 +1,4 @@
 /**
- * Copyright The Apache Software Foundation
- *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -20,73 +18,62 @@
 
 package org.apache.hadoop.hbase.rsgroup;
 
-import com.google.common.collect.Sets;
-import com.google.common.net.HostAndPort;
-
 import java.util.Collection;
-import java.util.NavigableSet;
 import java.util.Set;
+import java.util.SortedSet;
+import java.util.TreeSet;
 
 import org.apache.hadoop.hbase.TableName;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.hadoop.hbase.net.Address;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * Stores the group information of region server groups.
  */
 @InterfaceAudience.Public
-@InterfaceStability.Evolving
 public class RSGroupInfo {
-
   public static final String DEFAULT_GROUP = "default";
-  public static final String NAMESPACEDESC_PROP_GROUP = "hbase.rsgroup.name";
+  public static final String NAMESPACE_DESC_PROP_GROUP = "hbase.rsgroup.name";
 
-  private String name;
-  private Set<HostAndPort> servers;
-  private NavigableSet<TableName> tables;
+  private final String name;
+  // Keep servers in a sorted set so has an expected ordering when displayed.
+  private final SortedSet<Address> servers;
+  // Keep tables sorted too.
+  private final SortedSet<TableName> tables;
 
   public RSGroupInfo(String name) {
-    this(name, Sets.<HostAndPort>newHashSet(), Sets.<TableName>newTreeSet());
+    this(name, new TreeSet<Address>(), new TreeSet<TableName>());
   }
 
-  RSGroupInfo(String name,
-              Set<HostAndPort> servers,
-              NavigableSet<TableName> tables) {
+  RSGroupInfo(String name, SortedSet<Address> servers, SortedSet<TableName> tables) {
     this.name = name;
-    this.servers = servers;
-    this.tables = tables;
+    this.servers = servers == null? new TreeSet<>(): servers;
+    this.servers.addAll(servers);
+    this.tables = new TreeSet<>(tables);
   }
 
   public RSGroupInfo(RSGroupInfo src) {
-    name = src.getName();
-    servers = Sets.newHashSet(src.getServers());
-    tables = Sets.newTreeSet(src.getTables());
+    this(src.getName(), src.servers, src.tables);
   }
 
   /**
    * Get group name.
-   *
-   * @return group name
    */
   public String getName() {
     return name;
   }
 
   /**
-   * Adds the server to the group.
-   *
-   * @param hostPort the server
+   * Adds the given server to the group.
    */
-  public void addServer(HostAndPort hostPort){
+  public void addServer(Address hostPort){
     servers.add(hostPort);
   }
 
   /**
-   * Adds a group of servers.
-   *
-   * @param hostPort the servers
+   * Adds the given servers to the group.
    */
-  public void addAllServers(Collection<HostAndPort> hostPort){
+  public void addAllServers(Collection<Address> hostPort){
     servers.addAll(hostPort);
   }
 
@@ -94,33 +81,28 @@ public class RSGroupInfo {
    * @param hostPort hostPort of the server
    * @return true, if a server with hostPort is found
    */
-  public boolean containsServer(HostAndPort hostPort) {
+  public boolean containsServer(Address hostPort) {
     return servers.contains(hostPort);
   }
 
   /**
    * Get list of servers.
-   *
-   * @return set of servers
    */
-  public Set<HostAndPort> getServers() {
+  public Set<Address> getServers() {
     return servers;
   }
 
   /**
-   * Remove a server from this group.
-   *
-   * @param hostPort HostPort of the server to remove
+   * Remove given server from the group.
    */
-  public boolean removeServer(HostAndPort hostPort) {
+  public boolean removeServer(Address hostPort) {
     return servers.remove(hostPort);
   }
 
   /**
-   * Set of tables that are members of this group
-   * @return set of tables
+   * Get set of tables that are members of the group.
    */
-  public NavigableSet<TableName> getTables() {
+  public SortedSet<TableName> getTables() {
     return tables;
   }
 
@@ -142,12 +124,15 @@ public class RSGroupInfo {
 
   @Override
   public String toString() {
-    StringBuffer sb = new StringBuffer();
+    StringBuilder sb = new StringBuilder();
     sb.append("Name:");
     sb.append(this.name);
     sb.append(", ");
     sb.append(" Servers:");
     sb.append(this.servers);
+    sb.append(", ");
+    sb.append(" Tables:");
+    sb.append(this.tables);
     return sb.toString();
 
   }

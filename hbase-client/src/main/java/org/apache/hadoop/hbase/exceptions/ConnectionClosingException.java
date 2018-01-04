@@ -38,8 +38,7 @@ package org.apache.hadoop.hbase.exceptions;
 
 import java.io.IOException;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
 * Thrown when the client believes that we are trying to communicate to has
@@ -49,7 +48,6 @@ import org.apache.hadoop.hbase.classification.InterfaceStability;
 * retries and fast fail the operation.
 */
 @InterfaceAudience.Public
-@InterfaceStability.Evolving
 public class ConnectionClosingException extends IOException {
   public ConnectionClosingException(String string) {
     super(string);

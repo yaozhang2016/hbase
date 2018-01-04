@@ -18,6 +18,8 @@
 
 package org.apache.hadoop.hbase.client;
 
+import static org.apache.hadoop.hbase.util.CollectionUtils.computeIfAbsent;
+
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
@@ -25,17 +27,16 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ConcurrentNavigableMap;
 import java.util.concurrent.CopyOnWriteArraySet;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.HRegionLocation;
 import org.apache.hadoop.hbase.RegionLocations;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.types.CopyOnWriteArrayMap;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * A cache implementation for region locations from meta.
@@ -43,14 +44,13 @@ import org.apache.hadoop.hbase.util.Bytes;
 @InterfaceAudience.Private
 public class MetaCache {
 
-  private static final Log LOG = LogFactory.getLog(MetaCache.class);
+  private static final Logger LOG = LoggerFactory.getLogger(MetaCache.class);
 
   /**
    * Map of table to table {@link HRegionLocation}s.
    */
   private final ConcurrentMap<TableName, ConcurrentNavigableMap<byte[], RegionLocations>>
-  cachedRegionLocations =
-  new CopyOnWriteArrayMap<>();
+    cachedRegionLocations = new CopyOnWriteArrayMap<>();
 
   // The presence of a server in the map implies it's likely that there is an
   // entry in cachedRegionLocations that map to this server; but the absence
@@ -87,7 +87,7 @@ public class MetaCache {
     // this one. the exception case is when the endkey is
     // HConstants.EMPTY_END_ROW, signifying that the region we're
     // checking is actually the last region in the table.
-    byte[] endKey = possibleRegion.getRegionLocation().getRegionInfo().getEndKey();
+    byte[] endKey = possibleRegion.getRegionLocation().getRegion().getEndKey();
     // Here we do direct Bytes.compareTo and not doing CellComparator/MetaCellComparator path.
     // MetaCellComparator is for comparing against data in META table which need special handling.
     // Not doing that is ok for this case because
@@ -116,7 +116,7 @@ public class MetaCache {
   public void cacheLocation(final TableName tableName, final ServerName source,
       final HRegionLocation location) {
     assert source != null;
-    byte [] startKey = location.getRegionInfo().getStartKey();
+    byte [] startKey = location.getRegion().getStartKey();
     ConcurrentMap<byte[], RegionLocations> tableLocations = getTableLocations(tableName);
     RegionLocations locations = new RegionLocations(new HRegionLocation[] {location}) ;
     RegionLocations oldLocations = tableLocations.putIfAbsent(startKey, locations);
@@ -131,7 +131,7 @@ public class MetaCache {
 
     // If the server in cache sends us a redirect, assume it's always valid.
     HRegionLocation oldLocation = oldLocations.getRegionLocation(
-      location.getRegionInfo().getReplicaId());
+      location.getRegion().getReplicaId());
     boolean force = oldLocation != null && oldLocation.getServerName() != null
         && oldLocation.getServerName().equals(source);
 
@@ -156,7 +156,7 @@ public class MetaCache {
    * @param locations the new locations
    */
   public void cacheLocation(final TableName tableName, final RegionLocations locations) {
-    byte [] startKey = locations.getRegionLocation().getRegionInfo().getStartKey();
+    byte [] startKey = locations.getRegionLocation().getRegion().getStartKey();
     ConcurrentMap<byte[], RegionLocations> tableLocations = getTableLocations(tableName);
     RegionLocations oldLocation = tableLocations.putIfAbsent(startKey, locations);
     boolean isNewCacheEntry = (oldLocation == null);
@@ -191,21 +191,11 @@ public class MetaCache {
    * @param tableName
    * @return Map of cached locations for passed <code>tableName</code>
    */
-  private ConcurrentNavigableMap<byte[], RegionLocations>
-    getTableLocations(final TableName tableName) {
+  private ConcurrentNavigableMap<byte[], RegionLocations> getTableLocations(
+      final TableName tableName) {
     // find the map of cached locations for this table
-    ConcurrentNavigableMap<byte[], RegionLocations> result;
-    result = this.cachedRegionLocations.get(tableName);
-    // if tableLocations for this table isn't built yet, make one
-    if (result == null) {
-      result = new CopyOnWriteArrayMap<>(Bytes.BYTES_COMPARATOR);
-      ConcurrentNavigableMap<byte[], RegionLocations> old =
-          this.cachedRegionLocations.putIfAbsent(tableName, result);
-      if (old != null) {
-        return old;
-      }
-    }
-    return result;
+    return computeIfAbsent(cachedRegionLocations, tableName,
+      () -> new CopyOnWriteArrayMap<>(Bytes.BYTES_COMPARATOR));
   }
 
   /**
@@ -308,7 +298,7 @@ public class MetaCache {
 
     RegionLocations regionLocations = getCachedLocation(tableName, row);
     if (regionLocations != null) {
-      byte[] startKey = regionLocations.getRegionLocation().getRegionInfo().getStartKey();
+      byte[] startKey = regionLocations.getRegionLocation().getRegion().getStartKey();
       boolean removed = tableLocations.remove(startKey, regionLocations);
       if (removed) {
         if (metrics != null) {
@@ -316,6 +306,40 @@ public class MetaCache {
         }
         if (LOG.isTraceEnabled()) {
           LOG.trace("Removed " + regionLocations + " from cache");
+        }
+      }
+    }
+  }
+
+  /**
+   * Delete a cached location with specific replicaId.
+   * @param tableName tableName
+   * @param row row key
+   * @param replicaId region replica id
+   */
+  public void clearCache(final TableName tableName, final byte [] row, int replicaId) {
+    ConcurrentMap<byte[], RegionLocations> tableLocations = getTableLocations(tableName);
+
+    RegionLocations regionLocations = getCachedLocation(tableName, row);
+    if (regionLocations != null) {
+      HRegionLocation toBeRemoved = regionLocations.getRegionLocation(replicaId);
+      if (toBeRemoved != null) {
+        RegionLocations updatedLocations = regionLocations.remove(replicaId);
+        byte[] startKey = regionLocations.getRegionLocation().getRegion().getStartKey();
+        boolean removed;
+        if (updatedLocations.isEmpty()) {
+          removed = tableLocations.remove(startKey, regionLocations);
+        } else {
+          removed = tableLocations.replace(startKey, regionLocations, updatedLocations);
+        }
+
+        if (removed) {
+          if (metrics != null) {
+            metrics.incrMetaCacheNumClearRegion();
+          }
+          if (LOG.isTraceEnabled()) {
+            LOG.trace("Removed " + toBeRemoved + " from cache");
+          }
         }
       }
     }
@@ -331,7 +355,7 @@ public class MetaCache {
     if (regionLocations != null) {
       RegionLocations updatedLocations = regionLocations.removeByServer(serverName);
       if (updatedLocations != regionLocations) {
-        byte[] startKey = regionLocations.getRegionLocation().getRegionInfo().getStartKey();
+        byte[] startKey = regionLocations.getRegionLocation().getRegion().getStartKey();
         boolean removed = false;
         if (updatedLocations.isEmpty()) {
           removed = tableLocations.remove(startKey, regionLocations);
@@ -355,7 +379,7 @@ public class MetaCache {
    * Deletes the cached location of the region if necessary, based on some error from source.
    * @param hri The region in question.
    */
-  public void clearCache(HRegionInfo hri) {
+  public void clearCache(RegionInfo hri) {
     ConcurrentMap<byte[], RegionLocations> tableLocations = getTableLocations(hri.getTable());
     RegionLocations regionLocations = tableLocations.get(hri.getStartKey());
     if (regionLocations != null) {
@@ -385,17 +409,17 @@ public class MetaCache {
     if (location == null) {
       return;
     }
-    TableName tableName = location.getRegionInfo().getTable();
+    TableName tableName = location.getRegion().getTable();
     ConcurrentMap<byte[], RegionLocations> tableLocations = getTableLocations(tableName);
-    RegionLocations regionLocations = tableLocations.get(location.getRegionInfo().getStartKey());
+    RegionLocations regionLocations = tableLocations.get(location.getRegion().getStartKey());
     if (regionLocations != null) {
       RegionLocations updatedLocations = regionLocations.remove(location);
       boolean removed;
       if (updatedLocations != regionLocations) {
         if (updatedLocations.isEmpty()) {
-          removed = tableLocations.remove(location.getRegionInfo().getStartKey(), regionLocations);
+          removed = tableLocations.remove(location.getRegion().getStartKey(), regionLocations);
         } else {
-          removed = tableLocations.replace(location.getRegionInfo().getStartKey(), regionLocations,
+          removed = tableLocations.replace(location.getRegion().getStartKey(), regionLocations,
               updatedLocations);
         }
         if (removed) {

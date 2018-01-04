@@ -18,8 +18,6 @@
  */
 package org.apache.hadoop.hbase.client.rsgroup;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.coprocessor.CoprocessorHost;
@@ -35,6 +33,8 @@ import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -44,7 +44,7 @@ import java.util.List;
 //Since we need to use a different balancer and run more than 1 RS
 @Category({ClientTests.class, LargeTests.class})
 public class TestShellRSGroups {
-  final Log LOG = LogFactory.getLog(getClass());
+  final Logger LOG = LoggerFactory.getLogger(getClass());
   private final static HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
   private final static ScriptingContainer jruby = new ScriptingContainer();
   private static String basePath;
@@ -74,10 +74,10 @@ public class TestShellRSGroups {
     TEST_UTIL.startMiniCluster(1,4);
 
     // Configure jruby runtime
-    List<String> loadPaths = new ArrayList();
+    List<String> loadPaths = new ArrayList<>(2);
     loadPaths.add(basePath+"/src/main/ruby");
     loadPaths.add(basePath+"/src/test/ruby");
-    jruby.getProvider().setLoadPaths(loadPaths);
+    jruby.setLoadPaths(loadPaths);
     jruby.put("$TEST_CLUSTER", TEST_UTIL);
     System.setProperty("jruby.jit.logging.verbose", "true");
     System.setProperty("jruby.jit.logging", "true");
@@ -100,6 +100,4 @@ public class TestShellRSGroups {
       System.clearProperty("shell.test");
     }
   }
-
 }
-

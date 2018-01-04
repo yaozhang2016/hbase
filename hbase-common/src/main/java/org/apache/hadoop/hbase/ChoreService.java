@@ -27,12 +27,12 @@ import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import com.google.common.annotations.VisibleForTesting;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.ScheduledChore.ChoreServicer;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
 
 /**
  * ChoreService is a service that can be used to schedule instances of {@link ScheduledChore} to run
@@ -54,9 +54,8 @@ import org.apache.hadoop.hbase.classification.InterfaceStability;
  * Calling this method ensures that all scheduled chores are cancelled and cleaned up properly.
  */
 @InterfaceAudience.Public
-@InterfaceStability.Stable
 public class ChoreService implements ChoreServicer {
-  private static final Log LOG = LogFactory.getLog(ChoreService.class);
+  private static final Logger LOG = LoggerFactory.getLogger(ChoreService.class);
 
   /**
    * The minimum number of threads in the core pool of the underlying ScheduledThreadPoolExecutor
@@ -114,7 +113,7 @@ public class ChoreService implements ChoreServicer {
   /**
    * @param coreThreadPoolPrefix Prefix that will be applied to the Thread name of all threads
    *          spawned by this service
-   * @param corePoolSize The initial size to set the core pool of the ScheduledThreadPoolExecutor 
+   * @param corePoolSize The initial size to set the core pool of the ScheduledThreadPoolExecutor
    *          to during initialization. The default size is 1, but specifying a larger size may be
    *          beneficial if you know that 1 thread will not be enough.
    * @param jitter Should chore service add some jitter for all of the scheduled chores. When set
@@ -134,8 +133,8 @@ public class ChoreService implements ChoreServicer {
     }
 
     scheduler.setRemoveOnCancelPolicy(true);
-    scheduledChores = new HashMap<ScheduledChore, ScheduledFuture<?>>();
-    choresMissingStartTime = new HashMap<ScheduledChore, Boolean>();
+    scheduledChores = new HashMap<>();
+    choresMissingStartTime = new HashMap<>();
   }
 
   /**
@@ -248,7 +247,7 @@ public class ChoreService implements ChoreServicer {
    */
   static class ChoreServiceThreadFactory implements ThreadFactory {
     private final String threadPrefix;
-    private final static String THREAD_NAME_SUFFIX = "_ChoreService_";
+    private final static String THREAD_NAME_SUFFIX = "_Chore_";
     private AtomicInteger threadNumber = new AtomicInteger(1);
 
     /**
@@ -332,7 +331,7 @@ public class ChoreService implements ChoreServicer {
     scheduledChores.clear();
     choresMissingStartTime.clear();
   }
-  
+
   /**
    * @return true when the service is shutdown and thus cannot be used anymore
    */
@@ -348,7 +347,7 @@ public class ChoreService implements ChoreServicer {
   }
 
   private void cancelAllChores(final boolean mayInterruptIfRunning) {
-    ArrayList<ScheduledChore> choresToCancel = new ArrayList<ScheduledChore>();
+    ArrayList<ScheduledChore> choresToCancel = new ArrayList<>(scheduledChores.keySet().size());
     // Build list of chores to cancel so we can iterate through a set that won't change
     // as chores are cancelled. If we tried to cancel each chore while iterating through
     // keySet the results would be undefined because the keySet would be changing
@@ -365,7 +364,7 @@ public class ChoreService implements ChoreServicer {
    * Prints a summary of important details about the chore. Used for debugging purposes
    */
   private void printChoreDetails(final String header, ScheduledChore chore) {
-    LinkedHashMap<String, String> output = new LinkedHashMap<String, String>();
+    LinkedHashMap<String, String> output = new LinkedHashMap<>();
     output.put(header, "");
     output.put("Chore name: ", chore.getName());
     output.put("Chore period: ", Integer.toString(chore.getPeriod()));
@@ -380,7 +379,7 @@ public class ChoreService implements ChoreServicer {
    * Prints a summary of important details about the service. Used for debugging purposes
    */
   private void printChoreServiceDetails(final String header) {
-    LinkedHashMap<String, String> output = new LinkedHashMap<String, String>();
+    LinkedHashMap<String, String> output = new LinkedHashMap<>();
     output.put(header, "");
     output.put("ChoreService corePoolSize: ", Integer.toString(getCorePoolSize()));
     output.put("ChoreService scheduledChores: ", Integer.toString(getNumberOfScheduledChores()));

@@ -46,9 +46,9 @@ public class PeriodicRandomActionPolicy extends PeriodicPolicy {
 
   public PeriodicRandomActionPolicy(long periodMs, Action... actions) {
     super(periodMs);
-    this.actions = new ArrayList<Pair<Action, Integer>>(actions.length);
+    this.actions = new ArrayList<>(actions.length);
     for (Action action : actions) {
-      this.actions.add(new Pair<Action, Integer>(action, 1));
+      this.actions.add(new Pair<>(action, 1));
     }
   }
 
@@ -58,7 +58,7 @@ public class PeriodicRandomActionPolicy extends PeriodicPolicy {
     try {
       action.perform();
     } catch (Exception ex) {
-      LOG.warn("Exception occured during performing action: "
+      LOG.warn("Exception occurred during performing action: "
           + StringUtils.stringifyException(ex));
     }
   }

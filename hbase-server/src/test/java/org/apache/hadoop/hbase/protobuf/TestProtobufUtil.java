@@ -19,15 +19,23 @@
 package org.apache.hadoop.hbase.protobuf;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
 
-import org.apache.hadoop.hbase.HConstants;
+import org.apache.hadoop.hbase.ByteBufferKeyValue;
+import org.apache.hadoop.hbase.Cell;
+import org.apache.hadoop.hbase.CellBuilderType;
+import org.apache.hadoop.hbase.CellComparatorImpl;
+import org.apache.hadoop.hbase.ExtendedCellBuilderFactory;
+import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.client.Append;
 import org.apache.hadoop.hbase.client.Delete;
 import org.apache.hadoop.hbase.client.Get;
 import org.apache.hadoop.hbase.client.Increment;
 import org.apache.hadoop.hbase.client.Put;
+import org.apache.hadoop.hbase.protobuf.generated.CellProtos;
 import org.apache.hadoop.hbase.protobuf.generated.ClientProtos;
 import org.apache.hadoop.hbase.protobuf.generated.ClientProtos.Column;
 import org.apache.hadoop.hbase.protobuf.generated.ClientProtos.MutationProto;
@@ -119,7 +127,6 @@ public class TestProtobufUtil {
     qualifierBuilder.setQualifier(ByteString.copyFromUtf8("c2"));
     qualifierBuilder.setValue(ByteString.copyFromUtf8("v2"));
     valueBuilder.addQualifierValue(qualifierBuilder.build());
-    qualifierBuilder.setTimestamp(timeStamp);
     mutateBuilder.addColumnValue(valueBuilder.build());
 
     MutationProto proto = mutateBuilder.build();
@@ -192,6 +199,7 @@ public class TestProtobufUtil {
    */
   @Test
   public void testIncrement() throws IOException {
+    long timeStamp = 111111;
     MutationProto.Builder mutateBuilder = MutationProto.newBuilder();
     mutateBuilder.setRow(ByteString.copyFromUtf8("row"));
     mutateBuilder.setMutateType(MutationType.INCREMENT);
@@ -200,6 +208,7 @@ public class TestProtobufUtil {
     QualifierValue.Builder qualifierBuilder = QualifierValue.newBuilder();
     qualifierBuilder.setQualifier(ByteString.copyFromUtf8("c1"));
     qualifierBuilder.setValue(ByteString.copyFrom(Bytes.toBytes(11L)));
+    qualifierBuilder.setTimestamp(timeStamp);
     valueBuilder.addQualifierValue(qualifierBuilder.build());
     qualifierBuilder.setQualifier(ByteString.copyFromUtf8("c2"));
     qualifierBuilder.setValue(ByteString.copyFrom(Bytes.toBytes(22L)));
@@ -215,8 +224,8 @@ public class TestProtobufUtil {
     mutateBuilder.setDurability(MutationProto.Durability.USE_DEFAULT);
 
     Increment increment = ProtobufUtil.toIncrement(proto, null);
-    assertEquals(mutateBuilder.build(),
-      ProtobufUtil.toMutation(increment, MutationProto.newBuilder(), HConstants.NO_NONCE));
+    mutateBuilder.setTimestamp(increment.getTimeStamp());
+    assertEquals(mutateBuilder.build(), ProtobufUtil.toMutation(MutationType.INCREMENT, increment));
   }
 
   /**
@@ -306,5 +315,27 @@ public class TestProtobufUtil {
     ClientProtos.Scan actualProto = ProtobufUtil.toScan(
         ProtobufUtil.toScan(expectedProto));
     assertEquals(expectedProto, actualProto);
+  }
+
+  @Test
+  public void testToCell() throws Exception {
+    KeyValue kv1 =
+        new KeyValue(Bytes.toBytes("aaa"), Bytes.toBytes("f1"), Bytes.toBytes("q1"), new byte[30]);
+    KeyValue kv2 =
+        new KeyValue(Bytes.toBytes("bbb"), Bytes.toBytes("f1"), Bytes.toBytes("q1"), new byte[30]);
+    KeyValue kv3 =
+        new KeyValue(Bytes.toBytes("ccc"), Bytes.toBytes("f1"), Bytes.toBytes("q1"), new byte[30]);
+    byte[] arr = new byte[kv1.getLength() + kv2.getLength() + kv3.getLength()];
+    System.arraycopy(kv1.getBuffer(), kv1.getOffset(), arr, 0, kv1.getLength());
+    System.arraycopy(kv2.getBuffer(), kv2.getOffset(), arr, kv1.getLength(), kv2.getLength());
+    System.arraycopy(kv3.getBuffer(), kv3.getOffset(), arr, kv1.getLength() + kv2.getLength(),
+      kv3.getLength());
+    ByteBuffer dbb = ByteBuffer.allocateDirect(arr.length);
+    dbb.put(arr);
+    ByteBufferKeyValue offheapKV = new ByteBufferKeyValue(dbb, kv1.getLength(), kv2.getLength());
+    CellProtos.Cell cell = ProtobufUtil.toCell(offheapKV);
+    Cell newOffheapKV =
+        ProtobufUtil.toCell(ExtendedCellBuilderFactory.create(CellBuilderType.SHALLOW_COPY), cell);
+    assertTrue(CellComparatorImpl.COMPARATOR.compare(offheapKV, newOffheapKV) == 0);
   }
 }

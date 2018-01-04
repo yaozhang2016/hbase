@@ -21,8 +21,7 @@ package org.apache.hadoop.hbase.quotas;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * Describe the throttling result.
@@ -32,12 +31,10 @@ import org.apache.hadoop.hbase.classification.InterfaceStability;
  * as result of this exception.
  */
 @InterfaceAudience.Public
-@InterfaceStability.Evolving
 public class ThrottlingException extends QuotaExceededException {
   private static final long serialVersionUID = 1406576492085155743L;
 
   @InterfaceAudience.Public
-  @InterfaceStability.Evolving
   public enum Type {
     NumRequestsExceeded,
     RequestSizeExceeded,
@@ -70,7 +67,7 @@ public class ThrottlingException extends QuotaExceededException {
       int index = msg.indexOf(MSG_TYPE[i]);
       if (index >= 0) {
         String waitTimeStr = msg.substring(index + MSG_TYPE[i].length() + MSG_WAIT.length());
-        type = Type.values()[i];;
+        type = Type.values()[i];
         waitInterval = timeFromString(waitTimeStr);
         break;
       }

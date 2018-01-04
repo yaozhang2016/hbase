@@ -21,11 +21,11 @@ package org.apache.hadoop.hbase.io.util;
 import java.nio.ByteBuffer;
 import java.util.HashMap;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.util.ByteBufferUtils;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.yetus.audience.InterfaceAudience;
 
-import com.google.common.base.Preconditions;
+import org.apache.hbase.thirdparty.com.google.common.base.Preconditions;
 
 /**
  * WALDictionary using an LRU eviction algorithm. Uses a linked list running
@@ -86,7 +86,7 @@ public class LRUDictionary implements Dictionary {
     private Node head;
     private Node tail;
 
-    private HashMap<Node, Short> nodeToIndex = new HashMap<Node, Short>();
+    private HashMap<Node, Short> nodeToIndex = new HashMap<>();
     private Node[] indexToNode;
     private int initSize = 0;
 

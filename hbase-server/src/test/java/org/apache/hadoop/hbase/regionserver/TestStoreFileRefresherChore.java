@@ -20,6 +20,7 @@ package org.apache.hadoop.hbase.regionserver;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -50,16 +51,20 @@ import org.apache.hadoop.hbase.wal.WALFactory;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.FSUtils;
 import org.apache.hadoop.hbase.util.StoppableImplementation;
-import org.junit.Assert;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.junit.rules.TestName;
 
 @Category({RegionServerTests.class, SmallTests.class})
 public class TestStoreFileRefresherChore {
 
   private HBaseTestingUtility TEST_UTIL;
   private Path testDir;
+
+  @Rule
+  public TestName name = new TestName();
 
   @Before
   public void setUp() throws IOException {
@@ -94,7 +99,7 @@ public class TestStoreFileRefresherChore {
     }
   }
 
-  private Region initHRegion(HTableDescriptor htd, byte[] startKey, byte[] stopKey, int replicaId)
+  private HRegion initHRegion(HTableDescriptor htd, byte[] startKey, byte[] stopKey, int replicaId)
       throws IOException {
     Configuration conf = TEST_UTIL.getConfiguration();
     Path tableDir = FSUtils.getTableDir(testDir, htd.getTableName());
@@ -106,6 +111,7 @@ public class TestStoreFileRefresherChore {
     final Configuration walConf = new Configuration(conf);
     FSUtils.setRootDir(walConf, tableDir);
     final WALFactory wals = new WALFactory(walConf, null, "log_" + replicaId);
+    ChunkCreator.initialize(MemStoreLABImpl.CHUNK_SIZE_DEFAULT, false, 0, 0, 0, null);
     HRegion region =
         new HRegion(fs, wals.getWAL(info.getEncodedNameAsBytes(), info.getTable().getNamespace()),
             conf, htd, null);
@@ -127,6 +133,19 @@ public class TestStoreFileRefresherChore {
     }
   }
 
+  private void verifyDataExpectFail(Region newReg, int startRow, int numRows, byte[] qf,
+      byte[]... families) throws IOException {
+    boolean threw = false;
+    try {
+      verifyData(newReg, startRow, numRows, qf, families);
+    } catch (AssertionError e) {
+      threw = true;
+    }
+    if (!threw) {
+      fail("Expected data verification to fail");
+    }
+  }
+
   private void verifyData(Region newReg, int startRow, int numRows, byte[] qf, byte[]... families)
       throws IOException {
     for (int i = startRow; i < startRow + numRows; i++) {
@@ -139,7 +158,7 @@ public class TestStoreFileRefresherChore {
       Cell[] raw = result.rawCells();
       assertEquals(families.length, result.size());
       for (int j = 0; j < families.length; j++) {
-        assertTrue(CellUtil.matchingRow(raw[j], row));
+        assertTrue(CellUtil.matchingRows(raw[j], row));
         assertTrue(CellUtil.matchingFamily(raw[j], families[j]));
         assertTrue(CellUtil.matchingQualifier(raw[j], qf));
       }
@@ -165,13 +184,14 @@ public class TestStoreFileRefresherChore {
     byte[] qf = Bytes.toBytes("cq");
 
     HRegionServer regionServer = mock(HRegionServer.class);
-    List<Region> regions = new ArrayList<Region>();
+    List<HRegion> regions = new ArrayList<>();
     when(regionServer.getOnlineRegionsLocalContext()).thenReturn(regions);
     when(regionServer.getConfiguration()).thenReturn(TEST_UTIL.getConfiguration());
 
-    HTableDescriptor htd = getTableDesc(TableName.valueOf("testIsStale"), families);
-    Region primary = initHRegion(htd, HConstants.EMPTY_START_ROW, HConstants.EMPTY_END_ROW, 0);
-    Region replica1 = initHRegion(htd, HConstants.EMPTY_START_ROW, HConstants.EMPTY_END_ROW, 1);
+    HTableDescriptor htd = getTableDesc(TableName.valueOf(name.getMethodName()), families);
+    htd.setRegionReplication(2);
+    HRegion primary = initHRegion(htd, HConstants.EMPTY_START_ROW, HConstants.EMPTY_END_ROW, 0);
+    HRegion replica1 = initHRegion(htd, HConstants.EMPTY_START_ROW, HConstants.EMPTY_END_ROW, 1);
     regions.add(primary);
     regions.add(replica1);
 
@@ -182,17 +202,12 @@ public class TestStoreFileRefresherChore {
     primary.flush(true);
     verifyData(primary, 0, 100, qf, families);
 
-    try {
-      verifyData(replica1, 0, 100, qf, families);
-      Assert.fail("should have failed");
-    } catch(AssertionError ex) {
-      // expected
-    }
+    verifyDataExpectFail(replica1, 0, 100, qf, families);
     chore.chore();
     verifyData(replica1, 0, 100, qf, families);
 
     // simulate an fs failure where we cannot refresh the store files for the replica
-    ((FailingHRegionFileSystem)((HRegion)replica1).getRegionFileSystem()).fail = true;
+    ((FailingHRegionFileSystem)replica1.getRegionFileSystem()).fail = true;
 
     // write some more data to primary and flush
     putData(primary, 100, 100, qf, families);
@@ -202,18 +217,13 @@ public class TestStoreFileRefresherChore {
     chore.chore(); // should not throw ex, but we cannot refresh the store files
 
     verifyData(replica1, 0, 100, qf, families);
-    try {
-      verifyData(replica1, 100, 100, qf, families);
-      Assert.fail("should have failed");
-    } catch(AssertionError ex) {
-      // expected
-    }
+    verifyDataExpectFail(replica1, 100, 100, qf, families);
 
     chore.isStale = true;
     chore.chore(); //now after this, we cannot read back any value
     try {
       verifyData(replica1, 0, 100, qf, families);
-      Assert.fail("should have failed with IOException");
+      fail("should have failed with IOException");
     } catch(IOException ex) {
       // expected
     }

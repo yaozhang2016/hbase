@@ -1,4 +1,4 @@
-/**
+/*
  *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -21,28 +21,44 @@ package org.apache.hadoop.hbase.master;
 import java.io.IOException;
 import java.util.List;
 
-import org.apache.hadoop.hbase.HColumnDescriptor;
-import org.apache.hadoop.hbase.HRegionInfo;
-import org.apache.hadoop.hbase.HTableDescriptor;
-import org.apache.hadoop.hbase.ProcedureInfo;
+import org.apache.hadoop.hbase.HBaseIOException;
 import org.apache.hadoop.hbase.Server;
+import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableDescriptors;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.TableNotDisabledException;
 import org.apache.hadoop.hbase.TableNotFoundException;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.hadoop.hbase.client.ColumnFamilyDescriptor;
+import org.apache.hadoop.hbase.client.MasterSwitchType;
+import org.apache.hadoop.hbase.client.RegionInfo;
+import org.apache.hadoop.hbase.client.TableDescriptor;
 import org.apache.hadoop.hbase.executor.ExecutorService;
+import org.apache.hadoop.hbase.favored.FavoredNodesManager;
+import org.apache.hadoop.hbase.master.assignment.AssignmentManager;
+import org.apache.hadoop.hbase.master.locking.LockManager;
 import org.apache.hadoop.hbase.master.normalizer.RegionNormalizer;
 import org.apache.hadoop.hbase.master.procedure.MasterProcedureEnv;
 import org.apache.hadoop.hbase.master.snapshot.SnapshotManager;
 import org.apache.hadoop.hbase.procedure.MasterProcedureManagerHost;
+import org.apache.hadoop.hbase.procedure2.LockedResource;
+import org.apache.hadoop.hbase.procedure2.Procedure;
+import org.apache.hadoop.hbase.procedure2.ProcedureEvent;
 import org.apache.hadoop.hbase.procedure2.ProcedureExecutor;
 import org.apache.hadoop.hbase.quotas.MasterQuotaManager;
+import org.apache.hadoop.hbase.replication.ReplicationException;
+import org.apache.hadoop.hbase.replication.ReplicationPeerConfig;
+import org.apache.hadoop.hbase.replication.ReplicationPeerDescription;
+import org.apache.yetus.audience.InterfaceAudience;
+
+import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
 
 import com.google.protobuf.Service;
 
 /**
- * Services Master supplies
+ * A curated subset of services provided by {@link HMaster}.
+ * For use internally only. Passed to Managers, Services and Chores so can pass less-than-a
+ * full-on HMaster at test-time. Be judicious adding API. Changes cause ripples through
+ * the code base.
  */
 @InterfaceAudience.Private
 public interface MasterServices extends Server {
@@ -87,11 +103,6 @@ public interface MasterServices extends Server {
   ExecutorService getExecutorService();
 
   /**
-   * @return Master's instance of {@link TableLockManager}
-   */
-  TableLockManager getTableLockManager();
-
-  /**
    * @return Master's instance of {@link TableStateManager}
    */
   TableStateManager getTableStateManager();
@@ -122,6 +133,17 @@ public interface MasterServices extends Server {
   ProcedureExecutor<MasterProcedureEnv> getMasterProcedureExecutor();
 
   /**
+   * @return Tripped when Master has finished initialization.
+   */
+  @VisibleForTesting
+  public ProcedureEvent getInitializedEvent();
+
+  /**
+   * @return Master's instance of {@link MetricsMaster}
+   */
+  MetricsMaster getMasterMetrics();
+
+  /**
    * Check table is modifiable; i.e. exists and is offline.
    * @param tableName Name of table to check.
    * @throws TableNotDisabledException
@@ -141,17 +163,17 @@ public interface MasterServices extends Server {
    *     a single region is created.
    */
   long createTable(
-      final HTableDescriptor desc,
+      final TableDescriptor desc,
       final byte[][] splitKeys,
       final long nonceGroup,
       final long nonce) throws IOException;
 
   /**
    * Create a system table using the given table definition.
-   * @param hTableDescriptor The system table definition
+   * @param tableDescriptor The system table definition
    *     a single region is created.
    */
-  long createSystemTable(final HTableDescriptor hTableDescriptor) throws IOException;
+  long createSystemTable(final TableDescriptor tableDescriptor) throws IOException;
 
   /**
    * Delete a table
@@ -189,7 +211,7 @@ public interface MasterServices extends Server {
    */
   long modifyTable(
       final TableName tableName,
-      final HTableDescriptor descriptor,
+      final TableDescriptor descriptor,
       final long nonceGroup,
       final long nonce)
       throws IOException;
@@ -229,7 +251,7 @@ public interface MasterServices extends Server {
    */
   long addColumn(
       final TableName tableName,
-      final HColumnDescriptor column,
+      final ColumnFamilyDescriptor column,
       final long nonceGroup,
       final long nonce)
       throws IOException;
@@ -244,7 +266,7 @@ public interface MasterServices extends Server {
    */
   long modifyColumn(
       final TableName tableName,
-      final HColumnDescriptor descriptor,
+      final ColumnFamilyDescriptor descriptor,
       final long nonceGroup,
       final long nonce)
       throws IOException;
@@ -265,6 +287,21 @@ public interface MasterServices extends Server {
       throws IOException;
 
   /**
+   * Merge regions in a table.
+   * @param regionsToMerge daughter regions to merge
+   * @param forcible whether to force to merge even two regions are not adjacent
+   * @param nonceGroup used to detect duplicate
+   * @param nonce used to detect duplicate
+   * @return  procedure Id
+   * @throws IOException
+   */
+  long mergeRegions(
+      final RegionInfo[] regionsToMerge,
+      final boolean forcible,
+      final long nonceGroup,
+      final long nonce) throws IOException;
+
+  /**
    * Split a region.
    * @param regionInfo region to split
    * @param splitRow split point
@@ -273,8 +310,8 @@ public interface MasterServices extends Server {
    * @return  procedure Id
    * @throws IOException
    */
-  public long splitRegion(
-      final HRegionInfo regionInfo,
+  long splitRegion(
+      final RegionInfo regionInfo,
       final byte [] splitRow,
       final long nonceGroup,
       final long nonce) throws IOException;
@@ -305,23 +342,6 @@ public interface MasterServices extends Server {
   boolean registerService(Service instance);
 
   /**
-   * Merge two regions. The real implementation is on the regionserver, master
-   * just move the regions together and send MERGE RPC to regionserver
-   * @param region_a region to merge
-   * @param region_b region to merge
-   * @param forcible true if do a compulsory merge, otherwise we will only merge
-   *          two adjacent regions
-   * @return procedure Id
-   * @throws IOException
-   */
-  long dispatchMergingRegions(
-    final HRegionInfo region_a,
-    final HRegionInfo region_b,
-    final boolean forcible,
-    final long nonceGroup,
-    final long nonce) throws IOException;
-
-  /**
    * @return true if master is the active one
    */
   boolean isActiveMaster();
@@ -347,11 +367,18 @@ public interface MasterServices extends Server {
       throws IOException;
 
   /**
-   * List procedures
+   * Get procedures
    * @return procedure list
    * @throws IOException
    */
-  public List<ProcedureInfo> listProcedures() throws IOException;
+  public List<Procedure<?>> getProcedures() throws IOException;
+
+  /**
+   * Get locks
+   * @return lock list
+   * @throws IOException
+   */
+  public List<LockedResource> getLocks() throws IOException;
 
   /**
    * Get list of table descriptors by namespace
@@ -359,7 +386,7 @@ public interface MasterServices extends Server {
    * @return descriptors
    * @throws IOException
    */
-  public List<HTableDescriptor> listTableDescriptorsByNamespace(String name) throws IOException;
+  public List<TableDescriptor> listTableDescriptorsByNamespace(String name) throws IOException;
 
   /**
    * Get list of table names by namespace
@@ -390,8 +417,79 @@ public interface MasterServices extends Server {
    */
   public LoadBalancer getLoadBalancer();
 
+  boolean isSplitOrMergeEnabled(MasterSwitchType switchType);
+
   /**
-   * @return True if this master is stopping.
+   * @return Favored Nodes Manager
    */
-  boolean isStopping();
+  public FavoredNodesManager getFavoredNodesManager();
+
+  /**
+   * Add a new replication peer for replicating data to slave cluster
+   * @param peerId a short name that identifies the peer
+   * @param peerConfig configuration for the replication slave cluster
+   * @param enabled peer state, true if ENABLED and false if DISABLED
+   */
+  void addReplicationPeer(String peerId, ReplicationPeerConfig peerConfig, boolean enabled)
+      throws ReplicationException, IOException;
+
+  /**
+   * Removes a peer and stops the replication
+   * @param peerId a short name that identifies the peer
+   */
+  void removeReplicationPeer(String peerId) throws ReplicationException, IOException;
+
+  /**
+   * Restart the replication stream to the specified peer
+   * @param peerId a short name that identifies the peer
+   */
+  void enableReplicationPeer(String peerId) throws ReplicationException, IOException;
+
+  /**
+   * Stop the replication stream to the specified peer
+   * @param peerId a short name that identifies the peer
+   */
+  void disableReplicationPeer(String peerId) throws ReplicationException, IOException;
+
+  /**
+   * Returns the configured ReplicationPeerConfig for the specified peer
+   * @param peerId a short name that identifies the peer
+   * @return ReplicationPeerConfig for the peer
+   */
+  ReplicationPeerConfig getReplicationPeerConfig(String peerId) throws ReplicationException,
+      IOException;
+
+  /**
+   * Update the peerConfig for the specified peer
+   * @param peerId a short name that identifies the peer
+   * @param peerConfig new config for the peer
+   */
+  void updateReplicationPeerConfig(String peerId, ReplicationPeerConfig peerConfig)
+      throws ReplicationException, IOException;
+
+  /**
+   * Return a list of replication peers.
+   * @param regex The regular expression to match peer id
+   * @return a list of replication peers description
+   */
+  List<ReplicationPeerDescription> listReplicationPeers(String regex) throws ReplicationException,
+      IOException;
+
+  /**
+   * @return {@link LockManager} to lock namespaces/tables/regions.
+   */
+  LockManager getLockManager();
+
+  public String getRegionServerVersion(final ServerName sn);
+
+  public void checkIfShouldMoveSystemRegionAsync();
+
+  /**
+   * Recover meta table. Will result in no-op is meta is already initialized. Any code that has
+   * access to master and requires to access meta during process initialization can call this
+   * method to make sure meta is initialized.
+   */
+  boolean recoverMeta() throws IOException;
+
+  String getClientIdAuditPrefix();
 }

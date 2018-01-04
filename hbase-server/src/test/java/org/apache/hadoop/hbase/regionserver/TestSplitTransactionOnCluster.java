@@ -27,26 +27,21 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 import java.io.IOException;
-import java.io.InterruptedIOException;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
-
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.hbase.Abortable;
-import org.apache.hadoop.hbase.CoordinatedStateManager;
+import org.apache.hadoop.hbase.CategoryBasedTimeout;
 import org.apache.hadoop.hbase.Coprocessor;
 import org.apache.hadoop.hbase.CoprocessorEnvironment;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.MasterNotRunningException;
 import org.apache.hadoop.hbase.MetaTableAccessor;
@@ -61,28 +56,28 @@ import org.apache.hadoop.hbase.client.Delete;
 import org.apache.hadoop.hbase.client.Get;
 import org.apache.hadoop.hbase.client.Mutation;
 import org.apache.hadoop.hbase.client.Put;
+import org.apache.hadoop.hbase.client.RegionInfo;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.ResultScanner;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.client.TestReplicasClient.SlowMeCopro;
-import org.apache.hadoop.hbase.coprocessor.BaseMasterObserver;
+import org.apache.hadoop.hbase.coprocessor.MasterCoprocessor;
 import org.apache.hadoop.hbase.coprocessor.MasterCoprocessorEnvironment;
+import org.apache.hadoop.hbase.coprocessor.MasterObserver;
 import org.apache.hadoop.hbase.coprocessor.ObserverContext;
-import org.apache.hadoop.hbase.master.AssignmentManager;
+import org.apache.hadoop.hbase.exceptions.UnexpectedStateException;
 import org.apache.hadoop.hbase.master.HMaster;
+import org.apache.hadoop.hbase.master.LoadBalancer;
 import org.apache.hadoop.hbase.master.MasterRpcServices;
+import org.apache.hadoop.hbase.master.NoSuchProcedureException;
 import org.apache.hadoop.hbase.master.RegionState;
 import org.apache.hadoop.hbase.master.RegionState.State;
-import org.apache.hadoop.hbase.master.RegionStates;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos.RegionStateTransition.TransitionCode;
-import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos.ReportRegionStateTransitionRequest;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos.ReportRegionStateTransitionResponse;
+import org.apache.hadoop.hbase.master.assignment.AssignmentManager;
+import org.apache.hadoop.hbase.master.assignment.RegionStates;
+import org.apache.hadoop.hbase.procedure2.ProcedureTestingUtility;
 import org.apache.hadoop.hbase.regionserver.compactions.CompactionContext;
 import org.apache.hadoop.hbase.regionserver.throttle.NoLimitThroughputController;
-import org.apache.hadoop.hbase.shaded.com.google.protobuf.RpcController;
-import org.apache.hadoop.hbase.shaded.com.google.protobuf.ServiceException;
 import org.apache.hadoop.hbase.testclassification.LargeTests;
 import org.apache.hadoop.hbase.testclassification.RegionServerTests;
 import org.apache.hadoop.hbase.util.Bytes;
@@ -98,9 +93,19 @@ import org.junit.AfterClass;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.BeforeClass;
-import org.junit.Ignore;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.junit.rules.TestName;
+import org.junit.rules.TestRule;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.apache.hbase.thirdparty.com.google.protobuf.RpcController;
+import org.apache.hbase.thirdparty.com.google.protobuf.ServiceException;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos.RegionStateTransition.TransitionCode;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos.ReportRegionStateTransitionRequest;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos.ReportRegionStateTransitionResponse;
 
 /**
  * The below tests are testing split region against a running cluster
@@ -108,8 +113,9 @@ import org.junit.experimental.categories.Category;
 @Category({RegionServerTests.class, LargeTests.class})
 @SuppressWarnings("deprecation")
 public class TestSplitTransactionOnCluster {
-  private static final Log LOG =
-    LogFactory.getLog(TestSplitTransactionOnCluster.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestSplitTransactionOnCluster.class);
+  @Rule public final TestRule timeout = CategoryBasedTimeout.builder().withTimeout(this.getClass()).
+      withLookingForStuckThread(true).build();
   private Admin admin = null;
   private MiniHBaseCluster cluster = null;
   private static final int NB_SERVERS = 3;
@@ -117,8 +123,11 @@ public class TestSplitTransactionOnCluster {
   static final HBaseTestingUtility TESTING_UTIL =
     new HBaseTestingUtility();
 
+  @Rule
+  public TestName name = new TestName();
+
   @BeforeClass public static void before() throws Exception {
-    TESTING_UTIL.getConfiguration().setInt("hbase.balancer.period", 60000);
+    TESTING_UTIL.getConfiguration().setInt(HConstants.HBASE_BALANCER_PERIOD, 60000);
     TESTING_UTIL.startMiniCluster(1, NB_SERVERS, null, MyMaster.class, null);
   }
 
@@ -128,7 +137,7 @@ public class TestSplitTransactionOnCluster {
 
   @Before public void setup() throws IOException {
     TESTING_UTIL.ensureSomeNonStoppedRegionServersAvailable(NB_SERVERS);
-    this.admin = TESTING_UTIL.getHBaseAdmin();
+    this.admin = TESTING_UTIL.getAdmin();
     this.cluster = TESTING_UTIL.getMiniHBaseCluster();
   }
 
@@ -141,12 +150,15 @@ public class TestSplitTransactionOnCluster {
     }
   }
 
-  private HRegionInfo getAndCheckSingleTableRegion(final List<HRegion> regions)
+  private RegionInfo getAndCheckSingleTableRegion(final List<HRegion> regions)
       throws IOException, InterruptedException {
     assertEquals(1, regions.size());
-    HRegionInfo hri = regions.get(0).getRegionInfo();
-    cluster.getMaster().getAssignmentManager()
-      .waitOnRegionToClearRegionsInTransition(hri, 600000);
+    RegionInfo hri = regions.get(0).getRegionInfo();
+    try {
+      cluster.getMaster().getAssignmentManager().waitForAssignment(hri, 600000);
+    } catch (NoSuchProcedureException e) {
+      LOG.info("Presume the procedure has been cleaned up so just proceed: " + e.toString());
+    }
     return hri;
   }
 
@@ -155,33 +167,20 @@ public class TestSplitTransactionOnCluster {
       final Region region,
       final byte[] midKey) throws IOException {
     long procId = cluster.getMaster().splitRegion(region.getRegionInfo(), midKey, 0, 0);
-    // wait
-    if (procId != -1) {
-      // wait for the split to complete or get interrupted.  If the split completes successfully,
-      // the procedure will return true; if the split fails, the procedure would throw exception.
-      //
-      while (!rsServer.isProcedureFinished(procId)) {
-        try {
-          Thread.sleep(1000);
-        } catch (InterruptedException e) {
-          throw new IOException("Split region interrupted.");
-        }
-      }
-    } else {
-      throw new IOException ("Request split region failed.");
-    }
+    // wait for the split to complete or get interrupted.  If the split completes successfully,
+    // the procedure will return true; if the split fails, the procedure would throw exception.
+    ProcedureTestingUtility.waitProcedure(cluster.getMaster().getMasterProcedureExecutor(), procId);
   }
 
-  @Test(timeout = 60000)
+  @Test
   public void testRITStateForRollback() throws Exception {
-    final TableName tableName =
-        TableName.valueOf("testRITStateForRollback");
+    final TableName tableName = TableName.valueOf(name.getMethodName());
     final HMaster master = cluster.getMaster();
     try {
       // Create table then get the single region for our new table.
       Table t = createTableAndWait(tableName, Bytes.toBytes("cf"));
       final List<HRegion> regions = cluster.getRegions(tableName);
-      final HRegionInfo hri = getAndCheckSingleTableRegion(regions);
+      final RegionInfo hri = getAndCheckSingleTableRegion(regions);
       insertData(tableName, admin, t);
       t.close();
 
@@ -205,13 +204,15 @@ public class TestSplitTransactionOnCluster {
 
       // we have to wait until the SPLITTING state is seen by the master
       FailingSplitMasterObserver observer =
-          (FailingSplitMasterObserver) master.getMasterCoprocessorHost().findCoprocessor(
-            FailingSplitMasterObserver.class.getName());
+          master.getMasterCoprocessorHost().findCoprocessor(FailingSplitMasterObserver.class);
       assertNotNull(observer);
       observer.latch.await();
 
       LOG.info("Waiting for region to come out of RIT");
-      cluster.getMaster().getAssignmentManager().waitOnRegionToClearRegionsInTransition(hri, 60000);
+      while (!cluster.getMaster().getAssignmentManager().getRegionStates().isRegionOnline(hri)) {
+        Threads.sleep(100);
+      }
+      assertTrue(cluster.getMaster().getAssignmentManager().getRegionStates().isRegionOnline(hri));
     } finally {
       admin.setBalancerRunning(true, false);
       master.setCatalogJanitorEnabled(true);
@@ -220,22 +221,22 @@ public class TestSplitTransactionOnCluster {
     }
   }
 
-  @Test(timeout = 60000)
+  @Test
   public void testSplitFailedCompactionAndSplit() throws Exception {
-    final TableName tableName = TableName.valueOf("testSplitFailedCompactionAndSplit");
+    final TableName tableName = TableName.valueOf(name.getMethodName());
     // Create table then get the single region for our new table.
     HTableDescriptor htd = new HTableDescriptor(tableName);
     byte[] cf = Bytes.toBytes("cf");
     htd.addFamily(new HColumnDescriptor(cf));
     admin.createTable(htd);
 
-    for (int i = 0; cluster.getRegions(tableName).size() == 0 && i < 100; i++) {
+    for (int i = 0; cluster.getRegions(tableName).isEmpty() && i < 100; i++) {
       Thread.sleep(100);
     }
     assertEquals(1, cluster.getRegions(tableName).size());
 
     HRegion region = cluster.getRegions(tableName).get(0);
-    Store store = region.getStore(cf);
+    HStore store = region.getStore(cf);
     int regionServerIndex = cluster.getServerWith(region.getRegionInfo().getRegionName());
     HRegionServer regionServer = cluster.getRegionServer(regionServerIndex);
 
@@ -247,8 +248,8 @@ public class TestSplitTransactionOnCluster {
     int fileNum = store.getStorefiles().size();
     // 0, Compaction Request
     store.triggerMajorCompaction();
-    CompactionContext cc = store.requestCompaction();
-    assertNotNull(cc);
+    Optional<CompactionContext> cc = store.requestCompaction();
+    assertTrue(cc.isPresent());
     // 1, A timeout split
     // 1.1 close region
     assertEquals(2, region.close(false).get(cf).size());
@@ -256,7 +257,7 @@ public class TestSplitTransactionOnCluster {
     region.initialize();
 
     // 2, Run Compaction cc
-    assertFalse(region.compact(cc, store, NoLimitThroughputController.INSTANCE));
+    assertFalse(region.compact(cc.get(), store, NoLimitThroughputController.INSTANCE));
     assertTrue(fileNum > store.getStorefiles().size());
 
     // 3, Split
@@ -264,14 +265,21 @@ public class TestSplitTransactionOnCluster {
     assertEquals(2, cluster.getRegions(tableName).size());
   }
 
-  public static class FailingSplitMasterObserver extends BaseMasterObserver {
+  public static class FailingSplitMasterObserver implements MasterCoprocessor, MasterObserver {
     volatile CountDownLatch latch;
+
     @Override
     public void start(CoprocessorEnvironment e) throws IOException {
       latch = new CountDownLatch(1);
     }
+
     @Override
-    public void preSplitRegionBeforePONRAction(
+    public Optional<MasterObserver> getMasterObserver() {
+      return Optional.of(this);
+    }
+
+    @Override
+    public void preSplitRegionBeforeMETAAction(
         final ObserverContext<MasterCoprocessorEnvironment> ctx,
         final byte[] splitKey,
         final List<Mutation> metaEntries) throws IOException {
@@ -280,15 +288,14 @@ public class TestSplitTransactionOnCluster {
     }
   }
 
-  @Test (timeout = 300000)
-  public void testExistingZnodeBlocksSplitAndWeRollback() throws IOException, InterruptedException {
-    final TableName tableName =
-        TableName.valueOf("testExistingZnodeBlocksSplitAndWeRollback");
+  @Test
+  public void testSplitRollbackOnRegionClosing() throws IOException, InterruptedException {
+    final TableName tableName = TableName.valueOf(name.getMethodName());
 
     // Create table then get the single region for our new table.
     Table t = createTableAndWait(tableName, HConstants.CATALOG_FAMILY);
     List<HRegion> regions = cluster.getRegions(tableName);
-    HRegionInfo hri = getAndCheckSingleTableRegion(regions);
+    RegionInfo hri = getAndCheckSingleTableRegion(regions);
 
     int tableRegionIndex = ensureTableRegionNotOnSameServerAsMeta(admin, hri);
 
@@ -304,7 +311,7 @@ public class TestSplitTransactionOnCluster {
       // Get region pre-split.
       HRegionServer server = cluster.getRegionServer(tableRegionIndex);
       printOutRegions(server, "Initial regions: ");
-      int regionCount = ProtobufUtil.getOnlineRegions(server.getRSRpcServices()).size();
+      int regionCount = cluster.getRegions(hri.getTable()).size();
       regionStates.updateRegionState(hri, RegionState.State.CLOSING);
 
       // Now try splitting.... should fail.  And each should successfully
@@ -315,11 +322,9 @@ public class TestSplitTransactionOnCluster {
       // Wait around a while and assert count of regions remains constant.
       for (int i = 0; i < 10; i++) {
         Thread.sleep(100);
-        assertEquals(regionCount, ProtobufUtil.getOnlineRegions(
-          server.getRSRpcServices()).size());
+        assertEquals(regionCount, cluster.getRegions(hri.getTable()).size());
       }
-      regionStates.regionOnline(hri, server.getServerName());
-
+      regionStates.updateRegionState(hri, State.OPEN);
       // Now try splitting and it should work.
       split(hri, server, regionCount);
       // Get daughters
@@ -338,16 +343,14 @@ public class TestSplitTransactionOnCluster {
    * @throws IOException
    * @throws InterruptedException
    */
-  @Ignore // TODO: revisit this test when the new AM and SSH is implement
-  @Test (timeout=300000)
+  @Test
   public void testShutdownFixupWhenDaughterHasSplit()throws IOException, InterruptedException {
-    final TableName tableName =
-        TableName.valueOf("testShutdownFixupWhenDaughterHasSplit");
+    final TableName tableName = TableName.valueOf(name.getMethodName());
 
     // Create table then get the single region for our new table.
     Table t = createTableAndWait(tableName, HConstants.CATALOG_FAMILY);
     List<HRegion> regions = cluster.getRegions(tableName);
-    HRegionInfo hri = getAndCheckSingleTableRegion(regions);
+    RegionInfo hri = getAndCheckSingleTableRegion(regions);
 
     int tableRegionIndex = ensureTableRegionNotOnSameServerAsMeta(admin, hri);
 
@@ -361,14 +364,14 @@ public class TestSplitTransactionOnCluster {
       // Get region pre-split.
       HRegionServer server = cluster.getRegionServer(tableRegionIndex);
       printOutRegions(server, "Initial regions: ");
-      int regionCount = ProtobufUtil.getOnlineRegions(server.getRSRpcServices()).size();
+      int regionCount = cluster.getRegions(hri.getTable()).size();
       // Now split.
       split(hri, server, regionCount);
       // Get daughters
       List<HRegion> daughters = checkAndGetDaughters(tableName);
       // Now split one of the daughters.
-      regionCount = ProtobufUtil.getOnlineRegions(server.getRSRpcServices()).size();
-      HRegionInfo daughter = daughters.get(0).getRegionInfo();
+      regionCount = cluster.getRegions(hri.getTable()).size();
+      RegionInfo daughter = daughters.get(0).getRegionInfo();
       LOG.info("Daughter we are going to split: " + daughter);
       // Compact first to ensure we have cleaned up references -- else the split
       // will fail.
@@ -376,7 +379,7 @@ public class TestSplitTransactionOnCluster {
       daughters = cluster.getRegions(tableName);
       HRegion daughterRegion = null;
       for (HRegion r: daughters) {
-        if (r.getRegionInfo().equals(daughter)) {
+        if (RegionInfo.COMPARATOR.compare(r.getRegionInfo(), daughter) == 0) {
           daughterRegion = r;
           LOG.info("Found matching HRI: " + daughterRegion);
           break;
@@ -405,22 +408,25 @@ public class TestSplitTransactionOnCluster {
       for (HRegion d: daughters) {
         LOG.info("Regions after crash: " + d);
       }
+      if (daughters.size() != regions.size()) {
+        LOG.info("Daughters=" + daughters.size() + ", regions=" + regions.size());
+      }
       assertEquals(daughters.size(), regions.size());
       for (HRegion r: regions) {
-        LOG.info("Regions post crash " + r);
+        LOG.info("Regions post crash " + r + ", contains=" + daughters.contains(r));
         assertTrue("Missing region post crash " + r, daughters.contains(r));
       }
     } finally {
+      LOG.info("EXITING");
       admin.setBalancerRunning(true, false);
       cluster.getMaster().setCatalogJanitorEnabled(true);
       t.close();
     }
   }
 
-  @Test(timeout = 180000)
+  @Test
   public void testSplitShouldNotThrowNPEEvenARegionHasEmptySplitFiles() throws Exception {
-    TableName userTableName =
-        TableName.valueOf("testSplitShouldNotThrowNPEEvenARegionHasEmptySplitFiles");
+    TableName userTableName = TableName.valueOf(name.getMethodName());
     HTableDescriptor htd = new HTableDescriptor(userTableName);
     HColumnDescriptor hcd = new HColumnDescriptor("col");
     htd.addFamily(hcd);
@@ -440,10 +446,11 @@ public class TestSplitTransactionOnCluster {
         admin.flush(userTableName);
       }
       admin.majorCompact(userTableName);
-      List<HRegionInfo> regionsOfTable =
+      List<RegionInfo> regionsOfTable =
           cluster.getMaster().getAssignmentManager().getRegionStates()
           .getRegionsOfTable(userTableName);
-      HRegionInfo hRegionInfo = regionsOfTable.get(0);
+      assertEquals(1, regionsOfTable.size());
+      RegionInfo hRegionInfo = regionsOfTable.get(0);
       Put p = new Put("row6".getBytes());
       p.addColumn("col".getBytes(), "ql".getBytes(), "val".getBytes());
       table.put(p);
@@ -460,10 +467,13 @@ public class TestSplitTransactionOnCluster {
           .getRegionsOfTable(userTableName);
 
       while (regionsOfTable.size() != 2) {
-        Thread.sleep(2000);
+        Thread.sleep(1000);
         regionsOfTable = cluster.getMaster()
             .getAssignmentManager().getRegionStates()
             .getRegionsOfTable(userTableName);
+        LOG.debug("waiting 2 regions to be available, got " + regionsOfTable.size() +
+          ": " + regionsOfTable);
+
       }
       Assert.assertEquals(2, regionsOfTable.size());
 
@@ -487,17 +497,16 @@ public class TestSplitTransactionOnCluster {
    * @throws NodeExistsException
    * @throws KeeperException
    */
-  @Test (timeout = 300000)
+  @Test
   public void testMasterRestartAtRegionSplitPendingCatalogJanitor()
       throws IOException, InterruptedException, NodeExistsException,
       KeeperException, ServiceException {
-    final TableName tableName = TableName
-        .valueOf("testMasterRestartAtRegionSplitPendingCatalogJanitor");
+    final TableName tableName = TableName.valueOf(name.getMethodName());
 
     // Create table then get the single region for our new table.
     Table t = createTableAndWait(tableName, HConstants.CATALOG_FAMILY);
     List<HRegion> regions = cluster.getRegions(tableName);
-    HRegionInfo hri = getAndCheckSingleTableRegion(regions);
+    RegionInfo hri = getAndCheckSingleTableRegion(regions);
 
     int tableRegionIndex = ensureTableRegionNotOnSameServerAsMeta(admin, hri);
 
@@ -511,25 +520,35 @@ public class TestSplitTransactionOnCluster {
       // Get region pre-split.
       HRegionServer server = cluster.getRegionServer(tableRegionIndex);
       printOutRegions(server, "Initial regions: ");
-
+      // Call split.
       this.admin.splitRegion(hri.getRegionName());
-      checkAndGetDaughters(tableName);
-
+      List<HRegion> daughters = checkAndGetDaughters(tableName);
+      // Before cleanup, get a new master.
       HMaster master = abortAndWaitForMaster();
-
-      this.admin = TESTING_UTIL.getHBaseAdmin();
-
-      // Update the region to be offline and split, so that HRegionInfo#equals
-      // returns true in checking rebuilt region states map.
-      hri.setOffline(true);
-      hri.setSplit(true);
+      // Now call compact on the daughters and clean up any references.
+      for (HRegion daughter: daughters) {
+        daughter.compact(true);
+        assertFalse(daughter.hasReferences());
+      }
+      // BUT calling compact on the daughters is not enough. The CatalogJanitor looks
+      // in the filesystem, and the filesystem content is not same as what the Region
+      // is reading from. Compacted-away files are picked up later by the compacted
+      // file discharger process. It runs infrequently. Make it run so CatalogJanitor
+      // doens't find any references.
+      for (RegionServerThread rst: cluster.getRegionServerThreads()) {
+        boolean oldSetting = rst.getRegionServer().compactedFileDischarger.setUseExecutor(false);
+        rst.getRegionServer().compactedFileDischarger.run();
+        rst.getRegionServer().compactedFileDischarger.setUseExecutor(oldSetting);
+      }
+      cluster.getMaster().setCatalogJanitorEnabled(true);
+      LOG.info("Starting run of CatalogJanitor");
+      cluster.getMaster().getCatalogJanitor().run();
+      ProcedureTestingUtility.waitAllProcedures(cluster.getMaster().getMasterProcedureExecutor());
       RegionStates regionStates = master.getAssignmentManager().getRegionStates();
-      assertTrue("Split parent should be in SPLIT state",
-        regionStates.isRegionInState(hri, State.SPLIT));
       ServerName regionServerOfRegion = regionStates.getRegionServerOfRegion(hri);
-      assertTrue(regionServerOfRegion == null);
+      assertEquals(null, regionServerOfRegion);
     } finally {
-      this.admin.setBalancerRunning(true, false);
+      TESTING_UTIL.getAdmin().setBalancerRunning(true, false);
       cluster.getMaster().setCatalogJanitorEnabled(true);
       t.close();
     }
@@ -537,9 +556,8 @@ public class TestSplitTransactionOnCluster {
 
   @Test
   public void testSplitWithRegionReplicas() throws Exception {
-    final TableName tableName =
-        TableName.valueOf("foobar");
-    HTableDescriptor htd = TESTING_UTIL.createTableDescriptor("foobar");
+    final TableName tableName = TableName.valueOf(name.getMethodName());
+    HTableDescriptor htd = TESTING_UTIL.createTableDescriptor(name.getMethodName());
     htd.setRegionReplication(2);
     htd.addCoprocessor(SlowMeCopro.class.getName());
     // Create table then get the single region for our new table.
@@ -594,15 +612,15 @@ public class TestSplitTransactionOnCluster {
       Assert.assertFalse(r.isStale());
       LOG.info("exists stale after flush done");
 
-      SlowMeCopro.getCdl().set(new CountDownLatch(1));
+      SlowMeCopro.getPrimaryCdl().set(new CountDownLatch(1));
       g = new Get(b1);
       g.setConsistency(Consistency.TIMELINE);
       // This will succeed because in the previous GET we get the location of the replica
       r = t.get(g);
       Assert.assertTrue(r.isStale());
-      SlowMeCopro.getCdl().get().countDown();
+      SlowMeCopro.getPrimaryCdl().get().countDown();
     } finally {
-      SlowMeCopro.getCdl().get().countDown();
+      SlowMeCopro.getPrimaryCdl().get().countDown();
       admin.setBalancerRunning(true, false);
       cluster.getMaster().setCatalogJanitorEnabled(true);
       t.close();
@@ -630,15 +648,14 @@ public class TestSplitTransactionOnCluster {
    * If a table has regions that have no store files in a region, they should split successfully
    * into two regions with no store files.
    */
-  @Test(timeout = 60000)
+  @Test
   public void testSplitRegionWithNoStoreFiles()
       throws Exception {
-    final TableName tableName =
-        TableName.valueOf("testSplitRegionWithNoStoreFiles");
+    final TableName tableName = TableName.valueOf(name.getMethodName());
     // Create table then get the single region for our new table.
     createTableAndWait(tableName, HConstants.CATALOG_FAMILY);
     List<HRegion> regions = cluster.getRegions(tableName);
-    HRegionInfo hri = getAndCheckSingleTableRegion(regions);
+    RegionInfo hri = getAndCheckSingleTableRegion(regions);
     ensureTableRegionNotOnSameServerAsMeta(admin, hri);
     int regionServerIndex = cluster.getServerWith(regions.get(0).getRegionInfo()
       .getRegionName());
@@ -670,10 +687,10 @@ public class TestSplitTransactionOnCluster {
         fail("Split execution should have succeeded with no exceptions thrown");
       }
 
-      // Postcondition: split the table with no store files into two regions, but still have not
+      // Postcondition: split the table with no store files into two regions, but still have no
       // store files
       List<HRegion> daughters = cluster.getRegions(tableName);
-      assertTrue(daughters.size() == 2);
+      assertEquals(2, daughters.size());
 
       // check dirs
       HBaseFsck.debugLsr(conf, new Path("/"));
@@ -687,19 +704,27 @@ public class TestSplitTransactionOnCluster {
       RegionStates regionStates = am.getRegionStates();
       long start = EnvironmentEdgeManager.currentTime();
       while (!regionStates.isRegionInState(hri, State.SPLIT)) {
+        LOG.debug("Waiting for SPLIT state on: " + hri);
         assertFalse("Timed out in waiting split parent to be in state SPLIT",
           EnvironmentEdgeManager.currentTime() - start > 60000);
         Thread.sleep(500);
       }
+      assertTrue(regionStates.isRegionInState(daughters.get(0).getRegionInfo(), State.OPEN));
+      assertTrue(regionStates.isRegionInState(daughters.get(1).getRegionInfo(), State.OPEN));
 
       // We should not be able to assign it again
-      am.assign(hri, true);
+      am.assign(hri);
       assertFalse("Split region can't be assigned",
         regionStates.isRegionInTransition(hri));
       assertTrue(regionStates.isRegionInState(hri, State.SPLIT));
 
       // We should not be able to unassign it either
-      am.unassign(hri, null);
+      try {
+        am.unassign(hri);
+        fail("Should have thrown exception");
+      } catch (UnexpectedStateException e) {
+        // Expected
+      }
       assertFalse("Split region can't be unassigned",
         regionStates.isRegionInTransition(hri));
       assertTrue(regionStates.isRegionInState(hri, State.SPLIT));
@@ -712,8 +737,7 @@ public class TestSplitTransactionOnCluster {
   @Test
   public void testStoreFileReferenceCreationWhenSplitPolicySaysToSkipRangeCheck()
       throws Exception {
-    final TableName tableName =
-        TableName.valueOf("testStoreFileReferenceCreationWhenSplitPolicySaysToSkipRangeCheck");
+    final TableName tableName = TableName.valueOf(name.getMethodName());
     try {
       HTableDescriptor htd = new HTableDescriptor(tableName);
       htd.addFamily(new HColumnDescriptor("f"));
@@ -729,8 +753,8 @@ public class TestSplitTransactionOnCluster {
         region.put(p);
       }
       region.flush(true);
-      Store store = region.getStore(Bytes.toBytes("f"));
-      Collection<StoreFile> storefiles = store.getStorefiles();
+      HStore store = region.getStore(Bytes.toBytes("f"));
+      Collection<HStoreFile> storefiles = store.getStorefiles();
       assertEquals(storefiles.size(), 1);
       assertFalse(region.hasReferences());
       Path referencePath =
@@ -780,16 +804,15 @@ public class TestSplitTransactionOnCluster {
     return master;
   }
 
-  private void split(final HRegionInfo hri, final HRegionServer server, final int regionCount)
+  private void split(final RegionInfo hri, final HRegionServer server, final int regionCount)
       throws IOException, InterruptedException {
-    this.admin.splitRegion(hri.getRegionName());
-    for (int i = 0; this.cluster.getRegions(hri.getTable()).size() <= regionCount && i < 60; i++) {
-      LOG.debug("Waiting on region to split");
+    admin.splitRegion(hri.getRegionName());
+    for (int i = 0; cluster.getRegions(hri.getTable()).size() <= regionCount && i < 60; i++) {
+      LOG.debug("Waiting on region " + hri.getRegionNameAsString() + " to split");
       Thread.sleep(2000);
     }
-
     assertFalse("Waited too long for split",
-      this.cluster.getRegions(hri.getTable()).size() <= regionCount);
+        cluster.getRegions(hri.getTable()).size() <= regionCount);
   }
 
   /**
@@ -804,18 +827,26 @@ public class TestSplitTransactionOnCluster {
    * @throws InterruptedException
    */
   private int ensureTableRegionNotOnSameServerAsMeta(final Admin admin,
-      final HRegionInfo hri)
+      final RegionInfo hri)
   throws IOException, MasterNotRunningException,
   ZooKeeperConnectionException, InterruptedException {
     // Now make sure that the table region is not on same server as that hosting
     // hbase:meta  We don't want hbase:meta replay polluting our test when we later crash
     // the table region serving server.
     int metaServerIndex = cluster.getServerWithMeta();
-    assertTrue(metaServerIndex == -1); // meta is on master now
-    HRegionServer metaRegionServer = cluster.getMaster();
+    boolean tablesOnMaster = LoadBalancer.isTablesOnMaster(TESTING_UTIL.getConfiguration());
+    if (tablesOnMaster) {
+      // Need to check master is supposed to host meta... perhaps it is not.
+      throw new UnsupportedOperationException();
+      // TODO: assertTrue(metaServerIndex == -1); // meta is on master now
+    }
+    HRegionServer metaRegionServer = tablesOnMaster?
+      cluster.getMaster(): cluster.getRegionServer(metaServerIndex);
     int tableRegionIndex = cluster.getServerWith(hri.getRegionName());
     assertTrue(tableRegionIndex != -1);
     HRegionServer tableRegionServer = cluster.getRegionServer(tableRegionIndex);
+    LOG.info("MetaRegionServer=" + metaRegionServer.getServerName() +
+      ", other=" + tableRegionServer.getServerName());
     if (metaRegionServer.getServerName().equals(tableRegionServer.getServerName())) {
       HRegionServer hrs = getOtherRegionServer(cluster, metaRegionServer);
       assertNotNull(hrs);
@@ -833,8 +864,8 @@ public class TestSplitTransactionOnCluster {
         tableRegionIndex + " and metaServerIndex=" + metaServerIndex);
       Thread.sleep(100);
     }
-    assertTrue("Region not moved off hbase:meta server", tableRegionIndex != -1
-        && tableRegionIndex != metaServerIndex);
+    assertTrue("Region not moved off hbase:meta server, tableRegionIndex=" + tableRegionIndex,
+      tableRegionIndex != -1 && tableRegionIndex != metaServerIndex);
     // Verify for sure table region is not on same server as hbase:meta
     tableRegionIndex = cluster.getServerWith(hri.getRegionName());
     assertTrue(tableRegionIndex != -1);
@@ -864,27 +895,28 @@ public class TestSplitTransactionOnCluster {
 
   private void printOutRegions(final HRegionServer hrs, final String prefix)
       throws IOException {
-    List<HRegionInfo> regions = ProtobufUtil.getOnlineRegions(hrs.getRSRpcServices());
-    for (HRegionInfo region: regions) {
+    List<RegionInfo> regions = ProtobufUtil.getOnlineRegions(hrs.getRSRpcServices());
+    for (RegionInfo region: regions) {
       LOG.info(prefix + region.getRegionNameAsString());
     }
   }
 
-  private void waitUntilRegionServerDead() throws InterruptedException, InterruptedIOException {
+  private void waitUntilRegionServerDead() throws InterruptedException, IOException {
     // Wait until the master processes the RS shutdown
-    for (int i=0; (cluster.getMaster().getClusterStatus().getServers().size() > NB_SERVERS
+    for (int i=0; (cluster.getMaster().getClusterMetrics()
+        .getLiveServerMetrics().size() > NB_SERVERS
         || cluster.getLiveRegionServerThreads().size() > NB_SERVERS) && i<100; i++) {
       LOG.info("Waiting on server to go down");
       Thread.sleep(100);
     }
     assertFalse("Waited too long for RS to die",
-      cluster.getMaster().getClusterStatus(). getServers().size() > NB_SERVERS
+      cluster.getMaster().getClusterMetrics(). getLiveServerMetrics().size() > NB_SERVERS
         || cluster.getLiveRegionServerThreads().size() > NB_SERVERS);
   }
 
   private void awaitDaughters(TableName tableName, int numDaughters) throws InterruptedException {
     // Wait till regions are back on line again.
-    for (int i=0; cluster.getRegions(tableName).size() < numDaughters && i<60; i++) {
+    for (int i = 0; cluster.getRegions(tableName).size() < numDaughters && i < 60; i++) {
       LOG.info("Waiting for repair to happen");
       Thread.sleep(1000);
     }
@@ -914,10 +946,8 @@ public class TestSplitTransactionOnCluster {
 
   // Make it public so that JVMClusterUtil can access it.
   public static class MyMaster extends HMaster {
-    public MyMaster(Configuration conf, CoordinatedStateManager cp)
-      throws IOException, KeeperException,
-        InterruptedException {
-      super(conf, cp);
+    public MyMaster(Configuration conf) throws IOException, KeeperException, InterruptedException {
+      super(conf);
     }
 
     @Override
@@ -942,11 +972,14 @@ public class TestSplitTransactionOnCluster {
       if (enabled.get() && req.getTransition(0).getTransitionCode().equals(
           TransitionCode.READY_TO_SPLIT) && !resp.hasErrorMessage()) {
         RegionStates regionStates = myMaster.getAssignmentManager().getRegionStates();
-        for (RegionState regionState: regionStates.getRegionsInTransition()) {
+        for (RegionStates.RegionStateNode regionState:
+          regionStates.getRegionsInTransition()) {
+          /* TODO!!!!
           // Find the merging_new region and remove it
           if (regionState.isSplittingNew()) {
             regionStates.deleteRegion(regionState.getRegion());
           }
+          */
         }
       }
       return resp;

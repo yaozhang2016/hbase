@@ -18,16 +18,12 @@
  */
 package org.apache.hadoop.hbase.client;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
-import java.io.IOException;
+import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 
-import com.google.common.base.Predicate;
-import com.google.common.collect.Iterables;
-import com.google.common.collect.Lists;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HConstants;
@@ -36,24 +32,27 @@ import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.MetaTableAccessor;
 import org.apache.hadoop.hbase.MiniHBaseCluster;
 import org.apache.hadoop.hbase.TableName;
-import org.apache.hadoop.hbase.client.Admin;
-import org.apache.hadoop.hbase.client.Delete;
-import org.apache.hadoop.hbase.client.Result;
-import org.apache.hadoop.hbase.client.ResultScanner;
-import org.apache.hadoop.hbase.client.Table;
-import org.apache.hadoop.hbase.master.HMaster;
-import org.apache.hadoop.hbase.coprocessor.BaseMasterObserver;
 import org.apache.hadoop.hbase.coprocessor.CoprocessorHost;
+import org.apache.hadoop.hbase.coprocessor.MasterCoprocessor;
 import org.apache.hadoop.hbase.coprocessor.MasterCoprocessorEnvironment;
+import org.apache.hadoop.hbase.coprocessor.MasterObserver;
 import org.apache.hadoop.hbase.coprocessor.ObserverContext;
+import org.apache.hadoop.hbase.master.HMaster;
+import org.apache.hbase.thirdparty.com.google.common.base.Predicate;
+import org.apache.hbase.thirdparty.com.google.common.collect.Iterables;
+import org.apache.hbase.thirdparty.com.google.common.collect.Lists;
 import org.apache.hadoop.hbase.testclassification.MasterTests;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.JVMClusterUtil;
 import org.junit.After;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.junit.rules.TestName;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
@@ -62,8 +61,11 @@ import static org.junit.Assert.fail;
 @Category({ MasterTests.class, MediumTests.class })
 public class TestEnableTable {
   private static final HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
-  private static final Log LOG = LogFactory.getLog(TestEnableTable.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestEnableTable.class);
   private static final byte[] FAMILYNAME = Bytes.toBytes("fam");
+
+  @Rule
+  public TestName name = new TestName();
 
   @Before
   public void setUp() throws Exception {
@@ -79,10 +81,10 @@ public class TestEnableTable {
 
   @Test(timeout = 300000)
   public void testEnableTableWithNoRegionServers() throws Exception {
-    final TableName tableName = TableName.valueOf("testEnableTableWithNoRegionServers");
+    final TableName tableName = TableName.valueOf(name.getMethodName());
     final MiniHBaseCluster cluster = TEST_UTIL.getHBaseCluster();
     final HMaster m = cluster.getMaster();
-    final Admin admin = TEST_UTIL.getHBaseAdmin();
+    final Admin admin = TEST_UTIL.getAdmin();
     final HTableDescriptor desc = new HTableDescriptor(tableName);
     desc.addFamily(new HColumnDescriptor(FAMILYNAME));
     admin.createTable(desc);
@@ -100,19 +102,21 @@ public class TestEnableTable {
     rs.getRegionServer().stop("stop");
     cluster.waitForRegionServerToStop(rs.getRegionServer().getServerName(), 10000);
 
-    LOG.debug("Now enabling table " + tableName);
-
-    admin.enableTable(tableName);
-    assertTrue(admin.isTableEnabled(tableName));
+    // We used to enable the table here but AMv2 would hang waiting on a RS to check-in.
+    // Revisit.
 
     JVMClusterUtil.RegionServerThread rs2 = cluster.startRegionServer();
     cluster.waitForRegionServerToStart(rs2.getRegionServer().getServerName().getHostname(),
         rs2.getRegionServer().getServerName().getPort(), 60000);
 
-    List<HRegionInfo> regions = TEST_UTIL.getHBaseAdmin().getTableRegions(tableName);
+    LOG.debug("Now enabling table " + tableName);
+    admin.enableTable(tableName);
+    assertTrue(admin.isTableEnabled(tableName));
+
+    List<HRegionInfo> regions = TEST_UTIL.getAdmin().getTableRegions(tableName);
     assertEquals(1, regions.size());
     for (HRegionInfo region : regions) {
-      TEST_UTIL.getHBaseAdmin().assign(region.getEncodedNameAsBytes());
+      TEST_UTIL.getAdmin().assign(region.getEncodedNameAsBytes());
     }
     LOG.debug("Waiting for table assigned " + tableName);
     TEST_UTIL.waitUntilAllRegionsAssigned(tableName);
@@ -142,8 +146,8 @@ public class TestEnableTable {
   @Test(timeout=60000)
   public void testDeleteForSureClearsAllTableRowsFromMeta()
   throws IOException, InterruptedException {
-    final TableName tableName = TableName.valueOf("testDeleteForSureClearsAllTableRowsFromMeta");
-    final Admin admin = TEST_UTIL.getHBaseAdmin();
+    final TableName tableName = TableName.valueOf(name.getMethodName());
+    final Admin admin = TEST_UTIL.getAdmin();
     final HTableDescriptor desc = new HTableDescriptor(tableName);
     desc.addFamily(new HColumnDescriptor(FAMILYNAME));
     try {
@@ -187,15 +191,20 @@ public class TestEnableTable {
     }
   }
 
-  public  static class MasterSyncObserver extends BaseMasterObserver {
+  public  static class MasterSyncObserver implements MasterCoprocessor, MasterObserver {
     volatile CountDownLatch tableCreationLatch = null;
     volatile CountDownLatch tableDeletionLatch = null;
 
     @Override
+    public Optional<MasterObserver> getMasterObserver() {
+      return Optional.of(this);
+    }
+
+    @Override
     public void postCompletedCreateTableAction(
         final ObserverContext<MasterCoprocessorEnvironment> ctx,
-        final HTableDescriptor desc,
-        final HRegionInfo[] regions) throws IOException {
+        final TableDescriptor desc,
+        final RegionInfo[] regions) throws IOException {
       // the AccessController test, some times calls only and directly the
       // postCompletedCreateTableAction()
       if (tableCreationLatch != null) {
@@ -220,10 +229,10 @@ public class TestEnableTable {
   throws Exception {
     // NOTE: We need a latch because admin is not sync,
     // so the postOp coprocessor method may be called after the admin operation returned.
-    MasterSyncObserver observer = (MasterSyncObserver)testUtil.getHBaseCluster().getMaster()
-      .getMasterCoprocessorHost().findCoprocessor(MasterSyncObserver.class.getName());
+    MasterSyncObserver observer = testUtil.getHBaseCluster().getMaster()
+      .getMasterCoprocessorHost().findCoprocessor(MasterSyncObserver.class);
     observer.tableCreationLatch = new CountDownLatch(1);
-    Admin admin = testUtil.getHBaseAdmin();
+    Admin admin = testUtil.getAdmin();
     if (splitKeys != null) {
       admin.createTable(htd, splitKeys);
     } else {
@@ -238,10 +247,10 @@ public class TestEnableTable {
   throws Exception {
     // NOTE: We need a latch because admin is not sync,
     // so the postOp coprocessor method may be called after the admin operation returned.
-    MasterSyncObserver observer = (MasterSyncObserver)testUtil.getHBaseCluster().getMaster()
-      .getMasterCoprocessorHost().findCoprocessor(MasterSyncObserver.class.getName());
+    MasterSyncObserver observer = testUtil.getHBaseCluster().getMaster()
+      .getMasterCoprocessorHost().findCoprocessor(MasterSyncObserver.class);
     observer.tableDeletionLatch = new CountDownLatch(1);
-    Admin admin = testUtil.getHBaseAdmin();
+    Admin admin = testUtil.getAdmin();
     try {
       admin.disableTable(tableName);
     } catch (Exception e) {

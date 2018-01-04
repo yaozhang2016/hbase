@@ -18,21 +18,15 @@
 
 package org.apache.hadoop.hbase.snapshot;
 
-import org.apache.hadoop.hbase.shaded.com.google.protobuf.InvalidProtocolBufferException;
-import org.apache.hadoop.hbase.shaded.com.google.protobuf.UnsafeByteOperations;
-
 import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Callable;
-import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorCompletionService;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FSDataOutputStream;
@@ -40,11 +34,18 @@ import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.PathFilter;
-import org.apache.hadoop.hbase.HRegionInfo;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos.SnapshotDescription;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.SnapshotProtos.SnapshotRegionManifest;
+import org.apache.hadoop.hbase.client.RegionInfo;
 import org.apache.hadoop.hbase.regionserver.StoreFileInfo;
 import org.apache.hadoop.hbase.util.FSUtils;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.apache.hbase.thirdparty.com.google.protobuf.CodedInputStream;
+import org.apache.hbase.thirdparty.com.google.protobuf.InvalidProtocolBufferException;
+import org.apache.hbase.thirdparty.com.google.protobuf.UnsafeByteOperations;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.SnapshotProtos.SnapshotDescription;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.SnapshotProtos.SnapshotRegionManifest;
 
 /**
  * DO NOT USE DIRECTLY. USE {@link SnapshotManifest}.
@@ -56,7 +57,7 @@ import org.apache.hadoop.hbase.util.FSUtils;
  */
 @InterfaceAudience.Private
 public final class SnapshotManifestV2 {
-  private static final Log LOG = LogFactory.getLog(SnapshotManifestV2.class);
+  private static final Logger LOG = LoggerFactory.getLogger(SnapshotManifestV2.class);
 
   public static final int DESCRIPTOR_VERSION = 2;
 
@@ -76,9 +77,9 @@ public final class SnapshotManifestV2 {
       this.fs = fs;
     }
 
-    public SnapshotRegionManifest.Builder regionOpen(final HRegionInfo regionInfo) {
+    public SnapshotRegionManifest.Builder regionOpen(final RegionInfo regionInfo) {
       SnapshotRegionManifest.Builder manifest = SnapshotRegionManifest.newBuilder();
-      manifest.setRegionInfo(HRegionInfo.convert(regionInfo));
+      manifest.setRegionInfo(ProtobufUtil.toRegionInfo(regionInfo));
       return manifest;
     }
 
@@ -126,8 +127,8 @@ public final class SnapshotManifestV2 {
   }
 
   static List<SnapshotRegionManifest> loadRegionManifests(final Configuration conf,
-      final Executor executor,final FileSystem fs, final Path snapshotDir,
-      final SnapshotDescription desc) throws IOException {
+      final Executor executor, final FileSystem fs, final Path snapshotDir,
+      final SnapshotDescription desc, final int manifestSizeLimit) throws IOException {
     FileStatus[] manifestFiles = FSUtils.listStatus(fs, snapshotDir, new PathFilter() {
       @Override
       public boolean accept(Path path) {
@@ -138,14 +139,17 @@ public final class SnapshotManifestV2 {
     if (manifestFiles == null || manifestFiles.length == 0) return null;
 
     final ExecutorCompletionService<SnapshotRegionManifest> completionService =
-      new ExecutorCompletionService<SnapshotRegionManifest>(executor);
+      new ExecutorCompletionService<>(executor);
     for (final FileStatus st: manifestFiles) {
       completionService.submit(new Callable<SnapshotRegionManifest>() {
         @Override
         public SnapshotRegionManifest call() throws IOException {
           FSDataInputStream stream = fs.open(st.getPath());
+          CodedInputStream cin = CodedInputStream.newInstance(stream);
+          cin.setSizeLimit(manifestSizeLimit);
+
           try {
-            return SnapshotRegionManifest.parseFrom(stream);
+            return SnapshotRegionManifest.parseFrom(cin);
           } finally {
             stream.close();
           }
@@ -153,8 +157,7 @@ public final class SnapshotManifestV2 {
       });
     }
 
-    ArrayList<SnapshotRegionManifest> regionsManifest =
-        new ArrayList<SnapshotRegionManifest>(manifestFiles.length);
+    ArrayList<SnapshotRegionManifest> regionsManifest = new ArrayList<>(manifestFiles.length);
     try {
       for (int i = 0; i < manifestFiles.length; ++i) {
         regionsManifest.add(completionService.take().get());

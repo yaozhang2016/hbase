@@ -15,41 +15,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.hadoop.hbase.regionserver;
-
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.fs.FileStatus;
-import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.FileUtil;
-import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.fs.permission.FsPermission;
-import org.apache.hadoop.hbase.DoNotRetryIOException;
-import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.TableName;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.coprocessor.BulkLoadObserver;
-import org.apache.hadoop.hbase.coprocessor.ObserverContext;
-import org.apache.hadoop.hbase.coprocessor.RegionCoprocessorEnvironment;
-import org.apache.hadoop.hbase.ipc.RpcServer;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos.BulkLoadHFileRequest;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos.CleanupBulkLoadRequest;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos.PrepareBulkLoadRequest;
-import org.apache.hadoop.hbase.regionserver.Region.BulkLoadListener;
-import org.apache.hadoop.hbase.security.User;
-import org.apache.hadoop.hbase.security.UserProvider;
-import org.apache.hadoop.hbase.security.token.FsDelegationToken;
-import org.apache.hadoop.hbase.util.Bytes;
-import org.apache.hadoop.hbase.util.FSHDFSUtils;
-import org.apache.hadoop.hbase.util.FSUtils;
-import org.apache.hadoop.hbase.util.Methods;
-import org.apache.hadoop.hbase.util.Pair;
-import org.apache.hadoop.io.Text;
-import org.apache.hadoop.security.UserGroupInformation;
-import org.apache.hadoop.security.token.Token;
 
 import java.io.IOException;
 import java.math.BigInteger;
@@ -59,6 +25,38 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FileStatus;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.FileUtil;
+import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.fs.permission.FsPermission;
+import org.apache.hadoop.hbase.DoNotRetryIOException;
+import org.apache.hadoop.hbase.HConstants;
+import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.client.Connection;
+import org.apache.hadoop.hbase.ipc.RpcServer;
+import org.apache.hadoop.hbase.regionserver.HRegion.BulkLoadListener;
+import org.apache.hadoop.hbase.security.User;
+import org.apache.hadoop.hbase.security.UserProvider;
+import org.apache.hadoop.hbase.security.token.FsDelegationToken;
+import org.apache.hadoop.hbase.security.token.TokenUtil;
+import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.hadoop.hbase.util.FSHDFSUtils;
+import org.apache.hadoop.hbase.util.FSUtils;
+import org.apache.hadoop.hbase.util.Methods;
+import org.apache.hadoop.hbase.util.Pair;
+import org.apache.hadoop.io.Text;
+import org.apache.hadoop.security.UserGroupInformation;
+import org.apache.hadoop.security.token.Token;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos.BulkLoadHFileRequest;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos.CleanupBulkLoadRequest;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos.PrepareBulkLoadRequest;
 
 /**
  * Bulk loads in secure mode.
@@ -95,7 +93,7 @@ public class SecureBulkLoadManager {
   private static final int RANDOM_WIDTH = 320;
   private static final int RANDOM_RADIX = 32;
 
-  private static final Log LOG = LogFactory.getLog(SecureBulkLoadManager.class);
+  private static final Logger LOG = LoggerFactory.getLogger(SecureBulkLoadManager.class);
 
   private final static FsPermission PERM_ALL_ACCESS = FsPermission.valueOf("-rwxrwxrwx");
   private final static FsPermission PERM_HIDDEN = FsPermission.valueOf("-rwx--x--x");
@@ -108,9 +106,11 @@ public class SecureBulkLoadManager {
   private Path baseStagingDir;
 
   private UserProvider userProvider;
+  private Connection conn;
 
-  SecureBulkLoadManager(Configuration conf) {
+  SecureBulkLoadManager(Configuration conf, Connection conn) {
     this.conf = conf;
+    this.conn = conn;
   }
 
   public void start() throws IOException {
@@ -131,51 +131,36 @@ public class SecureBulkLoadManager {
   public void stop() throws IOException {
   }
 
-  public String prepareBulkLoad(final Region region, final PrepareBulkLoadRequest request)
+  public String prepareBulkLoad(final HRegion region, final PrepareBulkLoadRequest request)
       throws IOException {
-    List<BulkLoadObserver> bulkLoadObservers = getBulkLoadObservers(region);
-
-    if (bulkLoadObservers != null && bulkLoadObservers.size() != 0) {
-      ObserverContext<RegionCoprocessorEnvironment> ctx =
-          new ObserverContext<RegionCoprocessorEnvironment>(getActiveUser());
-      ctx.prepare((RegionCoprocessorEnvironment) region.getCoprocessorHost()
-          .findCoprocessorEnvironment(BulkLoadObserver.class).get(0));
-
-      for (BulkLoadObserver bulkLoadObserver : bulkLoadObservers) {
-        bulkLoadObserver.prePrepareBulkLoad(ctx, request);
-      }
-    }
+    User user = getActiveUser();
+    region.getCoprocessorHost().prePrepareBulkLoad(user);
 
     String bulkToken =
-        createStagingDir(baseStagingDir, getActiveUser(), region.getTableDesc().getTableName())
+        createStagingDir(baseStagingDir, user, region.getTableDescriptor().getTableName())
             .toString();
 
     return bulkToken;
   }
 
-  public void cleanupBulkLoad(final Region region, final CleanupBulkLoadRequest request)
+  public void cleanupBulkLoad(final HRegion region, final CleanupBulkLoadRequest request)
       throws IOException {
-    List<BulkLoadObserver> bulkLoadObservers = getBulkLoadObservers(region);
+    region.getCoprocessorHost().preCleanupBulkLoad(getActiveUser());
 
-    if (bulkLoadObservers != null && bulkLoadObservers.size() != 0) {
-      ObserverContext<RegionCoprocessorEnvironment> ctx =
-          new ObserverContext<RegionCoprocessorEnvironment>(getActiveUser());
-      ctx.prepare((RegionCoprocessorEnvironment) region.getCoprocessorHost()
-        .findCoprocessorEnvironment(BulkLoadObserver.class).get(0));
-
-      for (BulkLoadObserver bulkLoadObserver : bulkLoadObservers) {
-        bulkLoadObserver.preCleanupBulkLoad(ctx, request);
+    Path path = new Path(request.getBulkToken());
+    if (!fs.delete(path, true)) {
+      if (fs.exists(path)) {
+        throw new IOException("Failed to clean up " + path);
       }
     }
-
-    fs.delete(new Path(request.getBulkToken()), true);
+    LOG.info("Cleaned up " + path + " successfully.");
   }
 
-  public boolean secureBulkLoadHFiles(final Region region,
+  public Map<byte[], List<Path>> secureBulkLoadHFiles(final HRegion region,
       final BulkLoadHFileRequest request) throws IOException {
-    final List<Pair<byte[], String>> familyPaths = new ArrayList<Pair<byte[], String>>(request.getFamilyPathCount());
+    final List<Pair<byte[], String>> familyPaths = new ArrayList<>(request.getFamilyPathCount());
     for(ClientProtos.BulkLoadHFileRequest.FamilyPath el : request.getFamilyPathList()) {
-      familyPaths.add(new Pair<byte[], String>(el.getFamily().toByteArray(), el.getPath()));
+      familyPaths.add(new Pair<>(el.getFamily().toByteArray(), el.getPath()));
     }
 
     Token userToken = null;
@@ -187,7 +172,18 @@ public class SecureBulkLoadManager {
     final String bulkToken = request.getBulkToken();
     User user = getActiveUser();
     final UserGroupInformation ugi = user.getUGI();
-    if(userToken != null) {
+    if (userProvider.isHadoopSecurityEnabled()) {
+      try {
+        Token tok = TokenUtil.obtainToken(conn);
+        if (tok != null) {
+          boolean b = ugi.addToken(tok);
+          LOG.debug("token added " + tok + " for user " + ugi + " return=" + b);
+        }
+      } catch (IOException ioe) {
+        LOG.warn("unable to add token", ioe);
+      }
+    }
+    if (userToken != null) {
       ugi.addToken(userToken);
     } else if (userProvider.isHadoopSecurityEnabled()) {
       //we allow this to pass through in "simple" security mode
@@ -195,31 +191,31 @@ public class SecureBulkLoadManager {
       throw new DoNotRetryIOException("User token cannot be null");
     }
 
-    boolean bypass = false;
     if (region.getCoprocessorHost() != null) {
-        bypass = region.getCoprocessorHost().preBulkLoadHFile(familyPaths);
+      region.getCoprocessorHost().preBulkLoadHFile(familyPaths);
     }
-    boolean loaded = false;
-    if (!bypass) {
+    Map<byte[], List<Path>> map = null;
+
+    try {
       // Get the target fs (HBase region server fs) delegation token
       // Since we have checked the permission via 'preBulkLoadHFile', now let's give
       // the 'request user' necessary token to operate on the target fs.
       // After this point the 'doAs' user will hold two tokens, one for the source fs
       // ('request user'), another for the target fs (HBase region server principal).
       if (userProvider.isHadoopSecurityEnabled()) {
-        FsDelegationToken targetfsDelegationToken = new FsDelegationToken(userProvider, "renewer");
+        FsDelegationToken targetfsDelegationToken = new FsDelegationToken(userProvider,"renewer");
         targetfsDelegationToken.acquireDelegationToken(fs);
 
         Token<?> targetFsToken = targetfsDelegationToken.getUserToken();
         if (targetFsToken != null
-            && (userToken == null || !targetFsToken.getService().equals(userToken.getService()))) {
+            && (userToken == null || !targetFsToken.getService().equals(userToken.getService()))){
           ugi.addToken(targetFsToken);
         }
       }
 
-      loaded = ugi.doAs(new PrivilegedAction<Boolean>() {
+      map = ugi.doAs(new PrivilegedAction<Map<byte[], List<Path>>>() {
         @Override
-        public Boolean run() {
+        public Map<byte[], List<Path>> run() {
           FileSystem fs = null;
           try {
             fs = FileSystem.get(conf);
@@ -237,21 +233,15 @@ public class SecureBulkLoadManager {
           } catch (Exception e) {
             LOG.error("Failed to complete bulk load", e);
           }
-          return false;
+          return null;
         }
       });
+    } finally {
+      if (region.getCoprocessorHost() != null) {
+        region.getCoprocessorHost().postBulkLoadHFile(familyPaths, map);
+      }
     }
-    if (region.getCoprocessorHost() != null) {
-       loaded = region.getCoprocessorHost().postBulkLoadHFile(familyPaths, loaded);
-    }
-    return loaded;
-  }
-
-  private List<BulkLoadObserver> getBulkLoadObservers(Region region) {
-    List<BulkLoadObserver> coprocessorList =
-        region.getCoprocessorHost().findCoprocessors(BulkLoadObserver.class);
-
-    return coprocessorList;
+    return map;
   }
 
   private Path createStagingDir(Path baseDir,
@@ -273,16 +263,12 @@ public class SecureBulkLoadManager {
   }
 
   private User getActiveUser() throws IOException {
-    User user = RpcServer.getRequestUser();
-    if (user == null) {
-      // for non-rpc handling, fallback to system user
-      user = userProvider.getCurrent();
-    }
-
-    //this is for testing
-    if (userProvider.isHadoopSecurityEnabled()
-        && "simple".equalsIgnoreCase(conf.get(User.HBASE_SECURITY_CONF_KEY))) {
-      return User.createUserForTesting(conf, user.getShortName(), new String[]{});
+    // for non-rpc handling, fallback to system user
+    User user = RpcServer.getRequestUser().orElse(userProvider.getCurrent());
+    // this is for testing
+    if (userProvider.isHadoopSecurityEnabled() &&
+        "simple".equalsIgnoreCase(conf.get(User.HBASE_SECURITY_CONF_KEY))) {
+      return User.createUserForTesting(conf, user.getShortName(), new String[] {});
     }
 
     return user;
@@ -301,7 +287,7 @@ public class SecureBulkLoadManager {
       this.fs = fs;
       this.stagingDir = stagingDir;
       this.conf = conf;
-      this.origPermissions = new HashMap<String, FsPermission>();
+      this.origPermissions = new HashMap<>();
     }
 
     @Override

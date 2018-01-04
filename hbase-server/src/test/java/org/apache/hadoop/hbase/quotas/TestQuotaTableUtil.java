@@ -19,19 +19,32 @@
 package org.apache.hadoop.hbase.quotas;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.apache.hadoop.hbase.Cell;
+import org.apache.hadoop.hbase.CellScanner;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HConstants;
+import org.apache.hadoop.hbase.NamespaceDescriptor;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Connection;
 import org.apache.hadoop.hbase.client.ConnectionFactory;
-import org.apache.hadoop.hbase.protobuf.generated.QuotaProtos;
+import org.apache.hadoop.hbase.client.Put;
+import org.apache.hadoop.hbase.client.Result;
+import org.apache.hadoop.hbase.client.ResultScanner;
+import org.apache.hadoop.hbase.client.Table;
+import org.apache.hadoop.hbase.quotas.SpaceQuotaSnapshot.SpaceQuotaStatus;
+import org.apache.hbase.thirdparty.com.google.protobuf.UnsafeByteOperations;
 import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.QuotaProtos;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.QuotaProtos.Quotas;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.QuotaProtos.Throttle;
 import org.apache.hadoop.hbase.testclassification.MasterTests;
@@ -40,18 +53,26 @@ import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.Before;
 import org.junit.BeforeClass;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.junit.rules.TestName;
 
 /**
  * Test the quota table helpers (e.g. CRUD operations)
  */
 @Category({MasterTests.class, MediumTests.class})
 public class TestQuotaTableUtil {
-  private static final Log LOG = LogFactory.getLog(TestQuotaTableUtil.class);
 
   private final static HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
   private Connection connection;
+  private int tableNameCounter;
+
+  @Rule
+  public TestName testName = new TestName();
+
+  @Rule
+  public TestName name = new TestName();
 
   @BeforeClass
   public static void setUpBeforeClass() throws Exception {
@@ -74,6 +95,7 @@ public class TestQuotaTableUtil {
   @Before
   public void before() throws IOException {
     this.connection = ConnectionFactory.createConnection(TEST_UTIL.getConfiguration());
+    this.tableNameCounter = 0;
   }
 
   @After
@@ -83,7 +105,7 @@ public class TestQuotaTableUtil {
 
   @Test
   public void testTableQuotaUtil() throws Exception {
-    final TableName table = TableName.valueOf("testTableQuotaUtilTable");
+    final TableName tableName = TableName.valueOf(name.getMethodName());
 
     Quotas quota = Quotas.newBuilder()
               .setThrottle(Throttle.newBuilder()
@@ -94,13 +116,13 @@ public class TestQuotaTableUtil {
               .build();
 
     // Add user quota and verify it
-    QuotaUtil.addTableQuota(this.connection, table, quota);
-    Quotas resQuota = QuotaUtil.getTableQuota(this.connection, table);
+    QuotaUtil.addTableQuota(this.connection, tableName, quota);
+    Quotas resQuota = QuotaUtil.getTableQuota(this.connection, tableName);
     assertEquals(quota, resQuota);
 
     // Remove user quota and verify it
-    QuotaUtil.deleteTableQuota(this.connection, table);
-    resQuota = QuotaUtil.getTableQuota(this.connection, table);
+    QuotaUtil.deleteTableQuota(this.connection, tableName);
+    resQuota = QuotaUtil.getTableQuota(this.connection, tableName);
     assertEquals(null, resQuota);
   }
 
@@ -129,7 +151,7 @@ public class TestQuotaTableUtil {
 
   @Test
   public void testUserQuotaUtil() throws Exception {
-    final TableName table = TableName.valueOf("testUserQuotaUtilTable");
+    final TableName tableName = TableName.valueOf(name.getMethodName());
     final String namespace = "testNS";
     final String user = "testUser";
 
@@ -159,8 +181,8 @@ public class TestQuotaTableUtil {
     assertEquals(quota, resQuota);
 
     // Add user quota for table
-    QuotaUtil.addUserQuota(this.connection, user, table, quotaTable);
-    Quotas resQuotaTable = QuotaUtil.getUserQuota(this.connection, user, table);
+    QuotaUtil.addUserQuota(this.connection, user, tableName, quotaTable);
+    Quotas resQuotaTable = QuotaUtil.getUserQuota(this.connection, user, tableName);
     assertEquals(quotaTable, resQuotaTable);
 
     // Add user quota for namespace
@@ -174,13 +196,102 @@ public class TestQuotaTableUtil {
     assertEquals(null, resQuota);
 
     // Delete user quota for table
-    QuotaUtil.deleteUserQuota(this.connection, user, table);
-    resQuotaTable = QuotaUtil.getUserQuota(this.connection, user, table);
+    QuotaUtil.deleteUserQuota(this.connection, user, tableName);
+    resQuotaTable = QuotaUtil.getUserQuota(this.connection, user, tableName);
     assertEquals(null, resQuotaTable);
 
     // Delete user quota for namespace
     QuotaUtil.deleteUserQuota(this.connection, user, namespace);
     resQuotaNS = QuotaUtil.getUserQuota(this.connection, user, namespace);
     assertEquals(null, resQuotaNS);
+  }
+
+  @Test
+  public void testSerDeViolationPolicies() throws Exception {
+    final TableName tn1 = getUniqueTableName();
+    final SpaceQuotaSnapshot snapshot1 = new SpaceQuotaSnapshot(
+        new SpaceQuotaStatus(SpaceViolationPolicy.DISABLE), 512L, 1024L);
+    final TableName tn2 = getUniqueTableName();
+    final SpaceQuotaSnapshot snapshot2 = new SpaceQuotaSnapshot(
+        new SpaceQuotaStatus(SpaceViolationPolicy.NO_INSERTS), 512L, 1024L);
+    final TableName tn3 = getUniqueTableName();
+    final SpaceQuotaSnapshot snapshot3 = new SpaceQuotaSnapshot(
+        new SpaceQuotaStatus(SpaceViolationPolicy.NO_WRITES), 512L, 1024L);
+    List<Put> puts = new ArrayList<>();
+    puts.add(QuotaTableUtil.createPutForSpaceSnapshot(tn1, snapshot1));
+    puts.add(QuotaTableUtil.createPutForSpaceSnapshot(tn2, snapshot2));
+    puts.add(QuotaTableUtil.createPutForSpaceSnapshot(tn3, snapshot3));
+    final Map<TableName,SpaceQuotaSnapshot> expectedPolicies = new HashMap<>();
+    expectedPolicies.put(tn1, snapshot1);
+    expectedPolicies.put(tn2, snapshot2);
+    expectedPolicies.put(tn3, snapshot3);
+
+    final Map<TableName,SpaceQuotaSnapshot> actualPolicies = new HashMap<>();
+    try (Table quotaTable = connection.getTable(QuotaUtil.QUOTA_TABLE_NAME)) {
+      quotaTable.put(puts);
+      ResultScanner scanner = quotaTable.getScanner(QuotaTableUtil.makeQuotaSnapshotScan());
+      for (Result r : scanner) {
+        QuotaTableUtil.extractQuotaSnapshot(r, actualPolicies);
+      }
+      scanner.close();
+    }
+
+    assertEquals(expectedPolicies, actualPolicies);
+  }
+
+  @Test
+  public void testSerdeTableSnapshotSizes() throws Exception {
+    TableName tn1 = TableName.valueOf("tn1");
+    TableName tn2 = TableName.valueOf("tn2");
+    try (Table quotaTable = connection.getTable(QuotaTableUtil.QUOTA_TABLE_NAME)) {
+      for (int i = 0; i < 3; i++) {
+        Put p = QuotaTableUtil.createPutForSnapshotSize(tn1, "tn1snap" + i, 1024L * (1+i));
+        quotaTable.put(p);
+      }
+      for (int i = 0; i < 3; i++) {
+        Put p = QuotaTableUtil.createPutForSnapshotSize(tn2, "tn2snap" + i, 2048L * (1+i));
+        quotaTable.put(p);
+      }
+
+      verifyTableSnapshotSize(quotaTable, tn1, "tn1snap0", 1024L);
+      verifyTableSnapshotSize(quotaTable, tn1, "tn1snap1", 2048L);
+      verifyTableSnapshotSize(quotaTable, tn1, "tn1snap2", 3072L);
+
+      verifyTableSnapshotSize(quotaTable, tn2, "tn2snap0", 2048L);
+      verifyTableSnapshotSize(quotaTable, tn2, "tn2snap1", 4096L);
+      verifyTableSnapshotSize(quotaTable, tn2, "tn2snap2", 6144L);
+    }
+  }
+
+  @Test
+  public void testReadNamespaceSnapshotSizes() throws Exception {
+    String ns1 = "ns1";
+    String ns2 = "ns2";
+    String defaultNs = NamespaceDescriptor.DEFAULT_NAMESPACE_NAME_STR;
+    try (Table quotaTable = connection.getTable(QuotaTableUtil.QUOTA_TABLE_NAME)) {
+      quotaTable.put(QuotaTableUtil.createPutForNamespaceSnapshotSize(ns1, 1024L));
+      quotaTable.put(QuotaTableUtil.createPutForNamespaceSnapshotSize(ns2, 2048L));
+      quotaTable.put(QuotaTableUtil.createPutForNamespaceSnapshotSize(defaultNs, 8192L));
+
+      assertEquals(1024L, QuotaTableUtil.getNamespaceSnapshotSize(connection, ns1));
+      assertEquals(2048L, QuotaTableUtil.getNamespaceSnapshotSize(connection, ns2));
+      assertEquals(8192L, QuotaTableUtil.getNamespaceSnapshotSize(connection, defaultNs));
+    }
+  }
+
+  private TableName getUniqueTableName() {
+    return TableName.valueOf(testName.getMethodName() + "_" + tableNameCounter++);
+  }
+
+  private void verifyTableSnapshotSize(
+      Table quotaTable, TableName tn, String snapshotName, long expectedSize) throws IOException {
+    Result r = quotaTable.get(QuotaTableUtil.makeGetForSnapshotSize(tn, snapshotName));
+    CellScanner cs = r.cellScanner();
+    assertTrue(cs.advance());
+    Cell c = cs.current();
+    assertEquals(expectedSize, QuotaProtos.SpaceQuotaSnapshot.parseFrom(
+        UnsafeByteOperations.unsafeWrap(
+            c.getValueArray(), c.getValueOffset(), c.getValueLength())).getQuotaUsage());
+    assertFalse(cs.advance());
   }
 }

@@ -17,6 +17,12 @@
  */
 package org.apache.hadoop.hbase.io.hfile;
 
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
+
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
@@ -24,8 +30,6 @@ import java.security.SecureRandom;
 import java.util.List;
 import java.util.UUID;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FSDataOutputStream;
@@ -44,16 +48,16 @@ import org.apache.hadoop.hbase.io.encoding.DataBlockEncoding;
 import org.apache.hadoop.hbase.testclassification.IOTests;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.apache.hadoop.hbase.util.Bytes;
-import org.apache.hadoop.hbase.util.test.RedundantKVGenerator;
+import org.apache.hadoop.hbase.util.RedundantKVGenerator;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
-
-import static org.junit.Assert.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Category({IOTests.class, SmallTests.class})
 public class TestHFileEncryption {
-  private static final Log LOG = LogFactory.getLog(TestHFileEncryption.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestHFileEncryption.class);
   private static final HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
   private static final SecureRandom RNG = new SecureRandom();
 
@@ -99,8 +103,8 @@ public class TestHFileEncryption {
 
   private long readAndVerifyBlock(long pos, HFileContext ctx, HFileBlock.FSReaderImpl hbr, int size)
       throws IOException {
-    HFileBlock b = hbr.readBlockData(pos, -1, false);
-    assertEquals(0, HFile.getChecksumFailuresCount());
+    HFileBlock b = hbr.readBlockData(pos, -1, false, false);
+    assertEquals(0, HFile.getAndResetChecksumFailuresCount());
     b.sanityCheck();
     assertFalse(b.isUnpacked());
     b = b.unpack(ctx, hbr);
@@ -178,7 +182,7 @@ public class TestHFileEncryption {
     }
 
     // read it back in and validate correct crypto metadata
-    HFile.Reader reader = HFile.createReader(fs, path, cacheConf, conf);
+    HFile.Reader reader = HFile.createReader(fs, path, cacheConf, true, conf);
     try {
       reader.loadFileInfo();
       FixedFileTrailer trailer = reader.getTrailer();
@@ -230,7 +234,7 @@ public class TestHFileEncryption {
         LOG.info("Reading with " + fileContext);
         int i = 0;
         HFileScanner scanner = null;
-        HFile.Reader reader = HFile.createReader(fs, path, cacheConf, conf);
+        HFile.Reader reader = HFile.createReader(fs, path, cacheConf, true, conf);
         try {
           reader.loadFileInfo();
           FixedFileTrailer trailer = reader.getTrailer();
@@ -252,7 +256,7 @@ public class TestHFileEncryption {
 
         // Test random seeks with pread
         LOG.info("Random seeking with " + fileContext);
-        reader = HFile.createReader(fs, path, cacheConf, conf);
+        reader = HFile.createReader(fs, path, cacheConf, true, conf);
         try {
           scanner = reader.getScanner(false, true);
           assertTrue("Initial seekTo failed", scanner.seekTo());

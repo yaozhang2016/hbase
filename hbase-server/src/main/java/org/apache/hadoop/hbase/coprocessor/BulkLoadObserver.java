@@ -23,32 +23,52 @@ import java.io.IOException;
 
 import org.apache.hadoop.hbase.Coprocessor;
 import org.apache.hadoop.hbase.HBaseInterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.hadoop.hbase.TableName;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceStability;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos.PrepareBulkLoadRequest;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos.CleanupBulkLoadRequest;
 
 /**
  * Coprocessors implement this interface to observe and mediate bulk load operations.
+ * <br><br>
+ *
+ * <h3>Exception Handling</h3>
+ * For all functions, exception handling is done as follows:
+ * <ul>
+ *   <li>Exceptions of type {@link IOException} are reported back to client.</li>
+ *   <li>For any other kind of exception:
+ *     <ul>
+ *       <li>If the configuration {@link CoprocessorHost#ABORT_ON_ERROR_KEY} is set to true, then
+ *         the server aborts.</li>
+ *       <li>Otherwise, coprocessor is removed from the server and
+ *         {@link org.apache.hadoop.hbase.DoNotRetryIOException} is returned to the client.</li>
+ *     </ul>
+ *   </li>
+ * </ul>
  */
 @InterfaceAudience.LimitedPrivate(HBaseInterfaceAudience.COPROC)
 @InterfaceStability.Evolving
-public interface BulkLoadObserver extends Coprocessor {
+public interface BulkLoadObserver {
     /**
       * Called as part of SecureBulkLoadEndpoint.prepareBulkLoad() RPC call.
       * It can't bypass the default action, e.g., ctx.bypass() won't have effect.
+      * If you need to get the region or table name, get it from the
+      * <code>ctx</code> as follows: <code>code>ctx.getEnvironment().getRegion()</code>. Use
+      * getRegionInfo to fetch the encodedName and use getTabldDescriptor() to get the tableName.
       * @param ctx the environment to interact with the framework and master
-      * @throws IOException
       */
-    void prePrepareBulkLoad(ObserverContext<RegionCoprocessorEnvironment> ctx,
-                            PrepareBulkLoadRequest request) throws IOException;
+    default void prePrepareBulkLoad(ObserverContext<RegionCoprocessorEnvironment> ctx)
+    throws IOException {}
 
     /**
       * Called as part of SecureBulkLoadEndpoint.cleanupBulkLoad() RPC call.
       * It can't bypass the default action, e.g., ctx.bypass() won't have effect.
+      * If you need to get the region or table name, get it from the
+      * <code>ctx</code> as follows: <code>code>ctx.getEnvironment().getRegion()</code>. Use
+      * getRegionInfo to fetch the encodedName and use getTabldDescriptor() to get the tableName.
       * @param ctx the environment to interact with the framework and master
-      * @throws IOException
       */
-    void preCleanupBulkLoad(ObserverContext<RegionCoprocessorEnvironment> ctx,
-                            CleanupBulkLoadRequest request) throws IOException;
+    default void preCleanupBulkLoad(ObserverContext<RegionCoprocessorEnvironment> ctx)
+    throws IOException {}
 }

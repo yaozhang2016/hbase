@@ -23,8 +23,6 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.TableName;
@@ -40,8 +38,12 @@ import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.junit.rules.TestName;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /*
  * This test is for the optimization added in HBASE-15243.
@@ -51,12 +53,16 @@ import org.junit.experimental.categories.Category;
 public class TestFilterListOrOperatorWithBlkCnt {
 
   private final static HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
-  private static final Log LOG = LogFactory.getLog(TestFilterListOrOperatorWithBlkCnt.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(TestFilterListOrOperatorWithBlkCnt.class);
   private byte[] family = Bytes.toBytes("family");
   private byte[] qf = Bytes.toBytes("qf");
   private byte[] value = Bytes.toBytes("val");
   private TableName tableName;
   private int numRows = 10000;
+
+  @Rule
+  public TestName name = new TestName();
 
   /**
    * @throws Exception
@@ -88,7 +94,7 @@ public class TestFilterListOrOperatorWithBlkCnt {
 
   @Test
   public void testMultiRowRangeWithFilterListOrOperatorWithBlkCnt() throws IOException {
-    tableName = TableName.valueOf("TestMultiRowRangeFilterWithFilterListOrOperatorWithBlkCnt");
+    tableName = TableName.valueOf(name.getMethodName());
     Table ht = TEST_UTIL.createTable(tableName, family, Integer.MAX_VALUE);
     generateRows(numRows, ht, family, qf, value);
 
@@ -96,13 +102,13 @@ public class TestFilterListOrOperatorWithBlkCnt {
     scan.setMaxVersions();
     long blocksStart = getBlkAccessCount();
 
-    List<RowRange> ranges1 = new ArrayList<RowRange>();
+    List<RowRange> ranges1 = new ArrayList<>();
     ranges1.add(new RowRange(Bytes.toBytes(10), true, Bytes.toBytes(15), false));
     ranges1.add(new RowRange(Bytes.toBytes(9980), true, Bytes.toBytes(9985), false));
 
     MultiRowRangeFilter filter1 = new MultiRowRangeFilter(ranges1);
 
-    List<RowRange> ranges2 = new ArrayList<RowRange>();
+    List<RowRange> ranges2 = new ArrayList<>();
     ranges2.add(new RowRange(Bytes.toBytes(15), true, Bytes.toBytes(20), false));
     ranges2.add(new RowRange(Bytes.toBytes(9985), true, Bytes.toBytes(9990), false));
 
@@ -151,7 +157,7 @@ public class TestFilterListOrOperatorWithBlkCnt {
       scan.setStopRow(stopRow);
     }
     ResultScanner scanner = ht.getScanner(scan);
-    List<Cell> kvList = new ArrayList<Cell>();
+    List<Cell> kvList = new ArrayList<>();
     Result r;
     while ((r = scanner.next()) != null) {
       for (Cell kv : r.listCells()) {
@@ -163,7 +169,7 @@ public class TestFilterListOrOperatorWithBlkCnt {
 
   private int getResultsSize(Table ht, Scan scan) throws IOException {
     ResultScanner scanner = ht.getScanner(scan);
-    List<Cell> results = new ArrayList<Cell>();
+    List<Cell> results = new ArrayList<>();
     Result r;
     while ((r = scanner.next()) != null) {
       for (Cell kv : r.listCells()) {

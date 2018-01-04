@@ -23,9 +23,10 @@ import java.util.HashMap;
 import java.util.Map;
 
 import java.util.concurrent.atomic.AtomicInteger;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.fs.BlockLocation;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
@@ -39,7 +40,7 @@ import org.apache.hadoop.hbase.util.FSUtils;
  */
 @InterfaceAudience.Private
 class FSRegionScanner implements Runnable {
-  static private final Log LOG = LogFactory.getLog(FSRegionScanner.class);
+  static private final Logger LOG = LoggerFactory.getLogger(FSRegionScanner.class);
 
   private Path regionPath;
 
@@ -72,7 +73,7 @@ class FSRegionScanner implements Runnable {
   public void run() {
     try {
       // empty the map for each region
-      Map<String, AtomicInteger> blockCountMap = new HashMap<String, AtomicInteger>();
+      Map<String, AtomicInteger> blockCountMap = new HashMap<>();
 
       //get table name
       String tableName = regionPath.getParent().getName();
@@ -145,7 +146,7 @@ class FSRegionScanner implements Runnable {
       }
 
       if (regionDegreeLocalityMapping != null && totalBlkCount > 0) {
-        Map<String, Float> hostLocalityMap = new HashMap<String, Float>();
+        Map<String, Float> hostLocalityMap = new HashMap<>();
         for (Map.Entry<String, AtomicInteger> entry : blockCountMap.entrySet()) {
           String host = entry.getKey();
           if (host.endsWith(".")) {

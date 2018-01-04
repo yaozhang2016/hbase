@@ -19,6 +19,7 @@
 package org.apache.hadoop.hbase.io.hfile.bucket;
 
 import org.apache.hadoop.hbase.testclassification.IOTests;
+import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.apache.hadoop.hbase.io.hfile.BlockCacheKey;
 import org.apache.hadoop.hbase.io.hfile.Cacheable;
@@ -35,7 +36,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.LongAdder;
 
 import static org.hamcrest.CoreMatchers.is;
 import static org.junit.Assert.assertEquals;
@@ -57,7 +58,7 @@ public class TestBucketWriterThread {
       int writerThreadNum, int writerQLen, String persistencePath, int ioErrorsTolerationDuration)
       throws FileNotFoundException, IOException {
       super(ioEngineName, capacity, blockSize, bucketSizes, writerThreadNum, writerQLen,
-        persistencePath, ioErrorsTolerationDuration);
+        persistencePath, ioErrorsTolerationDuration, HBaseConfiguration.create());
     }
 
     @Override
@@ -78,7 +79,7 @@ public class TestBucketWriterThread {
     // Run with one writer thread only. Means there will be one writer queue only too.  We depend
     // on this in below.
     final int writerThreadsCount = 1;
-    this.bc = new MockBucketCache("heap", capacity, 1, new int [] {1}, writerThreadsCount,
+    this.bc = new MockBucketCache("offheap", capacity, 1, new int [] {1}, writerThreadsCount,
       capacity, null, 100/*Tolerate ioerrors for 100ms*/);
     assertEquals(writerThreadsCount, bc.writerThreads.length);
     assertEquals(writerThreadsCount, bc.writerQueues.size());
@@ -138,7 +139,7 @@ public class TestBucketWriterThread {
     RAMQueueEntry spiedRqe = Mockito.spy(rqe);
     Mockito.doThrow(new IOException("Mocked!")).when(spiedRqe).
       writeToCache((IOEngine)Mockito.any(), (BucketAllocator)Mockito.any(),
-        (UniqueIndexMap<Integer>)Mockito.any(), (AtomicLong)Mockito.any());
+        (UniqueIndexMap<Integer>)Mockito.any(), (LongAdder) Mockito.any());
     this.q.add(spiedRqe);
     doDrainOfOneEntry(bc, wt, q);
     // Cache disabled when ioes w/o ever healing.
@@ -161,7 +162,7 @@ public class TestBucketWriterThread {
     Mockito.doThrow(cfe).
       doReturn(mockedBucketEntry).
       when(spiedRqe).writeToCache((IOEngine)Mockito.any(), (BucketAllocator)Mockito.any(),
-        (UniqueIndexMap<Integer>)Mockito.any(), (AtomicLong)Mockito.any());
+        (UniqueIndexMap<Integer>)Mockito.any(), (LongAdder) Mockito.any());
     this.q.add(spiedRqe);
     doDrainOfOneEntry(bc, wt, q);
   }
@@ -169,7 +170,7 @@ public class TestBucketWriterThread {
   private static void doDrainOfOneEntry(final BucketCache bc, final BucketCache.WriterThread wt,
       final BlockingQueue<RAMQueueEntry> q)
   throws InterruptedException {
-    List<RAMQueueEntry> rqes = BucketCache.getRAMQueueEntries(q, new ArrayList<RAMQueueEntry>(1));
+    List<RAMQueueEntry> rqes = BucketCache.getRAMQueueEntries(q, new ArrayList<>(1));
     wt.doDrain(rqes);
     assertTrue(q.isEmpty());
     assertTrue(bc.ramCache.isEmpty());

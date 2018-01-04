@@ -22,20 +22,37 @@ package org.apache.hadoop.hbase.client;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
-
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import java.util.TreeMap;
+import java.util.stream.Collectors;
+import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.ClassSize;
+import org.apache.yetus.audience.InterfaceAudience;
 
 @InterfaceAudience.Public
-@InterfaceStability.Evolving
 public abstract class OperationWithAttributes extends Operation implements Attributes {
   // An opaque blob of attributes
   private Map<String, byte[]> attributes;
 
   // used for uniquely identifying an operation
   public static final String ID_ATRIBUTE = "_operation.attributes.id";
+  private int priority = HConstants.PRIORITY_UNSET;
+
+  /**
+   * empty construction.
+   * We need this empty construction to keep binary compatibility.
+   */
+  protected OperationWithAttributes() {
+  }
+
+  protected OperationWithAttributes(OperationWithAttributes clone) {
+    this.attributes = clone.getAttributesMap() == null ? null :
+      clone.getAttributesMap().entrySet().stream()
+        .collect(Collectors.toMap(e -> e.getKey(), e -> e.getValue(), (k, v) -> {
+          throw new RuntimeException("collisions!!!");
+        }, () -> new TreeMap<>()));
+    this.priority = clone.getPriority();
+  }
 
   @Override
   public OperationWithAttributes setAttribute(String name, byte[] value) {
@@ -44,7 +61,7 @@ public abstract class OperationWithAttributes extends Operation implements Attri
     }
 
     if (attributes == null) {
-      attributes = new HashMap<String, byte[]>();
+      attributes = new HashMap<>();
     }
 
     if (value == null) {
@@ -110,4 +127,14 @@ public abstract class OperationWithAttributes extends Operation implements Attri
     byte[] attr = getAttribute(ID_ATRIBUTE);
     return attr == null? null: Bytes.toString(attr);
   }
+
+  public OperationWithAttributes setPriority(int priority) {
+    this.priority = priority;
+    return this;
+  }
+
+  public int getPriority() {
+    return priority;
+  }
+
 }

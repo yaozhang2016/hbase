@@ -22,15 +22,15 @@ import java.lang.reflect.Method;
 import java.security.AccessController;
 import java.security.PrivilegedAction;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @InterfaceAudience.Private
 public class UnsafeAvailChecker {
 
   private static final String CLASS_NAME = "sun.misc.Unsafe";
-  private static final Log LOG = LogFactory.getLog(UnsafeAvailChecker.class);
+  private static final Logger LOG = LoggerFactory.getLogger(UnsafeAvailChecker.class);
   private static boolean avail = false;
   private static boolean unaligned = false;
 
@@ -51,15 +51,21 @@ public class UnsafeAvailChecker {
     });
     // When Unsafe itself is not available/accessible consider unaligned as false.
     if (avail) {
-      try {
-        // Using java.nio.Bits#unaligned() to check for unaligned-access capability
-        Class<?> clazz = Class.forName("java.nio.Bits");
-        Method m = clazz.getDeclaredMethod("unaligned");
-        m.setAccessible(true);
-        unaligned = (Boolean) m.invoke(null);
-      } catch (Exception e) {
-        LOG.warn("java.nio.Bits#unaligned() check failed."
-            + "Unsafe based read/write of primitive types won't be used", e);
+      String arch = System.getProperty("os.arch");
+      if ("ppc64".equals(arch) || "ppc64le".equals(arch) || "aarch64".equals(arch)) {
+        // java.nio.Bits.unaligned() wrongly returns false on ppc (JDK-8165231),
+        unaligned = true;
+      } else {
+        try {
+          // Using java.nio.Bits#unaligned() to check for unaligned-access capability
+          Class<?> clazz = Class.forName("java.nio.Bits");
+          Method m = clazz.getDeclaredMethod("unaligned");
+          m.setAccessible(true);
+          unaligned = (Boolean) m.invoke(null);
+        } catch (Exception e) {
+          LOG.warn("java.nio.Bits#unaligned() check failed."
+              + "Unsafe based read/write of primitive types won't be used", e);
+        }
       }
     }
   }

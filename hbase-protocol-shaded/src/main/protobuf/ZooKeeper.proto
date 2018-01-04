@@ -15,6 +15,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+syntax = "proto2";
 
 // ZNode data in hbase are serialized protobufs with a four byte
 // 'magic' 'PBUF' prefix.
@@ -77,14 +78,9 @@ message SplitLogTask {
     DONE = 3;
     ERR = 4;
   }
-  enum RecoveryMode {
-    UNKNOWN = 0;
-    LOG_SPLITTING = 1;
-    LOG_REPLAY = 2;
-  }
   required State state = 1;
   required ServerName server_name = 2;
-  optional RecoveryMode mode = 3 [default = UNKNOWN];
+  // optional RecoveryMode DEPRECATED_mode = 3 [default = UNKNOWN];
 }
 
 /**
@@ -103,55 +99,6 @@ message DeprecatedTableState {
   // its state is presumed enabled.  See o.a.h.h.zookeeper.ZKTable class
   // for more.
   required State state = 1 [default = ENABLED];
-}
-
-message TableCF {
-  optional TableName table_name = 1;
-  repeated bytes families = 2;
-}
-
-/**
- * Used by replication. Holds a replication peer key.
- */
-message ReplicationPeer {
-  // clusterkey is the concatenation of the slave cluster's
-  // hbase.zookeeper.quorum:hbase.zookeeper.property.clientPort:zookeeper.znode.parent
-  required string clusterkey = 1;
-  optional string replicationEndpointImpl = 2;
-  repeated BytesBytesPair data = 3;
-  repeated NameStringPair configuration = 4;
-  repeated TableCF table_cfs = 5;
-  repeated bytes namespaces = 6;
-}
-
-/**
- * Used by replication. Holds whether enabled or disabled
- */
-message ReplicationState {
-  enum State {
-    ENABLED = 0;
-    DISABLED = 1;
-  }
-  required State state = 1;
-}
-
-/**
- * Used by replication. Holds the current position in an WAL file.
- */
-message ReplicationHLogPosition {
-  required int64 position = 1;
-}
-
-/**
- * Metadata associated with a table lock in zookeeper
- */
-message TableLock {
-  optional TableName table_name = 1;
-  optional ServerName lock_owner = 2;
-  optional int64 thread_id = 3;
-  optional bool is_shared = 4;
-  optional string purpose = 5;
-  optional int64 create_time = 6;
 }
 
 /**

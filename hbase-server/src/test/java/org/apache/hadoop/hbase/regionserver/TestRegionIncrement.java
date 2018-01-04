@@ -24,8 +24,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.hbase.CategoryBasedTimeout;
@@ -47,6 +45,8 @@ import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.junit.rules.TestName;
 import org.junit.rules.TestRule;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 
 /**
@@ -60,7 +60,7 @@ import org.junit.rules.TestRule;
  */
 @Category(MediumTests.class)
 public class TestRegionIncrement {
-  private static final Log LOG = LogFactory.getLog(TestRegionIncrement.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestRegionIncrement.class);
   @Rule public TestName name = new TestName();
   @Rule public final TestRule timeout =
       CategoryBasedTimeout.builder().withTimeout(this.getClass()).
@@ -83,6 +83,7 @@ public class TestRegionIncrement {
   private HRegion getRegion(final Configuration conf, final String tableName) throws IOException {
     WAL wal = new FSHLog(FileSystem.get(conf), TEST_UTIL.getDataTestDir(),
       TEST_UTIL.getDataTestDir().toString(), conf);
+    ChunkCreator.initialize(MemStoreLABImpl.CHUNK_SIZE_DEFAULT, false, 0, 0, 0, null);
     return (HRegion)TEST_UTIL.createLocalHRegion(Bytes.toBytes(tableName),
       HConstants.EMPTY_BYTE_ARRAY, HConstants.EMPTY_BYTE_ARRAY, tableName, conf,
       false, Durability.SKIP_WAL, wal, INCREMENT_BYTES);
@@ -193,7 +194,7 @@ public class TestRegionIncrement {
         threads[i].join();
       }
       RegionScanner regionScanner = region.getScanner(new Scan());
-      List<Cell> cells = new ArrayList<Cell>(THREAD_COUNT);
+      List<Cell> cells = new ArrayList<>(THREAD_COUNT);
       while(regionScanner.next(cells)) continue;
       assertEquals(THREAD_COUNT, cells.size());
       long total = 0;
@@ -230,7 +231,7 @@ public class TestRegionIncrement {
         threads[i].join();
       }
       RegionScanner regionScanner = region.getScanner(new Scan());
-      List<Cell> cells = new ArrayList<Cell>(100);
+      List<Cell> cells = new ArrayList<>(100);
       while(regionScanner.next(cells)) continue;
       assertEquals(THREAD_COUNT, cells.size());
       long total = 0;

@@ -17,7 +17,8 @@
  */
 package org.apache.hadoop.hbase.regionserver;
 
-import static org.junit.Assert.*;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertTrue;
 
 import java.io.IOException;
 import java.security.Key;
@@ -28,16 +29,12 @@ import java.util.List;
 
 import javax.crypto.spec.SecretKeySpec;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HTableDescriptor;
-import org.apache.hadoop.hbase.testclassification.MediumTests;
-import org.apache.hadoop.hbase.testclassification.RegionServerTests;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.Waiter.Predicate;
 import org.apache.hadoop.hbase.client.Put;
@@ -49,20 +46,29 @@ import org.apache.hadoop.hbase.io.hfile.CacheConfig;
 import org.apache.hadoop.hbase.io.hfile.HFile;
 import org.apache.hadoop.hbase.security.EncryptionUtil;
 import org.apache.hadoop.hbase.security.User;
+import org.apache.hadoop.hbase.testclassification.MediumTests;
+import org.apache.hadoop.hbase.testclassification.RegionServerTests;
 import org.apache.hadoop.hbase.util.Bytes;
-
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.junit.rules.TestName;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Category({RegionServerTests.class, MediumTests.class})
 public class TestEncryptionKeyRotation {
-  private static final Log LOG = LogFactory.getLog(TestEncryptionKeyRotation.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestEncryptionKeyRotation.class);
   private static final HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
   private static final Configuration conf = TEST_UTIL.getConfiguration();
   private static final Key initialCFKey;
   private static final Key secondCFKey;
+
+  @Rule
+  public TestName name = new TestName();
+
   static {
     // Create the test encryption keys
     SecureRandom rng = new SecureRandom();
@@ -93,8 +99,7 @@ public class TestEncryptionKeyRotation {
   @Test
   public void testCFKeyRotation() throws Exception {
     // Create the table schema
-    HTableDescriptor htd = new HTableDescriptor(TableName.valueOf("default",
-      "testCFKeyRotation"));
+    HTableDescriptor htd = new HTableDescriptor(TableName.valueOf("default", name.getMethodName()));
     HColumnDescriptor hcd = new HColumnDescriptor("cf");
     String algorithm =
         conf.get(HConstants.CRYPTO_KEY_ALGORITHM_CONF_KEY, HConstants.CIPHER_AES);
@@ -118,11 +123,11 @@ public class TestEncryptionKeyRotation {
     hcd.setEncryptionKey(EncryptionUtil.wrapKey(conf,
       conf.get(HConstants.CRYPTO_MASTERKEY_NAME_CONF_KEY, User.getCurrent().getShortName()),
       secondCFKey));
-    TEST_UTIL.getHBaseAdmin().modifyColumnFamily(htd.getTableName(), hcd);
+    TEST_UTIL.getAdmin().modifyColumnFamily(htd.getTableName(), hcd);
     Thread.sleep(5000); // Need a predicate for online schema change
 
     // And major compact
-    TEST_UTIL.getHBaseAdmin().majorCompact(htd.getTableName());
+    TEST_UTIL.getAdmin().majorCompact(htd.getTableName());
     final List<Path> updatePaths = findCompactedStorefilePaths(htd.getTableName());
     TEST_UTIL.waitFor(30000, 1000, true, new Predicate<Exception>() {
       @Override
@@ -161,8 +166,7 @@ public class TestEncryptionKeyRotation {
   @Test
   public void testMasterKeyRotation() throws Exception {
     // Create the table schema
-    HTableDescriptor htd = new HTableDescriptor(TableName.valueOf("default",
-      "testMasterKeyRotation"));
+    HTableDescriptor htd = new HTableDescriptor(TableName.valueOf("default", name.getMethodName()));
     HColumnDescriptor hcd = new HColumnDescriptor("cf");
     String algorithm =
         conf.get(HConstants.CRYPTO_KEY_ALGORITHM_CONF_KEY, HConstants.CIPHER_AES);
@@ -191,7 +195,7 @@ public class TestEncryptionKeyRotation {
     // Start the cluster back up
     TEST_UTIL.startMiniHBaseCluster(1, 1);
     // Verify the table can still be loaded
-    TEST_UTIL.waitTableAvailable(htd.getName(), 5000);
+    TEST_UTIL.waitTableAvailable(htd.getTableName(), 5000);
     // Double check that the store file keys can be unwrapped
     storeFilePaths = findStorefilePaths(htd.getTableName());
     assertTrue(storeFilePaths.size() > 0);
@@ -205,15 +209,15 @@ public class TestEncryptionKeyRotation {
       throws IOException, InterruptedException {
     boolean compacted = false;
     for (Region region : TEST_UTIL.getRSForFirstRegionInTable(tableName)
-        .getOnlineRegions(tableName)) {
-      for (Store store : region.getStores()) {
+        .getRegions(tableName)) {
+      for (HStore store : ((HRegion) region).getStores()) {
         compacted = false;
         while (!compacted) {
           if (store.getStorefiles() != null) {
             while (store.getStorefilesCount() != 1) {
               Thread.sleep(100);
             }
-            for (StoreFile storefile : store.getStorefiles()) {
+            for (HStoreFile storefile : store.getStorefiles()) {
               if (!storefile.isCompactedAway()) {
                 compacted = true;
                 break;
@@ -229,11 +233,11 @@ public class TestEncryptionKeyRotation {
   }
 
   private static List<Path> findStorefilePaths(TableName tableName) throws Exception {
-    List<Path> paths = new ArrayList<Path>();
-    for (Region region:
-        TEST_UTIL.getRSForFirstRegionInTable(tableName).getOnlineRegions(tableName)) {
-      for (Store store: region.getStores()) {
-        for (StoreFile storefile: store.getStorefiles()) {
+    List<Path> paths = new ArrayList<>();
+    for (Region region : TEST_UTIL.getRSForFirstRegionInTable(tableName)
+        .getRegions(tableName)) {
+      for (HStore store : ((HRegion) region).getStores()) {
+        for (HStoreFile storefile : store.getStorefiles()) {
           paths.add(storefile.getPath());
         }
       }
@@ -242,14 +246,14 @@ public class TestEncryptionKeyRotation {
   }
 
   private static List<Path> findCompactedStorefilePaths(TableName tableName) throws Exception {
-    List<Path> paths = new ArrayList<Path>();
-    for (Region region:
-        TEST_UTIL.getRSForFirstRegionInTable(tableName).getOnlineRegions(tableName)) {
-      for (Store store : region.getStores()) {
-        Collection<StoreFile> compactedfiles =
-            ((HStore) store).getStoreEngine().getStoreFileManager().getCompactedfiles();
+    List<Path> paths = new ArrayList<>();
+    for (Region region : TEST_UTIL.getRSForFirstRegionInTable(tableName)
+        .getRegions(tableName)) {
+      for (HStore store : ((HRegion) region).getStores()) {
+        Collection<HStoreFile> compactedfiles =
+            store.getStoreEngine().getStoreFileManager().getCompactedfiles();
         if (compactedfiles != null) {
-          for (StoreFile storefile : compactedfiles) {
+          for (HStoreFile storefile : compactedfiles) {
             paths.add(storefile.getPath());
           }
         }
@@ -261,8 +265,8 @@ public class TestEncryptionKeyRotation {
   private void createTableAndFlush(HTableDescriptor htd) throws Exception {
     HColumnDescriptor hcd = htd.getFamilies().iterator().next();
     // Create the test table
-    TEST_UTIL.getHBaseAdmin().createTable(htd);
-    TEST_UTIL.waitTableAvailable(htd.getName(), 5000);
+    TEST_UTIL.getAdmin().createTable(htd);
+    TEST_UTIL.waitTableAvailable(htd.getTableName(), 5000);
     // Create a store file
     Table table = TEST_UTIL.getConnection().getTable(htd.getTableName());
     try {
@@ -271,12 +275,12 @@ public class TestEncryptionKeyRotation {
     } finally {
       table.close();
     }
-    TEST_UTIL.getHBaseAdmin().flush(htd.getTableName());
+    TEST_UTIL.getAdmin().flush(htd.getTableName());
   }
 
   private static byte[] extractHFileKey(Path path) throws Exception {
     HFile.Reader reader = HFile.createReader(TEST_UTIL.getTestFileSystem(), path,
-      new CacheConfig(conf), conf);
+      new CacheConfig(conf), true, conf);
     try {
       reader.loadFileInfo();
       Encryption.Context cryptoContext = reader.getFileContext().getEncryptionContext();

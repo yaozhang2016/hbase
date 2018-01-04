@@ -17,8 +17,7 @@
  */
 package org.apache.hadoop.hbase.util;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * Used to describe or modify the lexicographical sort order of a
@@ -27,7 +26,6 @@ import org.apache.hadoop.hbase.classification.InterfaceStability;
  * by replacing each byte with its 1's compliment.
  */
 @InterfaceAudience.Public
-@InterfaceStability.Evolving
 public enum Order {
 
   ASCENDING {

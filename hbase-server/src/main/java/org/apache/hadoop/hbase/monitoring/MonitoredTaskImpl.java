@@ -18,8 +18,8 @@
  */
 package org.apache.hadoop.hbase.monitoring;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.codehaus.jackson.map.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.yetus.audience.InterfaceAudience;
 
 import java.io.IOException;
 import java.util.HashMap;
@@ -30,7 +30,8 @@ class MonitoredTaskImpl implements MonitoredTask {
   private long startTime;
   private long statusTime;
   private long stateTime;
-  
+  private long warnTime;
+
   private volatile String status;
   private volatile String description;
   
@@ -42,6 +43,7 @@ class MonitoredTaskImpl implements MonitoredTask {
     startTime = System.currentTimeMillis();
     statusTime = startTime;
     stateTime = startTime;
+    warnTime = startTime;
   }
 
   @Override
@@ -82,7 +84,12 @@ class MonitoredTaskImpl implements MonitoredTask {
   public long getStateTime() {
     return stateTime;
   }
-  
+
+  @Override
+  public long getWarnTime() {
+    return warnTime;
+  }
+
   @Override
   public long getCompletionTimestamp() {
     if (state == State.COMPLETE || state == State.ABORTED) {
@@ -132,6 +139,11 @@ class MonitoredTaskImpl implements MonitoredTask {
   }
 
   @Override
+  public void setWarnTime(long t) {
+    this.warnTime = t;
+  }
+
+  @Override
   public void cleanup() {
     if (state == State.RUNNING) {
       setState(State.ABORTED);
@@ -148,7 +160,7 @@ class MonitoredTaskImpl implements MonitoredTask {
 
   @Override
   public Map<String, Object> toMap() {
-    Map<String, Object> map = new HashMap<String, Object>();
+    Map<String, Object> map = new HashMap<>();
     map.put("description", getDescription());
     map.put("status", getStatus());
     map.put("state", getState());

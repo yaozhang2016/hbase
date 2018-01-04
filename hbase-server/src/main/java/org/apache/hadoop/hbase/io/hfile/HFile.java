@@ -31,13 +31,13 @@ import java.util.Collection;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.SortedMap;
 import java.util.TreeMap;
 import java.util.concurrent.atomic.LongAdder;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.apache.commons.io.IOUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FSDataOutputStream;
@@ -48,15 +48,19 @@ import org.apache.hadoop.fs.PathFilter;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellComparator;
 import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.hbase.fs.HFileSystem;
 import org.apache.hadoop.hbase.io.FSDataInputStreamWrapper;
+import org.apache.hadoop.hbase.io.MetricsIO;
+import org.apache.hadoop.hbase.io.MetricsIOWrapperImpl;
 import org.apache.hadoop.hbase.io.compress.Compression;
 import org.apache.hadoop.hbase.io.encoding.DataBlockEncoding;
 import org.apache.hadoop.hbase.protobuf.ProtobufMagic;
 import org.apache.hadoop.hbase.regionserver.CellSink;
 import org.apache.hadoop.hbase.regionserver.ShipperListener;
-import org.apache.hadoop.hbase.shaded.com.google.protobuf.UnsafeByteOperations;
+import org.apache.hbase.thirdparty.com.google.protobuf.UnsafeByteOperations;
 import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos.BytesBytesPair;
@@ -66,8 +70,8 @@ import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.FSUtils;
 import org.apache.hadoop.io.Writable;
 
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Preconditions;
+import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
+import org.apache.hbase.thirdparty.com.google.common.base.Preconditions;
 
 /**
  * File format for hbase.
@@ -136,7 +140,7 @@ import com.google.common.base.Preconditions;
 @InterfaceAudience.Private
 public class HFile {
   // LOG is being used in HFileBlock and CheckSumUtil
-  static final Log LOG = LogFactory.getLog(HFile.class);
+  static final Logger LOG = LoggerFactory.getLogger(HFile.class);
 
   /**
    * Maximum length of key in HFile.
@@ -187,12 +191,35 @@ public class HFile {
   // For tests. Gets incremented when we read a block whether from HDFS or from Cache.
   public static final LongAdder DATABLOCK_READ_COUNT = new LongAdder();
 
+  /** Static instance for the metrics so that HFileReaders access the same instance */
+  static final MetricsIO metrics = new MetricsIO(new MetricsIOWrapperImpl());
+
+  /**
+   * Number of checksum verification failures. It also
+   * clears the counter.
+   */
+  public static final long getAndResetChecksumFailuresCount() {
+    return CHECKSUM_FAILURES.sumThenReset();
+  }
+
   /**
    * Number of checksum verification failures. It also
    * clears the counter.
    */
   public static final long getChecksumFailuresCount() {
-    return CHECKSUM_FAILURES.sumThenReset();
+    return CHECKSUM_FAILURES.sum();
+  }
+
+  public static final void updateReadLatency(long latencyMillis, boolean pread) {
+    if (pread) {
+      metrics.updateFsPreadTime(latencyMillis);
+    } else {
+      metrics.updateFsReadTime(latencyMillis);
+    }
+  }
+
+  public static final void updateWriteLatency(long latencyMillis) {
+    metrics.updateFsWriteTime(latencyMillis);
   }
 
   /** API required to write an {@link HFile} */
@@ -248,8 +275,7 @@ public class HFile {
     protected FileSystem fs;
     protected Path path;
     protected FSDataOutputStream ostream;
-    protected CellComparator comparator = 
-        CellComparator.COMPARATOR;
+    protected CellComparator comparator = CellComparator.getInstance();
     protected InetSocketAddress[] favoredNodes;
     private HFileContext fileContext;
     protected boolean shouldDropBehind = false;
@@ -408,21 +434,21 @@ public class HFile {
 
     Map<byte[], byte[]> loadFileInfo() throws IOException;
 
-    Cell getLastKey();
+    Optional<Cell> getLastKey();
 
-    Cell midkey() throws IOException;
+    Optional<Cell> midKey() throws IOException;
 
     long length();
 
     long getEntries();
 
-    Cell getFirstKey();
+    Optional<Cell> getFirstKey();
 
     long indexSize();
 
-    byte[] getFirstRowKey();
+    Optional<byte[]> getFirstRowKey();
 
-    byte[] getLastRowKey();
+    Optional<byte[]> getLastRowKey();
 
     FixedFileTrailer getTrailer();
 
@@ -459,14 +485,12 @@ public class HFile {
      * Return the file context of the HFile this reader belongs to
      */
     HFileContext getFileContext();
-    
+
     boolean isPrimaryReplicaReader();
-    
-    void setPrimaryReplicaReader(boolean isPrimaryReplicaReader);
 
-    boolean shouldIncludeMemstoreTS();
+    boolean shouldIncludeMemStoreTS();
 
-    boolean isDecodeMemstoreTS();
+    boolean isDecodeMemStoreTS();
 
     DataBlockEncoding getEffectiveEncodingInCache(boolean isCompaction);
 
@@ -475,6 +499,12 @@ public class HFile {
 
     @VisibleForTesting
     boolean prefetchComplete();
+
+    /**
+     * To close the stream's socket. Note: This can be concurrently called from multiple threads and
+     * implementation should take care of thread safety.
+     */
+    void unbufferStream();
   }
 
   /**
@@ -486,50 +516,54 @@ public class HFile {
    * @param size max size of the trailer.
    * @param cacheConf Cache configuation values, cannot be null.
    * @param hfs
+   * @param primaryReplicaReader true if this is a reader for primary replica
    * @return an appropriate instance of HFileReader
    * @throws IOException If file is invalid, will throw CorruptHFileException flavored IOException
    */
   @edu.umd.cs.findbugs.annotations.SuppressWarnings(value="SF_SWITCH_FALLTHROUGH",
       justification="Intentional")
-  private static Reader pickReaderVersion(Path path, FSDataInputStreamWrapper fsdis,
-      long size, CacheConfig cacheConf, HFileSystem hfs, Configuration conf) throws IOException {
+  private static Reader openReader(Path path, FSDataInputStreamWrapper fsdis, long size,
+      CacheConfig cacheConf, HFileSystem hfs, boolean primaryReplicaReader, Configuration conf)
+      throws IOException {
     FixedFileTrailer trailer = null;
     try {
       boolean isHBaseChecksum = fsdis.shouldUseHBaseChecksum();
       assert !isHBaseChecksum; // Initially we must read with FS checksum.
       trailer = FixedFileTrailer.readFromStream(fsdis.getStream(isHBaseChecksum), size);
       switch (trailer.getMajorVersion()) {
-      case 2:
-        LOG.debug("Opening HFile v2 with v3 reader");
-        // Fall through. FindBugs: SF_SWITCH_FALLTHROUGH
-      case 3 :
-        return new HFileReaderImpl(path, trailer, fsdis, size, cacheConf, hfs, conf);
-      default:
-        throw new IllegalArgumentException("Invalid HFile version " + trailer.getMajorVersion());
+        case 2:
+          LOG.debug("Opening HFile v2 with v3 reader");
+          // Fall through. FindBugs: SF_SWITCH_FALLTHROUGH
+        case 3:
+          return new HFileReaderImpl(path, trailer, fsdis, size, cacheConf, hfs,
+              primaryReplicaReader, conf);
+        default:
+          throw new IllegalArgumentException("Invalid HFile version " + trailer.getMajorVersion());
       }
     } catch (Throwable t) {
-      try {
-        fsdis.close();
-      } catch (Throwable t2) {
-        LOG.warn("Error closing fsdis FSDataInputStreamWrapper", t2);
-      }
+      IOUtils.closeQuietly(fsdis);
       throw new CorruptHFileException("Problem reading HFile Trailer from file " + path, t);
+    } finally {
+      fsdis.unbuffer();
     }
   }
 
   /**
+   * The sockets and the file descriptors held by the method parameter
+   * {@code FSDataInputStreamWrapper} passed will be freed after its usage so caller needs to ensure
+   * that no other threads have access to the same passed reference.
    * @param fs A file system
    * @param path Path to HFile
    * @param fsdis a stream of path's file
    * @param size max size of the trailer.
    * @param cacheConf Cache configuration for hfile's contents
+   * @param primaryReplicaReader true if this is a reader for primary replica
    * @param conf Configuration
    * @return A version specific Hfile Reader
    * @throws IOException If file is invalid, will throw CorruptHFileException flavored IOException
    */
-  @SuppressWarnings("resource")
-  public static Reader createReader(FileSystem fs, Path path,
-      FSDataInputStreamWrapper fsdis, long size, CacheConfig cacheConf, Configuration conf)
+  public static Reader createReader(FileSystem fs, Path path, FSDataInputStreamWrapper fsdis,
+      long size, CacheConfig cacheConf, boolean primaryReplicaReader, Configuration conf)
       throws IOException {
     HFileSystem hfs = null;
 
@@ -540,35 +574,55 @@ public class HFile {
     if (!(fs instanceof HFileSystem)) {
       hfs = new HFileSystem(fs);
     } else {
-      hfs = (HFileSystem)fs;
+      hfs = (HFileSystem) fs;
     }
-    return pickReaderVersion(path, fsdis, size, cacheConf, hfs, conf);
+    return openReader(path, fsdis, size, cacheConf, hfs, primaryReplicaReader, conf);
   }
 
   /**
-   *
+  * Creates reader with cache configuration disabled
+  * @param fs filesystem
+  * @param path Path to file to read
+  * @return an active Reader instance
+  * @throws IOException Will throw a CorruptHFileException
+  * (DoNotRetryIOException subtype) if hfile is corrupt/invalid.
+  */
+  public static Reader createReader(FileSystem fs, Path path, Configuration conf)
+      throws IOException {
+    // The primaryReplicaReader is mainly used for constructing block cache key, so if we do not use
+    // block cache then it is OK to set it as any value. We use true here.
+    return createReader(fs, path, CacheConfig.DISABLED, true, conf);
+  }
+
+  /**
    * @param fs filesystem
    * @param path Path to file to read
-   * @param cacheConf This must not be null.  @see {@link org.apache.hadoop.hbase.io.hfile.CacheConfig#CacheConfig(Configuration)}
+   * @param cacheConf This must not be null. @see
+   *          {@link org.apache.hadoop.hbase.io.hfile.CacheConfig#CacheConfig(Configuration)}
+   * @param primaryReplicaReader true if this is a reader for primary replica
    * @return an active Reader instance
-   * @throws IOException Will throw a CorruptHFileException (DoNotRetryIOException subtype) if hfile is corrupt/invalid.
+   * @throws IOException Will throw a CorruptHFileException (DoNotRetryIOException subtype) if hfile
+   *           is corrupt/invalid.
    */
-  public static Reader createReader(
-      FileSystem fs, Path path, CacheConfig cacheConf, Configuration conf) throws IOException {
+  public static Reader createReader(FileSystem fs, Path path, CacheConfig cacheConf,
+      boolean primaryReplicaReader, Configuration conf) throws IOException {
     Preconditions.checkNotNull(cacheConf, "Cannot create Reader with null CacheConf");
     FSDataInputStreamWrapper stream = new FSDataInputStreamWrapper(fs, path);
-    return pickReaderVersion(path, stream, fs.getFileStatus(path).getLen(),
-      cacheConf, stream.getHfs(), conf);
+    return openReader(path, stream, fs.getFileStatus(path).getLen(), cacheConf,
+      stream.getHfs(), primaryReplicaReader, conf);
   }
 
   /**
-   * This factory method is used only by unit tests
+   * This factory method is used only by unit tests. <br/>
+   * The sockets and the file descriptors held by the method parameter
+   * {@code FSDataInputStreamWrapper} passed will be freed after its usage so caller needs to ensure
+   * that no other threads have access to the same passed reference.
    */
-  static Reader createReaderFromStream(Path path,
-      FSDataInputStream fsdis, long size, CacheConfig cacheConf, Configuration conf)
-      throws IOException {
+  @VisibleForTesting
+  static Reader createReaderFromStream(Path path, FSDataInputStream fsdis, long size,
+      CacheConfig cacheConf, Configuration conf) throws IOException {
     FSDataInputStreamWrapper wrapper = new FSDataInputStreamWrapper(fsdis);
-    return pickReaderVersion(path, wrapper, size, cacheConf, null, conf);
+    return openReader(path, wrapper, size, cacheConf, null, true, conf);
   }
 
   /**
@@ -593,22 +647,13 @@ public class HFile {
       throws IOException {
     final Path path = fileStatus.getPath();
     final long size = fileStatus.getLen();
-    FSDataInputStreamWrapper fsdis = new FSDataInputStreamWrapper(fs, path);
-    try {
+    try (FSDataInputStreamWrapper fsdis = new FSDataInputStreamWrapper(fs, path)) {
       boolean isHBaseChecksum = fsdis.shouldUseHBaseChecksum();
       assert !isHBaseChecksum; // Initially we must read with FS checksum.
       FixedFileTrailer.readFromStream(fsdis.getStream(isHBaseChecksum), size);
       return true;
     } catch (IllegalArgumentException e) {
       return false;
-    } catch (IOException e) {
-      throw e;
-    } finally {
-      try {
-        fsdis.close();
-      } catch (Throwable t) {
-        LOG.warn("Error closing fsdis FSDataInputStreamWrapper: " + path, t);
-      }
     }
   }
 
@@ -625,7 +670,7 @@ public class HFile {
     static final byte [] COMPARATOR = Bytes.toBytes(RESERVED_PREFIX + "COMPARATOR");
     static final byte [] TAGS_COMPRESSED = Bytes.toBytes(RESERVED_PREFIX + "TAGS_COMPRESSED");
     public static final byte [] MAX_TAGS_LEN = Bytes.toBytes(RESERVED_PREFIX + "MAX_TAGS_LEN");
-    private final SortedMap<byte [], byte []> map = new TreeMap<byte [], byte []>(Bytes.BYTES_COMPARATOR);
+    private final SortedMap<byte [], byte []> map = new TreeMap<>(Bytes.BYTES_COMPARATOR);
 
     public FileInfo() {
       super();
@@ -655,82 +700,102 @@ public class HFile {
       return this;
     }
 
+    @Override
     public void clear() {
       this.map.clear();
     }
 
+    @Override
     public Comparator<? super byte[]> comparator() {
       return map.comparator();
     }
 
+    @Override
     public boolean containsKey(Object key) {
       return map.containsKey(key);
     }
 
+    @Override
     public boolean containsValue(Object value) {
       return map.containsValue(value);
     }
 
+    @Override
     public Set<java.util.Map.Entry<byte[], byte[]>> entrySet() {
       return map.entrySet();
     }
 
+    @Override
     public boolean equals(Object o) {
       return map.equals(o);
     }
 
+    @Override
     public byte[] firstKey() {
       return map.firstKey();
     }
 
+    @Override
     public byte[] get(Object key) {
       return map.get(key);
     }
 
+    @Override
     public int hashCode() {
       return map.hashCode();
     }
 
+    @Override
     public SortedMap<byte[], byte[]> headMap(byte[] toKey) {
       return this.map.headMap(toKey);
     }
 
+    @Override
     public boolean isEmpty() {
       return map.isEmpty();
     }
 
+    @Override
     public Set<byte[]> keySet() {
       return map.keySet();
     }
 
+    @Override
     public byte[] lastKey() {
       return map.lastKey();
     }
 
+    @Override
     public byte[] put(byte[] key, byte[] value) {
       return this.map.put(key, value);
     }
 
+    @Override
     public void putAll(Map<? extends byte[], ? extends byte[]> m) {
       this.map.putAll(m);
     }
 
+    @Override
     public byte[] remove(Object key) {
       return this.map.remove(key);
     }
 
+    @Override
     public int size() {
       return map.size();
     }
 
+    @Override
     public SortedMap<byte[], byte[]> subMap(byte[] fromKey, byte[] toKey) {
       return this.map.subMap(fromKey, toKey);
     }
 
+    @Override
     public SortedMap<byte[], byte[]> tailMap(byte[] fromKey) {
       return this.map.tailMap(fromKey);
     }
 
+    @Override
     public Collection<byte[]> values() {
       return map.values();
     }
@@ -861,7 +926,7 @@ public class HFile {
    */
   static List<Path> getStoreFiles(FileSystem fs, Path regionDir)
       throws IOException {
-    List<Path> regionHFiles = new ArrayList<Path>();
+    List<Path> regionHFiles = new ArrayList<>();
     PathFilter dirFilter = new FSUtils.DirFilter(fs);
     FileStatus[] familyDirs = fs.listStatus(regionDir, dirFilter);
     for(FileStatus dir : familyDirs) {

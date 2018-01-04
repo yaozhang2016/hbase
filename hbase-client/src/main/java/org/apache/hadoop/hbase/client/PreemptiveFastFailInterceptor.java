@@ -17,58 +17,57 @@
  */
 package org.apache.hadoop.hbase.client;
 
+import static org.apache.hadoop.hbase.util.CollectionUtils.computeIfAbsent;
+
+import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
+
 import java.io.IOException;
 import java.util.Map.Entry;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
-import org.apache.commons.lang.mutable.MutableBoolean;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.apache.commons.lang3.mutable.MutableBoolean;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.ServerName;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.hbase.exceptions.ClientExceptionsUtil;
 import org.apache.hadoop.hbase.exceptions.PreemptiveFastFailException;
 import org.apache.hadoop.hbase.ipc.CallTimeoutException;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.hadoop.ipc.RemoteException;
 
-import com.google.common.annotations.VisibleForTesting;
-
 /**
- * 
  * The concrete {@link RetryingCallerInterceptor} class that implements the preemptive fast fail
  * feature.
- * 
- * The motivation is as follows : 
- * In case where a large number of clients try and talk to a particular region server in hbase, if
- * the region server goes down due to network problems, we might end up in a scenario where
- * the clients would go into a state where they all start to retry.
+ * <p>
+ * The motivation is as follows : In case where a large number of clients try and talk to a
+ * particular region server in hbase, if the region server goes down due to network problems, we
+ * might end up in a scenario where the clients would go into a state where they all start to retry.
  * This behavior will set off many of the threads in pretty much the same path and they all would be
  * sleeping giving rise to a state where the client either needs to create more threads to send new
  * requests to other hbase machines or block because the client cannot create anymore threads.
- * 
+ * <p>
  * In most cases the clients might prefer to have a bound on the number of threads that are created
  * in order to send requests to hbase. This would mostly result in the client thread starvation.
- * 
- *  To circumvent this problem, the approach that is being taken here under is to let 1 of the many
- *  threads who are trying to contact the regionserver with connection problems and let the other
- *  threads get a {@link PreemptiveFastFailException} so that they can move on and take other
- *  requests.
- *  
- *  This would give the client more flexibility on the kind of action he would want to take in cases
- *  where the regionserver is down. He can either discard the requests and send a nack upstream
- *  faster or have an application level retry or buffer the requests up so as to send them down to
- *  hbase later.
- *
+ * <p>
+ * To circumvent this problem, the approach that is being taken here under is to let 1 of the many
+ * threads who are trying to contact the regionserver with connection problems and let the other
+ * threads get a {@link PreemptiveFastFailException} so that they can move on and take other
+ * requests.
+ * <p>
+ * This would give the client more flexibility on the kind of action he would want to take in cases
+ * where the regionserver is down. He can either discard the requests and send a nack upstream
+ * faster or have an application level retry or buffer the requests up so as to send them down to
+ * hbase later.
  */
 @InterfaceAudience.Private
 class PreemptiveFastFailInterceptor extends RetryingCallerInterceptor {
 
-  private static final Log LOG = LogFactory
-      .getLog(PreemptiveFastFailInterceptor.class);
+  private static final Logger LOG = LoggerFactory
+      .getLogger(PreemptiveFastFailInterceptor.class);
 
   // amount of time to wait before we consider a server to be in fast fail
   // mode
@@ -76,8 +75,7 @@ class PreemptiveFastFailInterceptor extends RetryingCallerInterceptor {
 
   // Keeps track of failures when we cannot talk to a server. Helps in
   // fast failing clients if the server is down for a long time.
-  protected final ConcurrentMap<ServerName, FailureInfo> repeatedFailuresMap =
-      new ConcurrentHashMap<ServerName, FailureInfo>();
+  protected final ConcurrentMap<ServerName, FailureInfo> repeatedFailuresMap = new ConcurrentHashMap<>();
 
   // We populate repeatedFailuresMap every time there is a failure. So, to
   // keep it from growing unbounded, we garbage collect the failure information
@@ -91,8 +89,7 @@ class PreemptiveFastFailInterceptor extends RetryingCallerInterceptor {
   // fast fail mode for any reason.
   private long fastFailClearingTimeMilliSec;
 
-  private final ThreadLocal<MutableBoolean> threadRetryingInFastFailMode =
-      new ThreadLocal<MutableBoolean>();
+  private final ThreadLocal<MutableBoolean> threadRetryingInFastFailMode = new ThreadLocal<>();
 
   public PreemptiveFastFailInterceptor(Configuration conf) {
     this.fastFailThresholdMilliSec = conf.getLong(
@@ -155,15 +152,8 @@ class PreemptiveFastFailInterceptor extends RetryingCallerInterceptor {
       return;
     }
     long currentTime = EnvironmentEdgeManager.currentTime();
-    FailureInfo fInfo = repeatedFailuresMap.get(serverName);
-    if (fInfo == null) {
-      fInfo = new FailureInfo(currentTime);
-      FailureInfo oldfInfo = repeatedFailuresMap.putIfAbsent(serverName, fInfo);
-
-      if (oldfInfo != null) {
-        fInfo = oldfInfo;
-      }
-    }
+    FailureInfo fInfo =
+        computeIfAbsent(repeatedFailuresMap, serverName, () -> new FailureInfo(currentTime));
     fInfo.timeOfLatestAttemptMilliSec = currentTime;
     fInfo.numConsecutiveFailures.incrementAndGet();
   }
@@ -301,7 +291,7 @@ class PreemptiveFastFailInterceptor extends RetryingCallerInterceptor {
     // If we were able to connect to the server, reset the failure
     // information.
     if (couldNotCommunicate == false) {
-      LOG.info("Clearing out PFFE for server " + server.getServerName());
+      LOG.info("Clearing out PFFE for server " + server);
       repeatedFailuresMap.remove(server);
     } else {
       // update time of last attempt

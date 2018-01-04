@@ -18,47 +18,55 @@
 
 package org.apache.hadoop.hbase.master.procedure;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.HRegionInfo;
-import org.apache.hadoop.hbase.ProcedureInfo;
-import org.apache.hadoop.hbase.TableName;
-import org.apache.hadoop.hbase.TableNotDisabledException;
-import org.apache.hadoop.hbase.TableNotFoundException;
-import org.apache.hadoop.hbase.procedure2.ProcedureExecutor;
-import org.apache.hadoop.hbase.procedure2.ProcedureTestingUtility;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProcedureProtos.TruncateTableState;
-import org.apache.hadoop.hbase.testclassification.MasterTests;
-import org.apache.hadoop.hbase.testclassification.MediumTests;
-import org.apache.hadoop.hbase.util.Bytes;
-import org.junit.Test;
-import org.junit.experimental.categories.Category;
-
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
+import org.apache.hadoop.hbase.CategoryBasedTimeout;
+import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.TableNotDisabledException;
+import org.apache.hadoop.hbase.TableNotFoundException;
+import org.apache.hadoop.hbase.client.RegionInfo;
+import org.apache.hadoop.hbase.procedure2.Procedure;
+import org.apache.hadoop.hbase.procedure2.ProcedureExecutor;
+import org.apache.hadoop.hbase.procedure2.ProcedureTestingUtility;
+import org.apache.hadoop.hbase.testclassification.MasterTests;
+import org.apache.hadoop.hbase.testclassification.MediumTests;
+import org.apache.hadoop.hbase.util.Bytes;
+import org.junit.Rule;
+import org.junit.Test;
+import org.junit.experimental.categories.Category;
+import org.junit.rules.TestName;
+import org.junit.rules.TestRule;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 @Category({MasterTests.class, MediumTests.class})
 public class TestTruncateTableProcedure extends TestTableDDLProcedureBase {
-  private static final Log LOG = LogFactory.getLog(TestTruncateTableProcedure.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestTruncateTableProcedure.class);
+  @Rule public final TestRule timeout = CategoryBasedTimeout.builder().withTimeout(this.getClass()).
+      withLookingForStuckThread(true).build();
 
-  @Test(timeout=60000)
+  @Rule
+  public TestName name = new TestName();
+
+  @Test
   public void testTruncateNotExistentTable() throws Exception {
-    final TableName tableName = TableName.valueOf("testTruncateNotExistentTable");
+    final TableName tableName = TableName.valueOf(name.getMethodName());
 
     final ProcedureExecutor<MasterProcedureEnv> procExec = getMasterProcedureExecutor();
     long procId = ProcedureTestingUtility.submitAndWait(procExec,
         new TruncateTableProcedure(procExec.getEnvironment(), tableName, true));
 
     // Second delete should fail with TableNotFound
-    ProcedureInfo result = procExec.getResult(procId);
+    Procedure<?> result = procExec.getResult(procId);
     assertTrue(result.isFailed());
-    LOG.debug("Truncate failed with exception: " + result.getExceptionFullMessage());
+    LOG.debug("Truncate failed with exception: " + result.getException());
     assertTrue(ProcedureTestingUtility.getExceptionCause(result) instanceof TableNotFoundException);
   }
 
-  @Test(timeout=60000)
+  @Test
   public void testTruncateNotDisabledTable() throws Exception {
-    final TableName tableName = TableName.valueOf("testTruncateNotDisabledTable");
+    final TableName tableName = TableName.valueOf(name.getMethodName());
 
     final ProcedureExecutor<MasterProcedureEnv> procExec = getMasterProcedureExecutor();
     MasterProcedureTestingUtility.createTable(procExec, tableName, null, "f");
@@ -67,22 +75,22 @@ public class TestTruncateTableProcedure extends TestTableDDLProcedureBase {
         new TruncateTableProcedure(procExec.getEnvironment(), tableName, false));
 
     // Second delete should fail with TableNotDisabled
-    ProcedureInfo result = procExec.getResult(procId);
+    Procedure<?> result = procExec.getResult(procId);
     assertTrue(result.isFailed());
-    LOG.debug("Truncate failed with exception: " + result.getExceptionFullMessage());
+    LOG.debug("Truncate failed with exception: " + result.getException());
     assertTrue(
       ProcedureTestingUtility.getExceptionCause(result) instanceof TableNotDisabledException);
   }
 
-  @Test(timeout=60000)
+  @Test
   public void testSimpleTruncatePreserveSplits() throws Exception {
-    final TableName tableName = TableName.valueOf("testSimpleTruncatePreserveSplits");
+    final TableName tableName = TableName.valueOf(name.getMethodName());
     testSimpleTruncate(tableName, true);
   }
 
-  @Test(timeout=60000)
+  @Test
   public void testSimpleTruncateNoPreserveSplits() throws Exception {
-    final TableName tableName = TableName.valueOf("testSimpleTruncateNoPreserveSplits");
+    final TableName tableName = TableName.valueOf(name.getMethodName());
     testSimpleTruncate(tableName, false);
   }
 
@@ -93,14 +101,14 @@ public class TestTruncateTableProcedure extends TestTableDDLProcedureBase {
       Bytes.toBytes("a"), Bytes.toBytes("b"), Bytes.toBytes("c")
     };
 
-    HRegionInfo[] regions = MasterProcedureTestingUtility.createTable(
+    RegionInfo[] regions = MasterProcedureTestingUtility.createTable(
       getMasterProcedureExecutor(), tableName, splitKeys, families);
     // load and verify that there are rows in the table
     MasterProcedureTestingUtility.loadData(
       UTIL.getConnection(), tableName, 100, splitKeys, families);
     assertEquals(100, UTIL.countRows(tableName));
     // disable the table
-    UTIL.getHBaseAdmin().disableTable(tableName);
+    UTIL.getAdmin().disableTable(tableName);
 
     // truncate the table
     final ProcedureExecutor<MasterProcedureEnv> procExec = getMasterProcedureExecutor();
@@ -108,10 +116,12 @@ public class TestTruncateTableProcedure extends TestTableDDLProcedureBase {
       new TruncateTableProcedure(procExec.getEnvironment(), tableName, preserveSplits));
     ProcedureTestingUtility.assertProcNotFailed(procExec, procId);
 
+    // If truncate procedure completed successfully, it means all regions were assigned correctly
+    // and table is enabled now.
     UTIL.waitUntilAllRegionsAssigned(tableName);
 
     // validate the table regions and layout
-    regions = UTIL.getHBaseAdmin().getTableRegions(tableName).toArray(new HRegionInfo[0]);
+    regions = UTIL.getAdmin().getTableRegions(tableName).toArray(new RegionInfo[0]);
     if (preserveSplits) {
       assertEquals(1 + splitKeys.length, regions.length);
     } else {
@@ -129,15 +139,15 @@ public class TestTruncateTableProcedure extends TestTableDDLProcedureBase {
     assertEquals(50, UTIL.countRows(tableName));
   }
 
-  @Test(timeout=60000)
+  @Test
   public void testRecoveryAndDoubleExecutionPreserveSplits() throws Exception {
-    final TableName tableName = TableName.valueOf("testRecoveryAndDoubleExecutionPreserveSplits");
+    final TableName tableName = TableName.valueOf(name.getMethodName());
     testRecoveryAndDoubleExecution(tableName, true);
   }
 
-  @Test(timeout=60000)
+  @Test
   public void testRecoveryAndDoubleExecutionNoPreserveSplits() throws Exception {
-    final TableName tableName = TableName.valueOf("testRecoveryAndDoubleExecutionNoPreserveSplits");
+    final TableName tableName = TableName.valueOf(name.getMethodName());
     testRecoveryAndDoubleExecution(tableName, false);
   }
 
@@ -149,14 +159,14 @@ public class TestTruncateTableProcedure extends TestTableDDLProcedureBase {
     final byte[][] splitKeys = new byte[][] {
       Bytes.toBytes("a"), Bytes.toBytes("b"), Bytes.toBytes("c")
     };
-    HRegionInfo[] regions = MasterProcedureTestingUtility.createTable(
+    RegionInfo[] regions = MasterProcedureTestingUtility.createTable(
       getMasterProcedureExecutor(), tableName, splitKeys, families);
     // load and verify that there are rows in the table
     MasterProcedureTestingUtility.loadData(
       UTIL.getConnection(), tableName, 100, splitKeys, families);
     assertEquals(100, UTIL.countRows(tableName));
     // disable the table
-    UTIL.getHBaseAdmin().disableTable(tableName);
+    UTIL.getAdmin().disableTable(tableName);
 
     final ProcedureExecutor<MasterProcedureEnv> procExec = getMasterProcedureExecutor();
     ProcedureTestingUtility.waitNoProcedureRunning(procExec);
@@ -164,20 +174,16 @@ public class TestTruncateTableProcedure extends TestTableDDLProcedureBase {
 
     // Start the Truncate procedure && kill the executor
     long procId = procExec.submitProcedure(
-      new TruncateTableProcedure(procExec.getEnvironment(), tableName, preserveSplits),
-      nonceGroup,
-      nonce);
+      new TruncateTableProcedure(procExec.getEnvironment(), tableName, preserveSplits));
 
     // Restart the executor and execute the step twice
-    // NOTE: the 7 (number of TruncateTableState steps) is hardcoded,
-    //       so you have to look at this test at least once when you add a new step.
-    MasterProcedureTestingUtility.testRecoveryAndDoubleExecution(procExec, procId, 7);
+    MasterProcedureTestingUtility.testRecoveryAndDoubleExecution(procExec, procId);
 
     ProcedureTestingUtility.setKillAndToggleBeforeStoreUpdate(procExec, false);
     UTIL.waitUntilAllRegionsAssigned(tableName);
 
     // validate the table regions and layout
-    regions = UTIL.getHBaseAdmin().getTableRegions(tableName).toArray(new HRegionInfo[0]);
+    regions = UTIL.getAdmin().getTableRegions(tableName).toArray(new RegionInfo[0]);
     if (preserveSplits) {
       assertEquals(1 + splitKeys.length, regions.length);
     } else {

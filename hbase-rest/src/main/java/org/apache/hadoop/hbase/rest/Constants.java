@@ -18,14 +18,12 @@
 
 package org.apache.hadoop.hbase.rest;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * Common constants for org.apache.hadoop.hbase.rest
  */
 @InterfaceAudience.Public
-@InterfaceStability.Stable
 public interface Constants {
   // All constants in a public interface are 'public static final'
 
@@ -54,6 +52,16 @@ public interface Constants {
   String REST_SSL_KEYSTORE_STORE = "hbase.rest.ssl.keystore.store";
   String REST_SSL_KEYSTORE_PASSWORD = "hbase.rest.ssl.keystore.password";
   String REST_SSL_KEYSTORE_KEYPASSWORD = "hbase.rest.ssl.keystore.keypassword";
+  String REST_SSL_EXCLUDE_CIPHER_SUITES = "hbase.rest.ssl.exclude.cipher.suites";
+  String REST_SSL_INCLUDE_CIPHER_SUITES = "hbase.rest.ssl.include.cipher.suites";
+  String REST_SSL_EXCLUDE_PROTOCOLS = "hbase.rest.ssl.exclude.protocols";
+  String REST_SSL_INCLUDE_PROTOCOLS = "hbase.rest.ssl.include.protocols";
+
+  String REST_THREAD_POOL_THREADS_MAX = "hbase.rest.threads.max";
+  String REST_THREAD_POOL_THREADS_MIN = "hbase.rest.threads.min";
+  String REST_THREAD_POOL_TASK_QUEUE_SIZE = "hbase.rest.task.queue.size";
+  String REST_THREAD_POOL_THREAD_IDLE_TIMEOUT = "hbase.rest.thread.idle.timeout";
+  String REST_CONNECTOR_ACCEPT_QUEUE_SIZE = "hbase.rest.connector.accept.queue.size";
 
   String REST_DNS_NAMESERVER = "hbase.rest.dns.nameserver";
   String REST_DNS_INTERFACE = "hbase.rest.dns.interface";
@@ -70,6 +78,7 @@ public interface Constants {
   String SCAN_FETCH_SIZE = "hbase.rest.scan.fetchsize";
   String SCAN_FILTER = "filter";
   String SCAN_REVERSED = "reversed";
+  String SCAN_CACHE_BLOCKS = "cacheblocks";
   String CUSTOM_FILTERS = "hbase.rest.custom.filters"; 
 
   String ROW_KEYS_PARAM_NAME = "row";

@@ -22,14 +22,12 @@ import static org.junit.Assert.fail;
 
 import java.io.IOException;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos.SnapshotDescription;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.SnapshotProtos.SnapshotDescription;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.testclassification.RegionServerTests;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManagerTestHelper;
@@ -37,6 +35,8 @@ import org.junit.After;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Test that the {@link SnapshotDescription} helper is helping correctly.
@@ -66,10 +66,10 @@ public class TestSnapshotDescriptionUtils {
     EnvironmentEdgeManagerTestHelper.reset();
   }
 
-  private static final Log LOG = LogFactory.getLog(TestSnapshotDescriptionUtils.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestSnapshotDescriptionUtils.class);
 
   @Test
-  public void testValidateMissingTableName() {
+  public void testValidateMissingTableName() throws IOException {
     Configuration conf = new Configuration(false);
     try {
       SnapshotDescriptionUtils.validate(SnapshotDescription.newBuilder().setName("fail").build(),

@@ -23,11 +23,10 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellUtil;
+import org.apache.hadoop.hbase.CompareOperator;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HColumnDescriptor;
@@ -54,6 +53,8 @@ import org.junit.Test;
 import static org.junit.Assert.*;
 
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Test if the FilterWrapper retains the same semantics defined in the
@@ -61,7 +62,7 @@ import org.junit.experimental.categories.Category;
  */
 @Category({FilterTests.class, MediumTests.class})
 public class TestFilterWrapper {
-  private static final Log LOG = LogFactory.getLog(TestFilterWrapper.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestFilterWrapper.class);
 
   private static final HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
   private static Configuration conf = null;
@@ -75,10 +76,10 @@ public class TestFilterWrapper {
     int row_number = 0;
     try {
       Scan scan = new Scan();
-      List<Filter> fs = new ArrayList<Filter>();
+      List<Filter> fs = new ArrayList<>();
 
       DependentColumnFilter f1 = new DependentColumnFilter(Bytes.toBytes("f1"),
-          Bytes.toBytes("c5"), true, CompareFilter.CompareOp.EQUAL,
+          Bytes.toBytes("c5"), true, CompareOperator.EQUAL,
           new SubstringComparator("c5"));
       PageFilter f2 = new PageFilter(2);
       fs.add(f1);
@@ -115,7 +116,7 @@ public class TestFilterWrapper {
     try {
       Table table = connection.getTable(name);
       assertTrue("Fail to create the table", admin.tableExists(name));
-      List<Put> puts = new ArrayList<Put>();
+      List<Put> puts = new ArrayList<>();
 
       // row1 => <f1:c1, 1_c1, ts=1>, <f1:c2, 1_c2, ts=2>, <f1:c3, 1_c3,ts=3>,
       // <f1:c4,1_c4, ts=4>, <f1:c5, 1_c5, ts=5>
@@ -176,7 +177,7 @@ public class TestFilterWrapper {
     TestFilterWrapper.conf.setInt(HConstants.HBASE_CLIENT_RETRIES_NUMBER, 1);
     try {
       connection = ConnectionFactory.createConnection(TestFilterWrapper.conf);
-      admin = TEST_UTIL.getHBaseAdmin();
+      admin = TEST_UTIL.getAdmin();
     } catch (MasterNotRunningException e) {
       assertNull("Master is not running", e);
     } catch (ZooKeeperConnectionException e) {

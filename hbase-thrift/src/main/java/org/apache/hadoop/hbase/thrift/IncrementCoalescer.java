@@ -30,11 +30,9 @@ import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.LongAdder;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.KeyValue;
+import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.thrift.ThriftServerRunner.HBaseHandler;
 import org.apache.hadoop.hbase.thrift.generated.TIncrement;
@@ -42,6 +40,8 @@ import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.Threads;
 import org.apache.hadoop.metrics2.util.MBeans;
 import org.apache.thrift.TException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * This class will coalesce increments from a thift server if
@@ -150,23 +150,23 @@ public class IncrementCoalescer implements IncrementCoalescerMBean {
     }
   }
 
-  private final AtomicLong failedIncrements = new AtomicLong();
-  private final AtomicLong successfulCoalescings = new AtomicLong();
-  private final AtomicLong totalIncrements = new AtomicLong();
+  private final LongAdder failedIncrements = new LongAdder();
+  private final LongAdder successfulCoalescings = new LongAdder();
+  private final LongAdder totalIncrements = new LongAdder();
   private final ConcurrentMap<FullyQualifiedRow, Long> countersMap =
-      new ConcurrentHashMap<FullyQualifiedRow, Long>(100000, 0.75f, 1500);
+      new ConcurrentHashMap<>(100000, 0.75f, 1500);
   private final ThreadPoolExecutor pool;
   private final HBaseHandler handler;
 
   private int maxQueueSize = 500000;
   private static final int CORE_POOL_SIZE = 1;
 
-  private static final Log LOG = LogFactory.getLog(FullyQualifiedRow.class);
+  private static final Logger LOG = LoggerFactory.getLogger(FullyQualifiedRow.class);
 
   @SuppressWarnings("deprecation")
   public IncrementCoalescer(HBaseHandler hand) {
     this.handler = hand;
-    LinkedBlockingQueue<Runnable> queue = new LinkedBlockingQueue<Runnable>();
+    LinkedBlockingQueue<Runnable> queue = new LinkedBlockingQueue<>();
     pool =
         new ThreadPoolExecutor(CORE_POOL_SIZE, CORE_POOL_SIZE, 50, TimeUnit.MILLISECONDS, queue,
             Threads.newDaemonThreadFactory("IncrementCoalescer"));
@@ -176,7 +176,7 @@ public class IncrementCoalescer implements IncrementCoalescerMBean {
 
   public boolean queueIncrement(TIncrement inc) throws TException {
     if (!canQueue()) {
-      failedIncrements.incrementAndGet();
+      failedIncrements.increment();
       return false;
     }
     return internalQueueTincrement(inc);
@@ -184,7 +184,7 @@ public class IncrementCoalescer implements IncrementCoalescerMBean {
 
   public boolean queueIncrements(List<TIncrement> incs) throws TException {
     if (!canQueue()) {
-      failedIncrements.incrementAndGet();
+      failedIncrements.increment();
       return false;
     }
 
@@ -196,7 +196,7 @@ public class IncrementCoalescer implements IncrementCoalescerMBean {
   }
 
   private boolean internalQueueTincrement(TIncrement inc) throws TException {
-    byte[][] famAndQf = KeyValue.parseColumn(inc.getColumn());
+    byte[][] famAndQf = CellUtil.parseColumn(inc.getColumn());
     if (famAndQf.length != 2) return false;
 
     return internalQueueIncrement(inc.getTable(), inc.getRow(), famAndQf[0], famAndQf[1],
@@ -211,7 +211,7 @@ public class IncrementCoalescer implements IncrementCoalescerMBean {
     //Make sure that the number of threads is scaled.
     dynamicallySetCoreSize(countersMapSize);
 
-    totalIncrements.incrementAndGet();
+    totalIncrements.increment();
 
     FullyQualifiedRow key = new FullyQualifiedRow(tableName, rowKey, fam, qual);
 
@@ -224,7 +224,7 @@ public class IncrementCoalescer implements IncrementCoalescerMBean {
         value = Long.valueOf(currentAmount);
       } else {
         value += currentAmount;
-        successfulCoalescings.incrementAndGet();
+        successfulCoalescings.increment();
       }
       // Try to put the value, only if there was none
       Long oldValue = countersMap.putIfAbsent(key, value);
@@ -354,15 +354,15 @@ public class IncrementCoalescer implements IncrementCoalescerMBean {
     pool.setMaximumPoolSize(newMaxSize);
   }
   public long getFailedIncrements() {
-    return failedIncrements.get();
+    return failedIncrements.sum();
   }
 
   public long getSuccessfulCoalescings() {
-    return successfulCoalescings.get();
+    return successfulCoalescings.sum();
   }
 
   public long getTotalIncrements() {
-    return totalIncrements.get();
+    return totalIncrements.sum();
   }
 
   public long getCountersMapSize() {

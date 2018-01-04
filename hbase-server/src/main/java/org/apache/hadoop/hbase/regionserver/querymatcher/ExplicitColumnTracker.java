@@ -21,10 +21,10 @@ import java.io.IOException;
 import java.util.NavigableSet;
 
 import org.apache.hadoop.hbase.Cell;
-import org.apache.hadoop.hbase.CellComparator;
 import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.hadoop.hbase.PrivateCellUtil;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.hbase.regionserver.querymatcher.ScanQueryMatcher.MatchCode;
 
 /**
@@ -104,7 +104,7 @@ public class ExplicitColumnTracker implements ColumnTracker {
   public ScanQueryMatcher.MatchCode checkColumn(Cell cell, byte type) {
     // delete markers should never be passed to an
     // *Explicit*ColumnTracker
-    assert !CellUtil.isDelete(type);
+    assert !PrivateCellUtil.isDelete(type);
     do {
       // No more columns left, we are done with this query
       if (done()) {
@@ -117,7 +117,7 @@ public class ExplicitColumnTracker implements ColumnTracker {
       }
 
       // Compare specific column to current column
-      int ret = CellComparator.compareQualifiers(cell, column.getBuffer(), column.getOffset(),
+      int ret = CellUtil.compareQualifiers(cell, column.getBuffer(), column.getOffset(),
         column.getLength());
 
       // Column Matches. Return include code. The caller would call checkVersions
@@ -153,7 +153,7 @@ public class ExplicitColumnTracker implements ColumnTracker {
   @Override
   public ScanQueryMatcher.MatchCode checkVersions(Cell cell, long timestamp, byte type,
       boolean ignoreCount) throws IOException {
-    assert !CellUtil.isDelete(type);
+    assert !PrivateCellUtil.isDelete(type);
     if (ignoreCount) {
       return ScanQueryMatcher.MatchCode.INCLUDE;
     }
@@ -215,7 +215,7 @@ public class ExplicitColumnTracker implements ColumnTracker {
    */
   public void doneWithColumn(Cell cell) {
     while (this.column != null) {
-      int compare = CellComparator.compareQualifiers(cell, column.getBuffer(), column.getOffset(),
+      int compare = CellUtil.compareQualifiers(cell, column.getBuffer(), column.getOffset(),
         column.getLength());
       resetTS();
       if (compare >= 0) {

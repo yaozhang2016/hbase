@@ -19,306 +19,58 @@
 package org.apache.hadoop.hbase;
 
 import java.io.IOException;
-import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.TreeMap;
-import java.util.TreeSet;
-import java.util.regex.Matcher;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.hbase.client.Durability;
-import org.apache.hadoop.hbase.client.RegionReplicaUtil;
+import org.apache.hadoop.hbase.client.TableDescriptor;
+import org.apache.hadoop.hbase.client.TableDescriptorBuilder;
+import org.apache.hadoop.hbase.client.TableDescriptorBuilder.ModifyableTableDescriptor;
 import org.apache.hadoop.hbase.exceptions.DeserializationException;
-import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos.TableSchema;
 import org.apache.hadoop.hbase.security.User;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.hadoop.hbase.client.ColumnFamilyDescriptor;
+import org.apache.hadoop.hbase.client.ColumnFamilyDescriptorBuilder.ModifyableColumnFamilyDescriptor;
 
 /**
  * HTableDescriptor contains the details about an HBase table  such as the descriptors of
- * all the column families, is the table a catalog table, <code> -ROOT- </code> or
- * <code> hbase:meta </code>, if the table is read only, the maximum size of the memstore,
+ * all the column families, is the table a catalog table, <code> hbase:meta </code>,
+ * if the table is read only, the maximum size of the memstore,
  * when the region split should occur, coprocessors associated with it etc...
+ * @deprecated As of release 2.0.0, this will be removed in HBase 3.0.0.
+ *             Use {@link TableDescriptorBuilder} to build {@link HTableDescriptor}.
  */
+@Deprecated
 @InterfaceAudience.Public
-@InterfaceStability.Evolving
-public class HTableDescriptor implements Comparable<HTableDescriptor> {
-
-  private static final Log LOG = LogFactory.getLog(HTableDescriptor.class);
-
-  private TableName name = null;
-
-  /**
-   * A map which holds the metadata information of the table. This metadata
-   * includes values like IS_ROOT, IS_META, DEFERRED_LOG_FLUSH, SPLIT_POLICY,
-   * MAX_FILE_SIZE, READONLY, MEMSTORE_FLUSHSIZE etc...
-   */
-  private final Map<Bytes, Bytes> values =
-      new HashMap<Bytes, Bytes>();
-
-  /**
-   * A map which holds the configuration specific to the table.
-   * The keys of the map have the same names as config keys and override the defaults with
-   * table-specific settings. Example usage may be for compactions, etc.
-   */
-  private final Map<String, String> configuration = new HashMap<String, String>();
-
-  public static final String SPLIT_POLICY = "SPLIT_POLICY";
-
-  /**
-   * <em>INTERNAL</em> Used by HBase Shell interface to access this metadata
-   * attribute which denotes the maximum size of the store file after which
-   * a region split occurs
-   *
-   * @see #getMaxFileSize()
-   */
-  public static final String MAX_FILESIZE = "MAX_FILESIZE";
-  private static final Bytes MAX_FILESIZE_KEY =
-      new Bytes(Bytes.toBytes(MAX_FILESIZE));
-
-  public static final String OWNER = "OWNER";
-  public static final Bytes OWNER_KEY =
-      new Bytes(Bytes.toBytes(OWNER));
-
-  /**
-   * <em>INTERNAL</em> Used by rest interface to access this metadata
-   * attribute which denotes if the table is Read Only
-   *
-   * @see #isReadOnly()
-   */
-  public static final String READONLY = "READONLY";
-  private static final Bytes READONLY_KEY =
-      new Bytes(Bytes.toBytes(READONLY));
-
-  /**
-   * <em>INTERNAL</em> Used by HBase Shell interface to access this metadata
-   * attribute which denotes if the table is compaction enabled
-   *
-   * @see #isCompactionEnabled()
-   */
-  public static final String COMPACTION_ENABLED = "COMPACTION_ENABLED";
-  private static final Bytes COMPACTION_ENABLED_KEY =
-      new Bytes(Bytes.toBytes(COMPACTION_ENABLED));
-
-  /**
-   * <em>INTERNAL</em> Used by HBase Shell interface to access this metadata
-   * attribute which represents the maximum size of the memstore after which
-   * its contents are flushed onto the disk
-   *
-   * @see #getMemStoreFlushSize()
-   */
-  public static final String MEMSTORE_FLUSHSIZE = "MEMSTORE_FLUSHSIZE";
-  private static final Bytes MEMSTORE_FLUSHSIZE_KEY =
-      new Bytes(Bytes.toBytes(MEMSTORE_FLUSHSIZE));
-
-  public static final String FLUSH_POLICY = "FLUSH_POLICY";
-
-  /**
-   * <em>INTERNAL</em> Used by rest interface to access this metadata
-   * attribute which denotes if the table is a -ROOT- region or not
-   *
-   * @see #isRootRegion()
-   */
+public class HTableDescriptor implements TableDescriptor, Comparable<HTableDescriptor> {
+  public static final String SPLIT_POLICY = TableDescriptorBuilder.SPLIT_POLICY;
+  public static final String MAX_FILESIZE = TableDescriptorBuilder.MAX_FILESIZE;
+  public static final String OWNER = TableDescriptorBuilder.OWNER;
+  public static final Bytes OWNER_KEY = TableDescriptorBuilder.OWNER_KEY;
+  public static final String READONLY = TableDescriptorBuilder.READONLY;
+  public static final String COMPACTION_ENABLED = TableDescriptorBuilder.COMPACTION_ENABLED;
+  public static final String MEMSTORE_FLUSHSIZE = TableDescriptorBuilder.MEMSTORE_FLUSHSIZE;
+  public static final String FLUSH_POLICY = TableDescriptorBuilder.FLUSH_POLICY;
   public static final String IS_ROOT = "IS_ROOT";
-  private static final Bytes IS_ROOT_KEY =
-      new Bytes(Bytes.toBytes(IS_ROOT));
-
-  /**
-   * <em>INTERNAL</em> Used by rest interface to access this metadata
-   * attribute which denotes if it is a catalog table, either
-   * <code> hbase:meta </code> or <code> -ROOT- </code>
-   *
-   * @see #isMetaRegion()
-   */
-  public static final String IS_META = "IS_META";
-  private static final Bytes IS_META_KEY =
-      new Bytes(Bytes.toBytes(IS_META));
-
-  /**
-   * <em>INTERNAL</em> Used by HBase Shell interface to access this metadata
-   * attribute which denotes if the deferred log flush option is enabled.
-   * @deprecated Use {@link #DURABILITY} instead.
-   */
-  @Deprecated
-  public static final String DEFERRED_LOG_FLUSH = "DEFERRED_LOG_FLUSH";
-  @Deprecated
-  private static final Bytes DEFERRED_LOG_FLUSH_KEY =
-      new Bytes(Bytes.toBytes(DEFERRED_LOG_FLUSH));
-
-  /**
-   * <em>INTERNAL</em> {@link Durability} setting for the table.
-   */
-  public static final String DURABILITY = "DURABILITY";
-  private static final Bytes DURABILITY_KEY =
-      new Bytes(Bytes.toBytes("DURABILITY"));
-
-  /**
-   * <em>INTERNAL</em> number of region replicas for the table.
-   */
-  public static final String REGION_REPLICATION = "REGION_REPLICATION";
-  private static final Bytes REGION_REPLICATION_KEY =
-      new Bytes(Bytes.toBytes(REGION_REPLICATION));
-
-  /**
-   * <em>INTERNAL</em> flag to indicate whether or not the memstore should be replicated
-   * for read-replicas (CONSISTENCY =&gt; TIMELINE).
-   */
-  public static final String REGION_MEMSTORE_REPLICATION = "REGION_MEMSTORE_REPLICATION";
-  private static final Bytes REGION_MEMSTORE_REPLICATION_KEY =
-      new Bytes(Bytes.toBytes(REGION_MEMSTORE_REPLICATION));
-
-  /**
-   * <em>INTERNAL</em> Used by shell/rest interface to access this metadata
-   * attribute which denotes if the table should be treated by region normalizer.
-   *
-   * @see #isNormalizationEnabled()
-   */
-  public static final String NORMALIZATION_ENABLED = "NORMALIZATION_ENABLED";
-  private static final Bytes NORMALIZATION_ENABLED_KEY =
-    new Bytes(Bytes.toBytes(NORMALIZATION_ENABLED));
-
-  /** Default durability for HTD is USE_DEFAULT, which defaults to HBase-global default value */
-  private static final Durability DEFAULT_DURABLITY = Durability.USE_DEFAULT;
-
-  public static final String PRIORITY = "PRIORITY";
-  private static final Bytes PRIORITY_KEY =
-    new Bytes(Bytes.toBytes(PRIORITY));
-
-  /** Relative priority of the table used for rpc scheduling */
-  private static final int DEFAULT_PRIORITY = HConstants.NORMAL_QOS;
-
-  /*
-   *  The below are ugly but better than creating them each time till we
-   *  replace booleans being saved as Strings with plain booleans.  Need a
-   *  migration script to do this.  TODO.
-   */
-  private static final Bytes FALSE =
-      new Bytes(Bytes.toBytes(Boolean.FALSE.toString()));
-
-  private static final Bytes TRUE =
-      new Bytes(Bytes.toBytes(Boolean.TRUE.toString()));
-
-  private static final boolean DEFAULT_DEFERRED_LOG_FLUSH = false;
-
-  /**
-   * Constant that denotes whether the table is READONLY by default and is false
-   */
-  public static final boolean DEFAULT_READONLY = false;
-
-  /**
-   * Constant that denotes whether the table is compaction enabled by default
-   */
-  public static final boolean DEFAULT_COMPACTION_ENABLED = true;
-
-  /**
-   * Constant that denotes whether the table is normalized by default.
-   */
-  public static final boolean DEFAULT_NORMALIZATION_ENABLED = false;
-
-  /**
-   * Constant that denotes the maximum default size of the memstore after which
-   * the contents are flushed to the store files
-   */
-  public static final long DEFAULT_MEMSTORE_FLUSH_SIZE = 1024*1024*128L;
-
-  public static final int DEFAULT_REGION_REPLICATION = 1;
-
-  public static final boolean DEFAULT_REGION_MEMSTORE_REPLICATION = true;
-
-  private final static Map<String, String> DEFAULT_VALUES
-    = new HashMap<String, String>();
-  private final static Set<Bytes> RESERVED_KEYWORDS
-      = new HashSet<Bytes>();
-
-  static {
-    DEFAULT_VALUES.put(MAX_FILESIZE,
-        String.valueOf(HConstants.DEFAULT_MAX_FILE_SIZE));
-    DEFAULT_VALUES.put(READONLY, String.valueOf(DEFAULT_READONLY));
-    DEFAULT_VALUES.put(MEMSTORE_FLUSHSIZE,
-        String.valueOf(DEFAULT_MEMSTORE_FLUSH_SIZE));
-    DEFAULT_VALUES.put(DEFERRED_LOG_FLUSH,
-        String.valueOf(DEFAULT_DEFERRED_LOG_FLUSH));
-    DEFAULT_VALUES.put(DURABILITY, DEFAULT_DURABLITY.name()); //use the enum name
-    DEFAULT_VALUES.put(REGION_REPLICATION, String.valueOf(DEFAULT_REGION_REPLICATION));
-    DEFAULT_VALUES.put(NORMALIZATION_ENABLED, String.valueOf(DEFAULT_NORMALIZATION_ENABLED));
-    DEFAULT_VALUES.put(PRIORITY, String.valueOf(DEFAULT_PRIORITY));
-    for (String s : DEFAULT_VALUES.keySet()) {
-      RESERVED_KEYWORDS.add(new Bytes(Bytes.toBytes(s)));
-    }
-    RESERVED_KEYWORDS.add(IS_ROOT_KEY);
-    RESERVED_KEYWORDS.add(IS_META_KEY);
-  }
-
-  /**
-   * Cache of whether this is a meta table or not.
-   */
-  private volatile Boolean meta = null;
-  /**
-   * Cache of whether this is root table or not.
-   */
-  private volatile Boolean root = null;
-
-  /**
-   * Durability setting for the table
-   */
-  private Durability durability = null;
-
-  /**
-   * Maps column family name to the respective HColumnDescriptors
-   */
-  private final Map<byte [], HColumnDescriptor> families =
-    new TreeMap<byte [], HColumnDescriptor>(Bytes.BYTES_RAWCOMPARATOR);
-
-  /**
-   * <em> INTERNAL </em> Private constructor used internally creating table descriptors for
-   * catalog tables, <code>hbase:meta</code> and <code>-ROOT-</code>.
-   */
-  @InterfaceAudience.Private
-  protected HTableDescriptor(final TableName name, HColumnDescriptor[] families) {
-    setName(name);
-    for(HColumnDescriptor descriptor : families) {
-      this.families.put(descriptor.getName(), descriptor);
-    }
-  }
-
-  /**
-   * <em> INTERNAL </em>Private constructor used internally creating table descriptors for
-   * catalog tables, <code>hbase:meta</code> and <code>-ROOT-</code>.
-   */
-  protected HTableDescriptor(final TableName name, HColumnDescriptor[] families,
-      Map<Bytes, Bytes> values) {
-    setName(name);
-    for(HColumnDescriptor descriptor : families) {
-      this.families.put(descriptor.getName(), descriptor);
-    }
-    for (Map.Entry<Bytes, Bytes> entry :
-        values.entrySet()) {
-      setValue(entry.getKey(), entry.getValue());
-    }
-  }
-
-  /**
-   * Default constructor which constructs an empty object.
-   * For deserializing an HTableDescriptor instance only.
-   * @deprecated As of release 0.96 (<a href="https://issues.apache.org/jira/browse/HBASE-5453">HBASE-5453</a>).
-   *             This was made protected in 2.0.0 and will be removed in HBase 3.0.0.
-   *             Used by Writables and Writables are going away.
-   */
-  @Deprecated
-  protected HTableDescriptor() {
-    super();
-  }
+  public static final String IS_META = TableDescriptorBuilder.IS_META;
+  public static final String DURABILITY = TableDescriptorBuilder.DURABILITY;
+  public static final String REGION_REPLICATION = TableDescriptorBuilder.REGION_REPLICATION;
+  public static final String REGION_MEMSTORE_REPLICATION = TableDescriptorBuilder.REGION_MEMSTORE_REPLICATION;
+  public static final String NORMALIZATION_ENABLED = TableDescriptorBuilder.NORMALIZATION_ENABLED;
+  public static final String PRIORITY = TableDescriptorBuilder.PRIORITY;
+  public static final boolean DEFAULT_READONLY = TableDescriptorBuilder.DEFAULT_READONLY;
+  public static final boolean DEFAULT_COMPACTION_ENABLED = TableDescriptorBuilder.DEFAULT_COMPACTION_ENABLED;
+  public static final boolean DEFAULT_NORMALIZATION_ENABLED = TableDescriptorBuilder.DEFAULT_NORMALIZATION_ENABLED;
+  public static final long DEFAULT_MEMSTORE_FLUSH_SIZE = TableDescriptorBuilder.DEFAULT_MEMSTORE_FLUSH_SIZE;
+  public static final int DEFAULT_REGION_REPLICATION = TableDescriptorBuilder.DEFAULT_REGION_REPLICATION;
+  public static final boolean DEFAULT_REGION_MEMSTORE_REPLICATION = TableDescriptorBuilder.DEFAULT_REGION_MEMSTORE_REPLICATION;
+  protected final ModifyableTableDescriptor delegatee;
 
   /**
    * Construct a table descriptor specifying a TableName object
@@ -326,39 +78,27 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
    * @see <a href="https://issues.apache.org/jira/browse/HBASE-174">HADOOP-1581 HBASE: (HBASE-174) Un-openable tablename bug</a>
    */
   public HTableDescriptor(final TableName name) {
-    super();
-    setName(name);
-  }
-
-  /**
-   * Construct a table descriptor specifying a byte array table name
-   * @param name Table name.
-   * @see <a href="https://issues.apache.org/jira/browse/HBASE-174">HADOOP-1581 (HBASE-174) HBASE: Un-openable tablename bug</a>
-   */
-  @Deprecated
-  public HTableDescriptor(final byte[] name) {
-    this(TableName.valueOf(name));
-  }
-
-  /**
-   * Construct a table descriptor specifying a String table name
-   * @param name Table name.
-   * @see <a href="https://issues.apache.org/jira/browse/HBASE-174">HADOOP-1581 (HBASE-174) HBASE: Un-openable tablename bug</a>
-   */
-  @Deprecated
-  public HTableDescriptor(final String name) {
-    this(TableName.valueOf(name));
+    this(new ModifyableTableDescriptor(name));
   }
 
   /**
    * Construct a table descriptor by cloning the descriptor passed as a parameter.
    * <p>
    * Makes a deep copy of the supplied descriptor.
-   * Can make a modifiable descriptor from an UnmodifyableHTableDescriptor.
+   * Can make a modifiable descriptor from an ImmutableHTableDescriptor.
    * @param desc The descriptor.
    */
   public HTableDescriptor(final HTableDescriptor desc) {
-    this(desc.name, desc);
+    this(desc, true);
+  }
+
+  protected HTableDescriptor(final HTableDescriptor desc, boolean deepClone) {
+    this(deepClone ? new ModifyableTableDescriptor(desc.getTableName(), desc)
+      : desc.delegatee);
+  }
+
+  public HTableDescriptor(final TableDescriptor desc) {
+    this(new ModifyableTableDescriptor(desc.getTableName(), desc));
   }
 
   /**
@@ -366,60 +106,25 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
    * but using a different table name.
    * <p>
    * Makes a deep copy of the supplied descriptor.
-   * Can make a modifiable descriptor from an UnmodifyableHTableDescriptor.
+   * Can make a modifiable descriptor from an ImmutableHTableDescriptor.
    * @param name Table name.
    * @param desc The descriptor.
    */
   public HTableDescriptor(final TableName name, final HTableDescriptor desc) {
-    super();
-    setName(name);
-    setMetaFlags(this.name);
-    for (HColumnDescriptor c: desc.families.values()) {
-      this.families.put(c.getName(), new HColumnDescriptor(c));
-    }
-    for (Map.Entry<Bytes, Bytes> e :
-        desc.values.entrySet()) {
-      setValue(e.getKey(), e.getValue());
-    }
-    for (Map.Entry<String, String> e : desc.configuration.entrySet()) {
-      this.configuration.put(e.getKey(), e.getValue());
-    }
+    this(new ModifyableTableDescriptor(name, desc));
   }
 
-  /*
-   * Set meta flags on this table.
-   * IS_ROOT_KEY is set if its a -ROOT- table
-   * IS_META_KEY is set either if its a -ROOT- or a hbase:meta table
-   * Called by constructors.
-   * @param name
-   */
-  private void setMetaFlags(final TableName name) {
-    setMetaRegion(isRootRegion() ||
-        name.equals(TableName.META_TABLE_NAME));
+  protected HTableDescriptor(ModifyableTableDescriptor delegatee) {
+    this.delegatee = delegatee;
   }
 
   /**
-   * Check if the descriptor represents a <code> -ROOT- </code> region.
+   * This is vestigial API. It will be removed in 3.0.
    *
-   * @return true if this is a <code> -ROOT- </code> region
+   * @return always return the false
    */
   public boolean isRootRegion() {
-    if (this.root == null) {
-      this.root = isSomething(IS_ROOT_KEY, false)? Boolean.TRUE: Boolean.FALSE;
-    }
-    return this.root.booleanValue();
-  }
-
-  /**
-   * <em> INTERNAL </em> Used to denote if the current table represents
-   * <code> -ROOT- </code> region. This is used internally by the
-   * HTableDescriptor constructors
-   *
-   * @param isRoot true if this is the <code> -ROOT- </code> region
-   */
-  protected void setRootRegion(boolean isRoot) {
-    // TODO: Make the value a boolean rather than String of boolean.
-    setValue(IS_ROOT_KEY, isRoot? TRUE: FALSE);
+    return false;
   }
 
   /**
@@ -429,37 +134,9 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
    * @return true if this table is <code> hbase:meta </code>
    * region
    */
+  @Override
   public boolean isMetaRegion() {
-    if (this.meta == null) {
-      this.meta = calculateIsMetaRegion();
-    }
-    return this.meta.booleanValue();
-  }
-
-  private synchronized Boolean calculateIsMetaRegion() {
-    byte [] value = getValue(IS_META_KEY);
-    return (value != null)? Boolean.valueOf(Bytes.toString(value)): Boolean.FALSE;
-  }
-
-  private boolean isSomething(final Bytes key,
-      final boolean valueIfNull) {
-    byte [] value = getValue(key);
-    if (value != null) {
-      return Boolean.valueOf(Bytes.toString(value));
-    }
-    return valueIfNull;
-  }
-
-  /**
-   * <em> INTERNAL </em> Used to denote if the current table represents
-   * <code> -ROOT- </code> or <code> hbase:meta </code> region. This is used
-   * internally by the HTableDescriptor constructors
-   *
-   * @param isMeta true if its either <code> -ROOT- </code> or
-   * <code> hbase:meta </code> region
-   */
-  protected void setMetaRegion(boolean isMeta) {
-    setValue(IS_META_KEY, isMeta? TRUE: FALSE);
+    return delegatee.isMetaRegion();
   }
 
   /**
@@ -467,137 +144,80 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
    *
    * @return true if table is <code> hbase:meta </code> region.
    */
+  @Override
   public boolean isMetaTable() {
-    return isMetaRegion() && !isRootRegion();
+    return delegatee.isMetaTable();
   }
 
   /**
-   * Getter for accessing the metadata associated with the key
-   *
-   * @param key The key.
-   * @return The value.
-   * @see #values
+   * @return Getter for fetching an unmodifiable map.
    */
-  public byte[] getValue(byte[] key) {
-    return getValue(new Bytes(key));
-  }
-
-  private byte[] getValue(final Bytes key) {
-    Bytes ibw = values.get(key);
-    if (ibw == null)
-      return null;
-    return ibw.get();
-  }
-
-  /**
-   * Getter for accessing the metadata associated with the key
-   *
-   * @param key The key.
-   * @return The value.
-   * @see #values
-   */
-  public String getValue(String key) {
-    byte[] value = getValue(Bytes.toBytes(key));
-    if (value == null)
-      return null;
-    return Bytes.toString(value);
-  }
-
-  /**
-   * Getter for fetching an unmodifiable {@link #values} map.
-   *
-   * @return unmodifiable map {@link #values}.
-   * @see #values
-   */
+  @Override
   public Map<Bytes, Bytes> getValues() {
-    // shallow pointer copy
-    return Collections.unmodifiableMap(values);
+    return delegatee.getValues();
   }
 
   /**
-   * Setter for storing metadata as a (key, value) pair in {@link #values} map
+   * Setter for storing metadata as a (key, value) pair in map
    *
    * @param key The key.
-   * @param value The value.
-   * @see #values
+   * @param value The value. If null, removes the setting.
    */
   public HTableDescriptor setValue(byte[] key, byte[] value) {
-    setValue(new Bytes(key), new Bytes(value));
+    getDelegateeForModification().setValue(key, value);
     return this;
   }
 
   /*
-   * @param key The key.
-   * @param value The value.
-   */
-  private HTableDescriptor setValue(final Bytes key,
-      final String value) {
-    setValue(key, new Bytes(Bytes.toBytes(value)));
-    return this;
-  }
-
-  /*
-   * Setter for storing metadata as a (key, value) pair in {@link #values} map
+   * Setter for storing metadata as a (key, value) pair in map
    *
    * @param key The key.
-   * @param value The value.
+   * @param value The value. If null, removes the setting.
    */
   public HTableDescriptor setValue(final Bytes key, final Bytes value) {
-    if (key.compareTo(DEFERRED_LOG_FLUSH_KEY) == 0) {
-      boolean isDeferredFlush = Boolean.valueOf(Bytes.toString(value.get()));
-      LOG.warn("HTableDescriptor property:" + DEFERRED_LOG_FLUSH + " is deprecated, " +
-          "use " + DURABILITY + " instead");
-      setDurability(isDeferredFlush ? Durability.ASYNC_WAL : DEFAULT_DURABLITY);
-      return this;
-    }
-    values.put(key, value);
+    getDelegateeForModification().setValue(key, value);
     return this;
   }
 
   /**
-   * Setter for storing metadata as a (key, value) pair in {@link #values} map
+   * Setter for storing metadata as a (key, value) pair in map
    *
    * @param key The key.
-   * @param value The value.
-   * @see #values
+   * @param value The value. If null, removes the setting.
    */
   public HTableDescriptor setValue(String key, String value) {
-    if (value == null) {
-      remove(key);
-    } else {
-      setValue(Bytes.toBytes(key), Bytes.toBytes(value));
-    }
+    getDelegateeForModification().setValue(Bytes.toBytes(key), Bytes.toBytes(value));
     return this;
   }
 
   /**
-   * Remove metadata represented by the key from the {@link #values} map
+   * Remove metadata represented by the key from the map
    *
    * @param key Key whose key and value we're to remove from HTableDescriptor
    * parameters.
    */
   public void remove(final String key) {
-    remove(new Bytes(Bytes.toBytes(key)));
+    getDelegateeForModification().removeValue(Bytes.toBytes(key));
   }
 
   /**
-   * Remove metadata represented by the key from the {@link #values} map
+   * Remove metadata represented by the key from the map
    *
    * @param key Key whose key and value we're to remove from HTableDescriptor
    * parameters.
    */
   public void remove(Bytes key) {
-    values.remove(key);
+    getDelegateeForModification().removeValue(key);
   }
 
   /**
-   * Remove metadata represented by the key from the {@link #values} map
+   * Remove metadata represented by the key from the map
    *
    * @param key Key whose key and value we're to remove from HTableDescriptor
    * parameters.
    */
   public void remove(final byte [] key) {
-    remove(new Bytes(key));
+    getDelegateeForModification().removeValue(key);
   }
 
   /**
@@ -606,8 +226,9 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
    *
    * @return true if all columns in the table should be read only
    */
+  @Override
   public boolean isReadOnly() {
-    return isSomething(READONLY_KEY, DEFAULT_READONLY);
+    return delegatee.isReadOnly();
   }
 
   /**
@@ -619,7 +240,8 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
    * only.
    */
   public HTableDescriptor setReadOnly(final boolean readOnly) {
-    return setValue(READONLY_KEY, readOnly? TRUE: FALSE);
+    getDelegateeForModification().setReadOnly(readOnly);
+    return this;
   }
 
   /**
@@ -628,8 +250,9 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
    *
    * @return true if table compaction enabled
    */
+  @Override
   public boolean isCompactionEnabled() {
-    return isSomething(COMPACTION_ENABLED_KEY, DEFAULT_COMPACTION_ENABLED);
+    return delegatee.isCompactionEnabled();
   }
 
   /**
@@ -638,7 +261,7 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
    * @param isEnable True if enable compaction.
    */
   public HTableDescriptor setCompactionEnabled(final boolean isEnable) {
-    setValue(COMPACTION_ENABLED_KEY, isEnable ? TRUE : FALSE);
+    getDelegateeForModification().setCompactionEnabled(isEnable);
     return this;
   }
 
@@ -648,8 +271,9 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
    *
    * @return true if region normalization is enabled for this table
    */
+  @Override
   public boolean isNormalizationEnabled() {
-    return isSomething(NORMALIZATION_ENABLED_KEY, DEFAULT_NORMALIZATION_ENABLED);
+    return delegatee.isNormalizationEnabled();
   }
 
   /**
@@ -658,7 +282,7 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
    * @param isEnable True if enable normalization.
    */
   public HTableDescriptor setNormalizationEnabled(final boolean isEnable) {
-    setValue(NORMALIZATION_ENABLED_KEY, isEnable ? TRUE : FALSE);
+    getDelegateeForModification().setNormalizationEnabled(isEnable);
     return this;
   }
 
@@ -667,8 +291,7 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
    * @param durability enum value
    */
   public HTableDescriptor setDurability(Durability durability) {
-    this.durability = durability;
-    setValue(DURABILITY_KEY, durability.name());
+    getDelegateeForModification().setDurability(durability);
     return this;
   }
 
@@ -676,22 +299,9 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
    * Returns the durability setting for the table.
    * @return durability setting for the table.
    */
+  @Override
   public Durability getDurability() {
-    if (this.durability == null) {
-      byte[] durabilityValue = getValue(DURABILITY_KEY);
-      if (durabilityValue == null) {
-        this.durability = DEFAULT_DURABLITY;
-      } else {
-        try {
-          this.durability = Durability.valueOf(Bytes.toString(durabilityValue));
-        } catch (IllegalArgumentException ex) {
-          LOG.warn("Received " + ex + " because Durability value for HTableDescriptor"
-            + " is not known. Durability:" + Bytes.toString(durabilityValue));
-          this.durability = DEFAULT_DURABLITY;
-        }
-      }
-    }
-    return this.durability;
+    return delegatee.getDurability();
   }
 
   /**
@@ -699,19 +309,9 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
    *
    * @return TableName
    */
+  @Override
   public TableName getTableName() {
-    return name;
-  }
-
-  /**
-   * Get the name of the table as a byte array.
-   *
-   * @return name of table
-   * @deprecated Use {@link #getTableName()} instead
-   */
-  @Deprecated
-  public byte[] getName() {
-    return name.getName();
+    return delegatee.getTableName();
   }
 
   /**
@@ -720,48 +320,31 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
    * @return name of table as a String
    */
   public String getNameAsString() {
-    return name.getNameAsString();
+    return delegatee.getTableName().getNameAsString();
   }
 
   /**
    * This sets the class associated with the region split policy which
    * determines when a region split should occur.  The class used by
-   * default is defined in {@link org.apache.hadoop.hbase.regionserver.RegionSplitPolicy}
+   * default is defined in org.apache.hadoop.hbase.regionserver.RegionSplitPolicy
    * @param clazz the class name
    */
   public HTableDescriptor setRegionSplitPolicyClassName(String clazz) {
-    setValue(SPLIT_POLICY, clazz);
+    getDelegateeForModification().setRegionSplitPolicyClassName(clazz);
     return this;
   }
 
   /**
    * This gets the class associated with the region split policy which
    * determines when a region split should occur.  The class used by
-   * default is defined in {@link org.apache.hadoop.hbase.regionserver.RegionSplitPolicy}
+   * default is defined in org.apache.hadoop.hbase.regionserver.RegionSplitPolicy
    *
    * @return the class name of the region split policy for this table.
    * If this returns null, the default split policy is used.
    */
+  @Override
    public String getRegionSplitPolicyClassName() {
-    return getValue(SPLIT_POLICY);
-  }
-
-  /**
-   * Set the name of the table.
-   *
-   * @param name name of table
-   */
-  @Deprecated
-  public HTableDescriptor setName(byte[] name) {
-    setName(TableName.valueOf(name));
-    return this;
-  }
-
-  @Deprecated
-  public HTableDescriptor setName(TableName name) {
-    this.name = name;
-    setMetaFlags(this.name);
-    return this;
+    return delegatee.getRegionSplitPolicyClassName();
   }
 
   /**
@@ -773,12 +356,9 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
    *
    * @see #setMaxFileSize(long)
    */
+   @Override
   public long getMaxFileSize() {
-    byte [] value = getValue(MAX_FILESIZE_KEY);
-    if (value != null) {
-      return Long.parseLong(Bytes.toString(value));
-    }
-    return -1;
+    return delegatee.getMaxFileSize();
   }
 
   /**
@@ -797,7 +377,7 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
    * before a split is triggered.
    */
   public HTableDescriptor setMaxFileSize(long maxFileSize) {
-    setValue(MAX_FILESIZE_KEY, Long.toString(maxFileSize));
+    getDelegateeForModification().setMaxFileSize(maxFileSize);
     return this;
   }
 
@@ -808,12 +388,9 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
    *
    * @see #setMemStoreFlushSize(long)
    */
+  @Override
   public long getMemStoreFlushSize() {
-    byte [] value = getValue(MEMSTORE_FLUSHSIZE_KEY);
-    if (value != null) {
-      return Long.parseLong(Bytes.toString(value));
-    }
-    return -1;
+    return delegatee.getMemStoreFlushSize();
   }
 
   /**
@@ -823,30 +400,31 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
    * @param memstoreFlushSize memory cache flush size for each hregion
    */
   public HTableDescriptor setMemStoreFlushSize(long memstoreFlushSize) {
-    setValue(MEMSTORE_FLUSHSIZE_KEY, Long.toString(memstoreFlushSize));
+    getDelegateeForModification().setMemStoreFlushSize(memstoreFlushSize);
     return this;
   }
 
   /**
    * This sets the class associated with the flush policy which determines determines the stores
    * need to be flushed when flushing a region. The class used by default is defined in
-   * {@link org.apache.hadoop.hbase.regionserver.FlushPolicy}
+   * org.apache.hadoop.hbase.regionserver.FlushPolicy.
    * @param clazz the class name
    */
   public HTableDescriptor setFlushPolicyClassName(String clazz) {
-    setValue(FLUSH_POLICY, clazz);
+    getDelegateeForModification().setFlushPolicyClassName(clazz);
     return this;
   }
 
   /**
    * This gets the class associated with the flush policy which determines the stores need to be
    * flushed when flushing a region. The class used by default is defined in
-   * {@link org.apache.hadoop.hbase.regionserver.FlushPolicy}
+   * org.apache.hadoop.hbase.regionserver.FlushPolicy.
    * @return the class name of the flush policy for this table. If this returns null, the default
    *         flush policy is used.
    */
+  @Override
   public String getFlushPolicyClassName() {
-    return getValue(FLUSH_POLICY);
+    return delegatee.getFlushPolicyClassName();
   }
 
   /**
@@ -855,14 +433,7 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
    * @param family HColumnDescriptor of family to add.
    */
   public HTableDescriptor addFamily(final HColumnDescriptor family) {
-    if (family.getName() == null || family.getName().length <= 0) {
-      throw new IllegalArgumentException("Family name cannot be null or empty");
-    }
-    if (hasFamily(family.getName())) {
-      throw new IllegalArgumentException("Family '" +
-        family.getNameAsString() + "' already exists so cannot be added");
-    }
-    this.families.put(family.getName(), family);
+    getDelegateeForModification().addColumnFamily(family);
     return this;
   }
 
@@ -872,14 +443,7 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
    * @return this (for chained invocation)
    */
   public HTableDescriptor modifyFamily(final HColumnDescriptor family) {
-    if (family.getName() == null || family.getName().length <= 0) {
-      throw new IllegalArgumentException("Family name cannot be null or empty");
-    }
-    if (!hasFamily(family.getName())) {
-      throw new IllegalArgumentException("Column family '" + family.getNameAsString()
-        + "' does not exist");
-    }
-    this.families.put(family.getName(), family);
+    getDelegateeForModification().modifyColumnFamily(family);
     return this;
   }
 
@@ -889,7 +453,7 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
    * @return true if the table contains the specified family name
    */
   public boolean hasFamily(final byte [] familyName) {
-    return families.containsKey(familyName);
+    return delegatee.hasColumnFamily(familyName);
   }
 
   /**
@@ -899,13 +463,7 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
    */
   @Override
   public String toString() {
-    StringBuilder s = new StringBuilder();
-    s.append('\'').append(Bytes.toString(name.getName())).append('\'');
-    s.append(getValues(true));
-    for (HColumnDescriptor f : families.values()) {
-      s.append(", ").append(f);
-    }
-    return s.toString();
+    return delegatee.toString();
   }
 
   /**
@@ -913,109 +471,14 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
    * descriptors (with only the non-default column family attributes)
    */
   public String toStringCustomizedValues() {
-    StringBuilder s = new StringBuilder();
-    s.append('\'').append(Bytes.toString(name.getName())).append('\'');
-    s.append(getValues(false));
-    for(HColumnDescriptor hcd : families.values()) {
-      s.append(", ").append(hcd.toStringCustomizedValues());
-    }
-    return s.toString();
+    return delegatee.toStringCustomizedValues();
   }
 
   /**
    * @return map of all table attributes formatted into string.
    */
   public String toStringTableAttributes() {
-   return getValues(true).toString();
-  }
-
-  private StringBuilder getValues(boolean printDefaults) {
-    StringBuilder s = new StringBuilder();
-
-    // step 1: set partitioning and pruning
-    Set<Bytes> reservedKeys = new TreeSet<Bytes>();
-    Set<Bytes> userKeys = new TreeSet<Bytes>();
-    for (Map.Entry<Bytes, Bytes> entry : values.entrySet()) {
-      if (entry.getKey() == null || entry.getKey().get() == null) continue;
-      String key = Bytes.toString(entry.getKey().get());
-      // in this section, print out reserved keywords + coprocessor info
-      if (!RESERVED_KEYWORDS.contains(entry.getKey()) && !key.startsWith("coprocessor$")) {
-        userKeys.add(entry.getKey());
-        continue;
-      }
-      // only print out IS_ROOT/IS_META if true
-      String value = Bytes.toString(entry.getValue().get());
-      if (key.equalsIgnoreCase(IS_ROOT) || key.equalsIgnoreCase(IS_META)) {
-        if (Boolean.valueOf(value) == false) continue;
-      }
-      // see if a reserved key is a default value. may not want to print it out
-      if (printDefaults
-          || !DEFAULT_VALUES.containsKey(key)
-          || !DEFAULT_VALUES.get(key).equalsIgnoreCase(value)) {
-        reservedKeys.add(entry.getKey());
-      }
-    }
-
-    // early exit optimization
-    boolean hasAttributes = !reservedKeys.isEmpty() || !userKeys.isEmpty();
-    if (!hasAttributes && configuration.isEmpty()) return s;
-
-    s.append(", {");
-    // step 2: printing attributes
-    if (hasAttributes) {
-      s.append("TABLE_ATTRIBUTES => {");
-
-      // print all reserved keys first
-      boolean printCommaForAttr = false;
-      for (Bytes k : reservedKeys) {
-        String key = Bytes.toString(k.get());
-        String value = Bytes.toStringBinary(values.get(k).get());
-        if (printCommaForAttr) s.append(", ");
-        printCommaForAttr = true;
-        s.append(key);
-        s.append(" => ");
-        s.append('\'').append(value).append('\'');
-      }
-
-      if (!userKeys.isEmpty()) {
-        // print all non-reserved, advanced config keys as a separate subset
-        if (printCommaForAttr) s.append(", ");
-        printCommaForAttr = true;
-        s.append(HConstants.METADATA).append(" => ");
-        s.append("{");
-        boolean printCommaForCfg = false;
-        for (Bytes k : userKeys) {
-          String key = Bytes.toString(k.get());
-          String value = Bytes.toStringBinary(values.get(k).get());
-          if (printCommaForCfg) s.append(", ");
-          printCommaForCfg = true;
-          s.append('\'').append(key).append('\'');
-          s.append(" => ");
-          s.append('\'').append(value).append('\'');
-        }
-        s.append("}");
-      }
-    }
-
-    // step 3: printing all configuration:
-    if (!configuration.isEmpty()) {
-      if (hasAttributes) {
-        s.append(", ");
-      }
-      s.append(HConstants.CONFIGURATION).append(" => ");
-      s.append('{');
-      boolean printCommaForConfig = false;
-      for (Map.Entry<String, String> e : configuration.entrySet()) {
-        if (printCommaForConfig) s.append(", ");
-        printCommaForConfig = true;
-        s.append('\'').append(e.getKey()).append('\'');
-        s.append(" => ");
-        s.append('\'').append(e.getValue()).append('\'');
-      }
-      s.append("}");
-    }
-    s.append("}"); // end METHOD
-    return s;
+   return delegatee.toStringTableAttributes();
   }
 
   /**
@@ -1032,13 +495,10 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
     if (this == obj) {
       return true;
     }
-    if (obj == null) {
-      return false;
+    if (obj instanceof HTableDescriptor) {
+      return delegatee.equals(((HTableDescriptor) obj).delegatee);
     }
-    if (!(obj instanceof HTableDescriptor)) {
-      return false;
-    }
-    return compareTo((HTableDescriptor)obj) == 0;
+    return false;
   }
 
   /**
@@ -1046,15 +506,7 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
    */
   @Override
   public int hashCode() {
-    int result = this.name.hashCode();
-    if (this.families.size() > 0) {
-      for (HColumnDescriptor e: this.families.values()) {
-        result ^= e.hashCode();
-      }
-    }
-    result ^= values.hashCode();
-    result ^= configuration.hashCode();
-    return result;
+    return delegatee.hashCode();
   }
 
   // Comparable
@@ -1068,77 +520,37 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
    */
   @Override
   public int compareTo(final HTableDescriptor other) {
-    int result = this.name.compareTo(other.name);
-    if (result == 0) {
-      result = families.size() - other.families.size();
-    }
-    if (result == 0 && families.size() != other.families.size()) {
-      result = Integer.valueOf(families.size()).compareTo(
-          Integer.valueOf(other.families.size()));
-    }
-    if (result == 0) {
-      for (Iterator<HColumnDescriptor> it = families.values().iterator(),
-          it2 = other.families.values().iterator(); it.hasNext(); ) {
-        result = it.next().compareTo(it2.next());
-        if (result != 0) {
-          break;
-        }
-      }
-    }
-    if (result == 0) {
-      // punt on comparison for ordering, just calculate difference
-      result = this.values.hashCode() - other.values.hashCode();
-      if (result < 0)
-        result = -1;
-      else if (result > 0)
-        result = 1;
-    }
-    if (result == 0) {
-      result = this.configuration.hashCode() - other.configuration.hashCode();
-      if (result < 0)
-        result = -1;
-      else if (result > 0)
-        result = 1;
-    }
-    return result;
+    return TableDescriptor.COMPARATOR.compare(this, other);
   }
 
   /**
    * Returns an unmodifiable collection of all the {@link HColumnDescriptor}
    * of all the column families of the table.
-   *
+   * @deprecated Use {@link #getColumnFamilies}.
    * @return Immutable collection of {@link HColumnDescriptor} of all the
    * column families.
    */
+  @Deprecated
   public Collection<HColumnDescriptor> getFamilies() {
-    return Collections.unmodifiableCollection(this.families.values());
+    return Stream.of(delegatee.getColumnFamilies())
+            .map(this::toHColumnDescriptor)
+            .collect(Collectors.toList());
   }
 
   /**
    * Return true if there are at least one cf whose replication scope is serial.
    */
+  @Override
   public boolean hasSerialReplicationScope() {
-    for (HColumnDescriptor column: getFamilies()){
-      if (column.getScope() == HConstants.REPLICATION_SCOPE_SERIAL){
-        return true;
-      }
-    }
-    return false;
+    return delegatee.hasSerialReplicationScope();
   }
 
   /**
    * Returns the configured replicas per region
    */
+  @Override
   public int getRegionReplication() {
-    return getIntValue(REGION_REPLICATION_KEY, DEFAULT_REGION_REPLICATION);
-  }
-
-  private int getIntValue(Bytes key, int defaultVal) {
-    byte[] val = getValue(key);
-    if (val == null || val.length == 0) {
-      return defaultVal;
-    }
-    return Integer.parseInt(Bytes.toString(val));
+    return delegatee.getRegionReplication();
   }
 
   /**
@@ -1146,16 +558,34 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
    * @param regionReplication the replication factor per region
    */
   public HTableDescriptor setRegionReplication(int regionReplication) {
-    setValue(REGION_REPLICATION_KEY,
-        new Bytes(Bytes.toBytes(Integer.toString(regionReplication))));
+    getDelegateeForModification().setRegionReplication(regionReplication);
     return this;
+  }
+
+  /**
+   * @deprecated As of release 2.0.0, this will be removed in HBase 3.0.0.
+   *             Use {@link #hasRegionMemStoreReplication()} instead
+   */
+  @Deprecated
+  public boolean hasRegionMemstoreReplication() {
+    return hasRegionMemStoreReplication();
   }
 
   /**
    * @return true if the read-replicas memstore replication is enabled.
    */
-  public boolean hasRegionMemstoreReplication() {
-    return isSomething(REGION_MEMSTORE_REPLICATION_KEY, DEFAULT_REGION_MEMSTORE_REPLICATION);
+  @Override
+  public boolean hasRegionMemStoreReplication() {
+    return delegatee.hasRegionMemStoreReplication();
+  }
+
+  /**
+   * @deprecated As of release 2.0.0, this will be removed in HBase 3.0.0.
+   *             Use {@link #setRegionMemStoreReplication(boolean)} instead
+   */
+  @Deprecated
+  public HTableDescriptor setRegionMemstoreReplication(boolean memstoreReplication) {
+    return setRegionMemStoreReplication(memstoreReplication);
   }
 
   /**
@@ -1167,22 +597,19 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
    *                            false if the secondaries can tollerate to have new
    *                                  data only when the primary flushes the memstore.
    */
-  public HTableDescriptor setRegionMemstoreReplication(boolean memstoreReplication) {
-    setValue(REGION_MEMSTORE_REPLICATION_KEY, memstoreReplication ? TRUE : FALSE);
-    // If the memstore replication is setup, we do not have to wait for observing a flush event
-    // from primary before starting to serve reads, because gaps from replication is not applicable
-    setConfiguration(RegionReplicaUtil.REGION_REPLICA_WAIT_FOR_PRIMARY_FLUSH_CONF_KEY,
-      Boolean.toString(memstoreReplication));
+  public HTableDescriptor setRegionMemStoreReplication(boolean memstoreReplication) {
+    getDelegateeForModification().setRegionMemStoreReplication(memstoreReplication);
     return this;
   }
 
   public HTableDescriptor setPriority(int priority) {
-    setValue(PRIORITY_KEY, Integer.toString(priority));
+    getDelegateeForModification().setPriority(priority);
     return this;
   }
 
+  @Override
   public int getPriority() {
-    return getIntValue(PRIORITY_KEY, DEFAULT_PRIORITY);
+    return delegatee.getPriority();
   }
 
   /**
@@ -1192,9 +619,23 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
    * family names of the table.
    *
    * @return Immutable sorted set of the keys of the families.
+   * @deprecated As of release 2.0.0, this will be removed in HBase 3.0.0
+   *             (<a href="https://issues.apache.org/jira/browse/HBASE-18008">HBASE-18008</a>).
+   *             Use {@link #getColumnFamilyNames()}.
    */
+  @Deprecated
   public Set<byte[]> getFamiliesKeys() {
-    return Collections.unmodifiableSet(this.families.keySet());
+    return delegatee.getColumnFamilyNames();
+  }
+
+  /**
+   * Returns the count of the column families of the table.
+   *
+   * @return Count of column families of the table
+   */
+  @Override
+  public int getColumnFamilyCount() {
+    return delegatee.getColumnFamilyCount();
   }
 
   /**
@@ -1205,22 +646,25 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
    *
    * @see #getFamilies()
    */
+  @Deprecated
+  @Override
   public HColumnDescriptor[] getColumnFamilies() {
-    Collection<HColumnDescriptor> hColumnDescriptors = getFamilies();
-    return hColumnDescriptors.toArray(new HColumnDescriptor[hColumnDescriptors.size()]);
+    return Stream.of(delegatee.getColumnFamilies())
+            .map(this::toHColumnDescriptor)
+            .toArray(size -> new HColumnDescriptor[size]);
   }
-
 
   /**
    * Returns the HColumnDescriptor for a specific column family with name as
    * specified by the parameter column.
-   *
    * @param column Column family name
    * @return Column descriptor for the passed family name or the family on
    * passed in column.
+   * @deprecated Use {@link #getColumnFamily(byte[])}.
    */
-  public HColumnDescriptor getFamily(final byte [] column) {
-    return this.families.get(column);
+  @Deprecated
+  public HColumnDescriptor getFamily(final byte[] column) {
+    return toHColumnDescriptor(delegatee.getColumnFamily(column));
   }
 
 
@@ -1233,13 +677,29 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
    * passed in column.
    */
   public HColumnDescriptor removeFamily(final byte [] column) {
-    return this.families.remove(column);
+    return toHColumnDescriptor(getDelegateeForModification().removeColumnFamily(column));
+  }
+
+  /**
+   * Return a HColumnDescriptor for user to keep the compatibility as much as possible.
+   * @param desc read-only ColumnFamilyDescriptor
+   * @return The older implementation of ColumnFamilyDescriptor
+   */
+  protected HColumnDescriptor toHColumnDescriptor(ColumnFamilyDescriptor desc) {
+    if (desc == null) {
+      return null;
+    } else if (desc instanceof ModifyableColumnFamilyDescriptor) {
+      return new HColumnDescriptor((ModifyableColumnFamilyDescriptor) desc);
+    } else if (desc instanceof HColumnDescriptor) {
+      return (HColumnDescriptor) desc;
+    } else {
+      return new HColumnDescriptor(new ModifyableColumnFamilyDescriptor(desc));
+    }
   }
 
   /**
    * Add a table coprocessor to this table. The coprocessor
-   * type must be {@link org.apache.hadoop.hbase.coprocessor.RegionObserver}
-   * or Endpoint.
+   * type must be org.apache.hadoop.hbase.coprocessor.RegionCoprocessor.
    * It won't check if the class can be loaded or not.
    * Whether a coprocessor is loadable or not will be determined when
    * a region is opened.
@@ -1247,14 +707,13 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
    * @throws IOException
    */
   public HTableDescriptor addCoprocessor(String className) throws IOException {
-    addCoprocessor(className, null, Coprocessor.PRIORITY_USER, null);
+    getDelegateeForModification().addCoprocessor(className);
     return this;
   }
 
   /**
    * Add a table coprocessor to this table. The coprocessor
-   * type must be {@link org.apache.hadoop.hbase.coprocessor.RegionObserver}
-   * or Endpoint.
+   * type must be org.apache.hadoop.hbase.coprocessor.RegionCoprocessor.
    * It won't check if the class can be loaded or not.
    * Whether a coprocessor is loadable or not will be determined when
    * a region is opened.
@@ -1268,38 +727,13 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
   public HTableDescriptor addCoprocessor(String className, Path jarFilePath,
                              int priority, final Map<String, String> kvs)
   throws IOException {
-    checkHasCoprocessor(className);
-
-    // Validate parameter kvs and then add key/values to kvString.
-    StringBuilder kvString = new StringBuilder();
-    if (kvs != null) {
-      for (Map.Entry<String, String> e: kvs.entrySet()) {
-        if (!e.getKey().matches(HConstants.CP_HTD_ATTR_VALUE_PARAM_KEY_PATTERN)) {
-          throw new IOException("Illegal parameter key = " + e.getKey());
-        }
-        if (!e.getValue().matches(HConstants.CP_HTD_ATTR_VALUE_PARAM_VALUE_PATTERN)) {
-          throw new IOException("Illegal parameter (" + e.getKey() +
-              ") value = " + e.getValue());
-        }
-        if (kvString.length() != 0) {
-          kvString.append(',');
-        }
-        kvString.append(e.getKey());
-        kvString.append('=');
-        kvString.append(e.getValue());
-      }
-    }
-
-    String value = ((jarFilePath == null)? "" : jarFilePath.toString()) +
-        "|" + className + "|" + Integer.toString(priority) + "|" +
-        kvString.toString();
-    return addCoprocessorToMap(value);
+    getDelegateeForModification().addCoprocessor(className, jarFilePath, priority, kvs);
+    return this;
   }
 
   /**
    * Add a table coprocessor to this table. The coprocessor
-   * type must be {@link org.apache.hadoop.hbase.coprocessor.RegionObserver}
-   * or Endpoint.
+   * type must be org.apache.hadoop.hbase.coprocessor.RegionCoprocessor.
    * It won't check if the class can be loaded or not.
    * Whether a coprocessor is loadable or not will be determined when
    * a region is opened.
@@ -1308,42 +742,7 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
    * @throws IOException
    */
   public HTableDescriptor addCoprocessorWithSpec(final String specStr) throws IOException {
-    String className = getCoprocessorClassNameFromSpecStr(specStr);
-    if (className == null) {
-      throw new IllegalArgumentException("Format does not match " +
-        HConstants.CP_HTD_ATTR_VALUE_PATTERN + ": " + specStr);
-    }
-    checkHasCoprocessor(className);
-    return addCoprocessorToMap(specStr);
-  }
-
-  private void checkHasCoprocessor(final String className) throws IOException {
-    if (hasCoprocessor(className)) {
-      throw new IOException("Coprocessor " + className + " already exists.");
-    }
-  }
-
-  /**
-   * Add coprocessor to values Map
-   * @param specStr The Coprocessor specification all in in one String formatted so matches
-   * {@link HConstants#CP_HTD_ATTR_VALUE_PATTERN}
-   * @return Returns <code>this</code>
-   */
-  private HTableDescriptor addCoprocessorToMap(final String specStr) {
-    if (specStr == null) return this;
-    // generate a coprocessor key
-    int maxCoprocessorNumber = 0;
-    Matcher keyMatcher;
-    for (Map.Entry<Bytes, Bytes> e: this.values.entrySet()) {
-      keyMatcher = HConstants.CP_HTD_ATTR_KEY_PATTERN.matcher(Bytes.toString(e.getKey().get()));
-      if (!keyMatcher.matches()) {
-        continue;
-      }
-      maxCoprocessorNumber = Math.max(Integer.parseInt(keyMatcher.group(1)), maxCoprocessorNumber);
-    }
-    maxCoprocessorNumber++;
-    String key = "coprocessor$" + Integer.toString(maxCoprocessorNumber);
-    this.values.put(new Bytes(Bytes.toBytes(key)), new Bytes(Bytes.toBytes(specStr)));
+    getDelegateeForModification().addCoprocessorWithSpec(specStr);
     return this;
   }
 
@@ -1353,23 +752,9 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
    * @param classNameToMatch - Class name of the co-processor
    * @return true of the table has a co-processor className
    */
+  @Override
   public boolean hasCoprocessor(String classNameToMatch) {
-    Matcher keyMatcher;
-    for (Map.Entry<Bytes, Bytes> e :
-        this.values.entrySet()) {
-      keyMatcher =
-          HConstants.CP_HTD_ATTR_KEY_PATTERN.matcher(
-              Bytes.toString(e.getKey().get()));
-      if (!keyMatcher.matches()) {
-        continue;
-      }
-      String className = getCoprocessorClassNameFromSpecStr(Bytes.toString(e.getValue().get()));
-      if (className == null) continue;
-      if (className.equals(classNameToMatch.trim())) {
-        return true;
-      }
-    }
-    return false;
+    return delegatee.hasCoprocessor(classNameToMatch);
   }
 
   /**
@@ -1377,29 +762,9 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
    *
    * @return The list of co-processors classNames
    */
+  @Override
   public List<String> getCoprocessors() {
-    List<String> result = new ArrayList<String>();
-    Matcher keyMatcher;
-    for (Map.Entry<Bytes, Bytes> e : this.values.entrySet()) {
-      keyMatcher = HConstants.CP_HTD_ATTR_KEY_PATTERN.matcher(Bytes.toString(e.getKey().get()));
-      if (!keyMatcher.matches()) {
-        continue;
-      }
-      String className = getCoprocessorClassNameFromSpecStr(Bytes.toString(e.getValue().get()));
-      if (className == null) continue;
-      result.add(className); // classname is the 2nd field
-    }
-    return result;
-  }
-
-  /**
-   * @param spec String formatted as per {@link HConstants#CP_HTD_ATTR_VALUE_PATTERN}
-   * @return Class parsed from passed in <code>spec</code> or null if no match or classpath found
-   */
-  private static String getCoprocessorClassNameFromSpecStr(final String spec) {
-    Matcher matcher = HConstants.CP_HTD_ATTR_VALUE_PATTERN.matcher(spec);
-    // Classname is the 2nd field
-    return matcher != null && matcher.matches()? matcher.group(2).trim(): null;
+    return delegatee.getCoprocessors();
   }
 
   /**
@@ -1407,97 +772,34 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
    * @param className Class name of the co-processor
    */
   public void removeCoprocessor(String className) {
-    Bytes match = null;
-    Matcher keyMatcher;
-    Matcher valueMatcher;
-    for (Map.Entry<Bytes, Bytes> e : this.values
-        .entrySet()) {
-      keyMatcher = HConstants.CP_HTD_ATTR_KEY_PATTERN.matcher(Bytes.toString(e
-          .getKey().get()));
-      if (!keyMatcher.matches()) {
-        continue;
-      }
-      valueMatcher = HConstants.CP_HTD_ATTR_VALUE_PATTERN.matcher(Bytes
-          .toString(e.getValue().get()));
-      if (!valueMatcher.matches()) {
-        continue;
-      }
-      // get className and compare
-      String clazz = valueMatcher.group(2).trim(); // classname is the 2nd field
-      // remove the CP if it is present
-      if (clazz.equals(className.trim())) {
-        match = e.getKey();
-        break;
-      }
-    }
-    // if we found a match, remove it
-    if (match != null)
-      remove(match);
+    getDelegateeForModification().removeCoprocessor(className);
   }
 
-  /**
-   * Returns the {@link Path} object representing the table directory under
-   * path rootdir
-   *
-   * Deprecated use FSUtils.getTableDir() instead.
-   *
-   * @param rootdir qualified path of HBase root directory
-   * @param tableName name of table
-   * @return {@link Path} for table
-   */
-  @Deprecated
-  public static Path getTableDir(Path rootdir, final byte [] tableName) {
-    //This is bad I had to mirror code from FSUTils.getTableDir since
-    //there is no module dependency between hbase-client and hbase-server
-    TableName name = TableName.valueOf(tableName);
-    return new Path(rootdir, new Path(HConstants.BASE_NAMESPACE_DIR,
-              new Path(name.getNamespaceAsString(), new Path(name.getQualifierAsString()))));
-  }
-
-  public final static String NAMESPACE_FAMILY_INFO = "info";
-  public final static byte[] NAMESPACE_FAMILY_INFO_BYTES = Bytes.toBytes(NAMESPACE_FAMILY_INFO);
-  public final static byte[] NAMESPACE_COL_DESC_BYTES = Bytes.toBytes("d");
+  public final static String NAMESPACE_FAMILY_INFO = TableDescriptorBuilder.NAMESPACE_FAMILY_INFO;
+  public final static byte[] NAMESPACE_FAMILY_INFO_BYTES = TableDescriptorBuilder.NAMESPACE_FAMILY_INFO_BYTES;
+  public final static byte[] NAMESPACE_COL_DESC_BYTES = TableDescriptorBuilder.NAMESPACE_COL_DESC_BYTES;
 
   /** Table descriptor for namespace table */
-  public static final HTableDescriptor NAMESPACE_TABLEDESC = new HTableDescriptor(
-      TableName.NAMESPACE_TABLE_NAME,
-      new HColumnDescriptor[] {
-          new HColumnDescriptor(NAMESPACE_FAMILY_INFO)
-              // Ten is arbitrary number.  Keep versions to help debugging.
-              .setMaxVersions(10)
-              .setInMemory(true)
-              .setBlocksize(8 * 1024)
-              .setScope(HConstants.REPLICATION_SCOPE_LOCAL)
-              // Enable cache of data blocks in L1 if more than one caching tier deployed:
-              // e.g. if using CombinedBlockCache (BucketCache).
-              .setCacheDataInL1(true)
-      });
+  public static final HTableDescriptor NAMESPACE_TABLEDESC
+    = new HTableDescriptor(TableDescriptorBuilder.NAMESPACE_TABLEDESC);
 
   @Deprecated
   public HTableDescriptor setOwner(User owner) {
-    return setOwnerString(owner != null ? owner.getShortName() : null);
+    getDelegateeForModification().setOwner(owner);
+    return this;
   }
 
   // used by admin.rb:alter(table_name,*args) to update owner.
   @Deprecated
   public HTableDescriptor setOwnerString(String ownerString) {
-    if (ownerString != null) {
-      setValue(OWNER_KEY, ownerString);
-    } else {
-      remove(OWNER_KEY);
-    }
+    getDelegateeForModification().setOwnerString(ownerString);
     return this;
   }
 
+  @Override
   @Deprecated
   public String getOwnerString() {
-    if (getValue(OWNER_KEY) != null) {
-      return Bytes.toString(getValue(OWNER_KEY));
-    }
-    // Note that every table should have an owner (i.e. should have OWNER_KEY set).
-    // hbase:meta and -ROOT- should return system user as owner, not null (see
-    // MasterFileSystem.java:bootstrap()).
-    return null;
+    return delegatee.getOwnerString();
   }
 
   /**
@@ -1505,7 +807,7 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
    * @see #parseFrom(byte[])
    */
   public byte[] toByteArray() {
-    return ProtobufUtil.prependPBMagic(ProtobufUtil.convertToTableSchema(this).toByteArray());
+    return TableDescriptorBuilder.toByteArray(delegatee);
   }
 
   /**
@@ -1517,54 +819,80 @@ public class HTableDescriptor implements Comparable<HTableDescriptor> {
    */
   public static HTableDescriptor parseFrom(final byte [] bytes)
   throws DeserializationException, IOException {
-    if (!ProtobufUtil.isPBMagicPrefix(bytes)) {
-      throw new DeserializationException("Expected PB encoded HTableDescriptor");
+    TableDescriptor desc = TableDescriptorBuilder.parseFrom(bytes);
+    if (desc instanceof ModifyableTableDescriptor) {
+      return new HTableDescriptor((ModifyableTableDescriptor) desc);
+    } else {
+      return new HTableDescriptor(desc);
     }
-    int pblen = ProtobufUtil.lengthOfPBMagic();
-    TableSchema.Builder builder = TableSchema.newBuilder();
-    TableSchema ts;
-    try {
-      ProtobufUtil.mergeFrom(builder, bytes, pblen, bytes.length - pblen);
-      ts = builder.build();
-    } catch (IOException e) {
-      throw new DeserializationException(e);
-    }
-    return ProtobufUtil.convertToHTableDesc(ts);
   }
 
   /**
    * Getter for accessing the configuration value by key
    */
   public String getConfigurationValue(String key) {
-    return configuration.get(key);
+    return delegatee.getValue(key);
   }
 
   /**
-   * Getter for fetching an unmodifiable {@link #configuration} map.
+   * Getter for fetching an unmodifiable map.
    */
   public Map<String, String> getConfiguration() {
-    // shallow pointer copy
-    return Collections.unmodifiableMap(configuration);
+    return delegatee.getValues().entrySet().stream()
+            .collect(Collectors.toMap(
+                    e -> Bytes.toString(e.getKey().get(), e.getKey().getOffset(), e.getKey().getLength()),
+                    e -> Bytes.toString(e.getValue().get(), e.getValue().getOffset(), e.getValue().getLength())
+            ));
   }
 
   /**
-   * Setter for storing a configuration setting in {@link #configuration} map.
+   * Setter for storing a configuration setting in map.
    * @param key Config key. Same as XML config key e.g. hbase.something.or.other.
    * @param value String value. If null, removes the setting.
    */
   public HTableDescriptor setConfiguration(String key, String value) {
-    if (value == null) {
-      removeConfiguration(key);
-    } else {
-      configuration.put(key, value);
-    }
+    getDelegateeForModification().setValue(key, value);
     return this;
   }
 
   /**
-   * Remove a config setting represented by the key from the {@link #configuration} map
+   * Remove a config setting represented by the key from the map
    */
   public void removeConfiguration(final String key) {
-    configuration.remove(key);
+    getDelegateeForModification().removeValue(Bytes.toBytes(key));
+  }
+
+  @Override
+  public Bytes getValue(Bytes key) {
+    return delegatee.getValue(key);
+  }
+
+  @Override
+  public String getValue(String key) {
+    return delegatee.getValue(key);
+  }
+
+  @Override
+  public byte[] getValue(byte[] key) {
+    return delegatee.getValue(key);
+  }
+
+  @Override
+  public Set<byte[]> getColumnFamilyNames() {
+    return delegatee.getColumnFamilyNames();
+  }
+
+  @Override
+  public boolean hasColumnFamily(byte[] name) {
+    return delegatee.hasColumnFamily(name);
+  }
+
+  @Override
+  public ColumnFamilyDescriptor getColumnFamily(byte[] name) {
+    return delegatee.getColumnFamily(name);
+  }
+
+  protected ModifyableTableDescriptor getDelegateeForModification() {
+    return delegatee;
   }
 }

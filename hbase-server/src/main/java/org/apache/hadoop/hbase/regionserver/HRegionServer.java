@@ -1,5 +1,4 @@
-/**
- *
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -18,10 +17,12 @@
  */
 package org.apache.hadoop.hbase.regionserver;
 
+import javax.management.MalformedObjectNameException;
+import javax.management.ObjectName;
+import javax.servlet.http.HttpServlet;
 import java.io.IOException;
-import java.io.InterruptedIOException;
 import java.lang.Thread.UncaughtExceptionHandler;
-import java.lang.management.ManagementFactory;
+import java.lang.management.MemoryType;
 import java.lang.management.MemoryUsage;
 import java.lang.reflect.Constructor;
 import java.net.BindException;
@@ -31,12 +32,12 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Objects;
 import java.util.Set;
 import java.util.SortedMap;
 import java.util.TreeMap;
@@ -47,31 +48,27 @@ import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.function.Function;
 
-import javax.management.MalformedObjectNameException;
-import javax.management.ObjectName;
-import javax.servlet.http.HttpServlet;
-
-import org.apache.commons.lang.SystemUtils;
-import org.apache.commons.lang.math.RandomUtils;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.apache.commons.lang3.RandomUtils;
+import org.apache.commons.lang3.SystemUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hbase.Abortable;
+import org.apache.hadoop.hbase.CacheEvictionStats;
 import org.apache.hadoop.hbase.ChoreService;
 import org.apache.hadoop.hbase.ClockOutOfSyncException;
 import org.apache.hadoop.hbase.CoordinatedStateManager;
-import org.apache.hadoop.hbase.CoordinatedStateManagerFactory;
+import org.apache.hadoop.hbase.DoNotRetryIOException;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.HBaseInterfaceAudience;
 import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.HealthCheckChore;
 import org.apache.hadoop.hbase.MetaTableAccessor;
 import org.apache.hadoop.hbase.NotServingRegionException;
+import org.apache.hadoop.hbase.PleaseHoldException;
 import org.apache.hadoop.hbase.ScheduledChore;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.Stoppable;
@@ -79,17 +76,20 @@ import org.apache.hadoop.hbase.TableDescriptors;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.YouAreDeadException;
 import org.apache.hadoop.hbase.ZNodeClearer;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.client.ClusterConnection;
 import org.apache.hadoop.hbase.client.Connection;
 import org.apache.hadoop.hbase.client.ConnectionUtils;
-import org.apache.hadoop.hbase.client.NonceGenerator;
 import org.apache.hadoop.hbase.client.Put;
+import org.apache.hadoop.hbase.client.RegionInfo;
+import org.apache.hadoop.hbase.client.RegionInfoBuilder;
 import org.apache.hadoop.hbase.client.RpcRetryingCallerFactory;
+import org.apache.hadoop.hbase.client.TableDescriptorBuilder;
+import org.apache.hadoop.hbase.client.locking.EntityLock;
+import org.apache.hadoop.hbase.client.locking.LockServiceClient;
 import org.apache.hadoop.hbase.conf.ConfigurationManager;
 import org.apache.hadoop.hbase.conf.ConfigurationObserver;
-import org.apache.hadoop.hbase.coordination.BaseCoordinatedStateManager;
 import org.apache.hadoop.hbase.coordination.SplitLogWorkerCoordination;
+import org.apache.hadoop.hbase.coordination.ZkCoordinatedStateManager;
 import org.apache.hadoop.hbase.coprocessor.CoprocessorHost;
 import org.apache.hadoop.hbase.exceptions.RegionMovedException;
 import org.apache.hadoop.hbase.exceptions.RegionOpeningException;
@@ -98,24 +98,33 @@ import org.apache.hadoop.hbase.executor.ExecutorService;
 import org.apache.hadoop.hbase.executor.ExecutorType;
 import org.apache.hadoop.hbase.fs.HFileSystem;
 import org.apache.hadoop.hbase.http.InfoServer;
+import org.apache.hadoop.hbase.io.hfile.BlockCache;
 import org.apache.hadoop.hbase.io.hfile.CacheConfig;
 import org.apache.hadoop.hbase.io.hfile.HFile;
+import org.apache.hadoop.hbase.io.util.MemorySizeUtil;
 import org.apache.hadoop.hbase.ipc.CoprocessorRpcUtils;
+import org.apache.hadoop.hbase.ipc.NettyRpcClientConfigHelper;
 import org.apache.hadoop.hbase.ipc.RpcClient;
 import org.apache.hadoop.hbase.ipc.RpcClientFactory;
 import org.apache.hadoop.hbase.ipc.RpcControllerFactory;
+import org.apache.hadoop.hbase.ipc.RpcServer;
 import org.apache.hadoop.hbase.ipc.RpcServerInterface;
 import org.apache.hadoop.hbase.ipc.ServerNotRunningYetException;
 import org.apache.hadoop.hbase.ipc.ServerRpcController;
+import org.apache.hadoop.hbase.log.HBaseMarkers;
 import org.apache.hadoop.hbase.master.HMaster;
+import org.apache.hadoop.hbase.master.LoadBalancer;
 import org.apache.hadoop.hbase.master.RegionState.State;
-import org.apache.hadoop.hbase.master.TableLockManager;
-import org.apache.hadoop.hbase.master.balancer.BaseLoadBalancer;
 import org.apache.hadoop.hbase.mob.MobCacheConfig;
 import org.apache.hadoop.hbase.procedure.RegionServerProcedureManagerHost;
-import org.apache.hadoop.hbase.quotas.RegionServerQuotaManager;
+import org.apache.hadoop.hbase.quotas.FileSystemUtilizationChore;
+import org.apache.hadoop.hbase.quotas.QuotaUtil;
+import org.apache.hadoop.hbase.quotas.RegionServerRpcQuotaManager;
+import org.apache.hadoop.hbase.quotas.RegionServerSpaceQuotaManager;
 import org.apache.hadoop.hbase.regionserver.compactions.CompactionConfiguration;
+import org.apache.hadoop.hbase.regionserver.compactions.CompactionLifeCycleTracker;
 import org.apache.hadoop.hbase.regionserver.compactions.CompactionProgress;
+import org.apache.hadoop.hbase.regionserver.compactions.CompactionRequester;
 import org.apache.hadoop.hbase.regionserver.handler.CloseMetaHandler;
 import org.apache.hadoop.hbase.regionserver.handler.CloseRegionHandler;
 import org.apache.hadoop.hbase.regionserver.handler.RegionReplicaFlushHandler;
@@ -123,13 +132,55 @@ import org.apache.hadoop.hbase.regionserver.throttle.FlushThroughputControllerFa
 import org.apache.hadoop.hbase.regionserver.throttle.ThroughputController;
 import org.apache.hadoop.hbase.regionserver.wal.MetricsWAL;
 import org.apache.hadoop.hbase.regionserver.wal.WALActionsListener;
+import org.apache.hadoop.hbase.replication.regionserver.Replication;
 import org.apache.hadoop.hbase.replication.regionserver.ReplicationLoad;
 import org.apache.hadoop.hbase.security.Superusers;
+import org.apache.hadoop.hbase.security.User;
 import org.apache.hadoop.hbase.security.UserProvider;
-import org.apache.hadoop.hbase.shaded.com.google.protobuf.BlockingRpcChannel;
-import org.apache.hadoop.hbase.shaded.com.google.protobuf.RpcController;
-import org.apache.hadoop.hbase.shaded.com.google.protobuf.ServiceException;
-import org.apache.hadoop.hbase.shaded.com.google.protobuf.UnsafeByteOperations;
+import org.apache.hadoop.hbase.trace.SpanReceiverHost;
+import org.apache.hadoop.hbase.trace.TraceUtil;
+import org.apache.hadoop.hbase.util.Addressing;
+import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.hadoop.hbase.util.CompressionTest;
+import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
+import org.apache.hadoop.hbase.util.FSTableDescriptors;
+import org.apache.hadoop.hbase.util.FSUtils;
+import org.apache.hadoop.hbase.util.HasThread;
+import org.apache.hadoop.hbase.util.JvmPauseMonitor;
+import org.apache.hadoop.hbase.util.NettyEventLoopGroupConfig;
+import org.apache.hadoop.hbase.util.Pair;
+import org.apache.hadoop.hbase.util.ServerRegionReplicaUtil;
+import org.apache.hadoop.hbase.util.Sleeper;
+import org.apache.hadoop.hbase.util.Threads;
+import org.apache.hadoop.hbase.util.VersionInfo;
+import org.apache.hadoop.hbase.wal.AbstractFSWALProvider;
+import org.apache.hadoop.hbase.wal.NettyAsyncFSWALConfigHelper;
+import org.apache.hadoop.hbase.wal.WAL;
+import org.apache.hadoop.hbase.wal.WALFactory;
+import org.apache.hadoop.hbase.zookeeper.ClusterStatusTracker;
+import org.apache.hadoop.hbase.zookeeper.MasterAddressTracker;
+import org.apache.hadoop.hbase.zookeeper.MetaTableLocator;
+import org.apache.hadoop.hbase.zookeeper.ZKClusterId;
+import org.apache.hadoop.hbase.zookeeper.ZKNodeTracker;
+import org.apache.hadoop.hbase.zookeeper.ZKUtil;
+import org.apache.hadoop.hbase.zookeeper.ZKWatcher;
+import org.apache.hadoop.hbase.zookeeper.ZNodePaths;
+import org.apache.hadoop.ipc.RemoteException;
+import org.apache.hadoop.metrics2.util.MBeans;
+import org.apache.hadoop.util.ReflectionUtils;
+import org.apache.hadoop.util.StringUtils;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.apache.zookeeper.KeeperException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
+import org.apache.hbase.thirdparty.com.google.common.base.Preconditions;
+import org.apache.hbase.thirdparty.com.google.common.collect.Maps;
+import org.apache.hbase.thirdparty.com.google.protobuf.BlockingRpcChannel;
+import org.apache.hbase.thirdparty.com.google.protobuf.RpcController;
+import org.apache.hbase.thirdparty.com.google.protobuf.ServiceException;
+import org.apache.hbase.thirdparty.com.google.protobuf.TextFormat;
+import org.apache.hbase.thirdparty.com.google.protobuf.UnsafeByteOperations;
 import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.shaded.protobuf.RequestConverter;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos.CoprocessorServiceCall;
@@ -144,59 +195,20 @@ import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos.NameStringP
 import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos.RegionServerInfo;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos.RegionSpecifier;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos.RegionSpecifier.RegionSpecifierType;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProtos.GetProcedureResultRequest;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProtos.GetProcedureResultResponse;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.LockServiceProtos.LockService;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos.GetLastFlushedSequenceIdRequest;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos.GetLastFlushedSequenceIdResponse;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos.RegionServerReportRequest;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos.RegionServerStartupRequest;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos.RegionServerStartupResponse;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos.RegionServerStatusService;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos.RegionSpaceUse;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos.RegionSpaceUseReportRequest;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos.RegionStateTransition;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos.RegionStateTransition.TransitionCode;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos.ReportRSFatalErrorRequest;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos.ReportRegionStateTransitionRequest;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos.ReportRegionStateTransitionResponse;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos.SplitTableRegionRequest;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos.SplitTableRegionResponse;
-import org.apache.hadoop.hbase.trace.SpanReceiverHost;
-import org.apache.hadoop.hbase.util.Addressing;
-import org.apache.hadoop.hbase.util.Bytes;
-import org.apache.hadoop.hbase.util.CompressionTest;
-import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
-import org.apache.hadoop.hbase.util.FSTableDescriptors;
-import org.apache.hadoop.hbase.util.FSUtils;
-import org.apache.hadoop.hbase.util.ForeignExceptionUtil;
-import org.apache.hadoop.hbase.util.HasThread;
-import org.apache.hadoop.hbase.util.JSONBean;
-import org.apache.hadoop.hbase.util.JvmPauseMonitor;
-import org.apache.hadoop.hbase.util.ServerRegionReplicaUtil;
-import org.apache.hadoop.hbase.util.Sleeper;
-import org.apache.hadoop.hbase.util.Threads;
-import org.apache.hadoop.hbase.util.VersionInfo;
-import org.apache.hadoop.hbase.wal.AbstractFSWALProvider;
-import org.apache.hadoop.hbase.wal.WAL;
-import org.apache.hadoop.hbase.wal.WALFactory;
-import org.apache.hadoop.hbase.zookeeper.ClusterStatusTracker;
-import org.apache.hadoop.hbase.zookeeper.MasterAddressTracker;
-import org.apache.hadoop.hbase.zookeeper.MetaTableLocator;
-import org.apache.hadoop.hbase.zookeeper.RecoveringRegionWatcher;
-import org.apache.hadoop.hbase.zookeeper.ZKClusterId;
-import org.apache.hadoop.hbase.zookeeper.ZKSplitLog;
-import org.apache.hadoop.hbase.zookeeper.ZKUtil;
-import org.apache.hadoop.hbase.zookeeper.ZooKeeperNodeTracker;
-import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher;
-import org.apache.hadoop.ipc.RemoteException;
-import org.apache.hadoop.metrics2.util.MBeans;
-import org.apache.hadoop.util.ReflectionUtils;
-import org.apache.hadoop.util.StringUtils;
-import org.apache.zookeeper.KeeperException;
-import org.apache.zookeeper.KeeperException.NoNodeException;
-import org.apache.zookeeper.data.Stat;
-
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Preconditions;
-import com.google.common.collect.Maps;
 
 import sun.misc.Signal;
 import sun.misc.SignalHandler;
@@ -206,30 +218,26 @@ import sun.misc.SignalHandler;
  * the HMaster. There are many HRegionServers in a single HBase deployment.
  */
 @InterfaceAudience.LimitedPrivate(HBaseInterfaceAudience.TOOLS)
-@SuppressWarnings({ "deprecation", "restriction" })
+@SuppressWarnings({ "deprecation"})
 public class HRegionServer extends HasThread implements
     RegionServerServices, LastSequenceId, ConfigurationObserver {
+  // Time to pause if master says 'please hold'. Make configurable if needed.
+  private static final int INIT_PAUSE_TIME_MS = 1000;
 
-  private static final Log LOG = LogFactory.getLog(HRegionServer.class);
+  private static final Logger LOG = LoggerFactory.getLogger(HRegionServer.class);
 
   /**
    * For testing only!  Set to true to skip notifying region assignment to master .
    */
+  @VisibleForTesting
   @edu.umd.cs.findbugs.annotations.SuppressWarnings(value="MS_SHOULD_BE_FINAL")
   public static boolean TEST_SKIP_REPORTING_TRANSITION = false;
-
-  /*
-   * Strings to be used in forming the exception message for
-   * RegionsAlreadyInTransitionException.
-   */
-  protected static final String OPEN = "OPEN";
-  protected static final String CLOSE = "CLOSE";
 
   //RegionName vs current action in progress
   //true - if open region action in progress
   //false - if close region action in progress
   protected final ConcurrentMap<byte[], Boolean> regionsInTransitionInRS =
-    new ConcurrentSkipListMap<byte[], Boolean>(Bytes.BYTES_COMPARATOR);
+    new ConcurrentSkipListMap<>(Bytes.BYTES_COMPARATOR);
 
   // Cache flushing
   protected MemStoreFlusher cacheFlusher;
@@ -252,10 +260,6 @@ public class HRegionServer extends HasThread implements
    */
   protected MetaTableLocator metaTableLocator;
 
-  // Watch if a region is out of recovering state from ZooKeeper
-  @SuppressWarnings("unused")
-  private RecoveringRegionWatcher recoveringRegionWatcher;
-
   /**
    * Go here to get table descriptors.
    */
@@ -266,13 +270,13 @@ public class HRegionServer extends HasThread implements
   protected ReplicationSinkService replicationSinkHandler;
 
   // Compactions
-  public CompactSplitThread compactSplitThread;
+  public CompactSplit compactSplitThread;
 
   /**
    * Map of regions currently being served by this region server. Key is the
    * encoded region name.  All access should be synchronized.
    */
-  protected final Map<String, Region> onlineRegions = new ConcurrentHashMap<String, Region>();
+  protected final Map<String, HRegion> onlineRegions = new ConcurrentHashMap<>();
 
   /**
    * Map of encoded region names to the DataNode locations they should be hosted on
@@ -284,24 +288,18 @@ public class HRegionServer extends HasThread implements
    * and here we really mean DataNode locations.
    */
   protected final Map<String, InetSocketAddress[]> regionFavoredNodesMap =
-      new ConcurrentHashMap<String, InetSocketAddress[]>();
-
-  /**
-   * Set of regions currently being in recovering state which means it can accept writes(edits from
-   * previous failed region server) but not reads. A recovering region is also an online region.
-   */
-  protected final Map<String, Region> recoveringRegions = Collections
-      .synchronizedMap(new HashMap<String, Region>());
+      new ConcurrentHashMap<>();
 
   // Leases
   protected Leases leases;
 
-  // Instance of the hbase executor service.
-  protected ExecutorService service;
+  // Instance of the hbase executor executorService.
+  protected ExecutorService executorService;
 
   // If false, the file system has become unavailable
   protected volatile boolean fsOk;
   protected HFileSystem fs;
+  protected HFileSystem walFs;
 
   // Set when a report to the master comes back with a message asking us to
   // shutdown. Also set by call to stop when debugging or running unit tests
@@ -312,17 +310,18 @@ public class HRegionServer extends HasThread implements
   // debugging and unit tests.
   private volatile boolean abortRequested;
 
-  ConcurrentMap<String, Integer> rowlocks = new ConcurrentHashMap<String, Integer>();
+  ConcurrentMap<String, Integer> rowlocks = new ConcurrentHashMap<>();
 
   // A state before we go into stopped state.  At this stage we're closing user
   // space regions.
   private boolean stopping = false;
 
-  private volatile boolean killed = false;
+  volatile boolean killed = false;
 
   protected final Configuration conf;
 
   private Path rootDir;
+  private Path walRootDir;
 
   protected final ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
 
@@ -334,6 +333,7 @@ public class HRegionServer extends HasThread implements
 
   // Stub to do region server status calls against the master.
   private volatile RegionServerStatusService.BlockingInterface rssStub;
+  private volatile LockService.BlockingInterface lockStub;
   // RPC client. Used to make the stub above that does region server status checking.
   RpcClient rpcClient;
 
@@ -358,7 +358,7 @@ public class HRegionServer extends HasThread implements
   /**
    * ChoreService used to schedule tasks that we want to run periodically
    */
-  private final ChoreService choreService;
+  private ChoreService choreService;
 
   /*
    * Check for compactions requests.
@@ -374,13 +374,13 @@ public class HRegionServer extends HasThread implements
 
   // WAL roller. log is protected rather than private to avoid
   // eclipse warning when accessed by inner classes
-  final LogRoller walRoller;
+  protected LogRoller walRoller;
 
   // flag set after we're done setting up server threads
   final AtomicBoolean online = new AtomicBoolean(false);
 
   // zookeeper connection and watcher
-  protected ZooKeeperWatcher zooKeeper;
+  protected ZKWatcher zooKeeper;
 
   // master address tracker
   private MasterAddressTracker masterAddressTracker;
@@ -427,9 +427,15 @@ public class HRegionServer extends HasThread implements
   // key to the config parameter of server hostname
   // the specification of server hostname is optional. The hostname should be resolvable from
   // both master and region server
+  @InterfaceAudience.LimitedPrivate(HBaseInterfaceAudience.CONFIG)
   final static String RS_HOSTNAME_KEY = "hbase.regionserver.hostname";
+  @InterfaceAudience.LimitedPrivate(HBaseInterfaceAudience.CONFIG)
+  protected final static String MASTER_HOSTNAME_KEY = "hbase.master.hostname";
 
-  final static String MASTER_HOSTNAME_KEY = "hbase.master.hostname";
+  // HBASE-18226: This config and hbase.regionserver.hostname are mutually exclusive.
+  // Exception will be thrown if both are used.
+  final static String RS_HOSTNAME_DISABLE_MASTER_REVERSEDNS_KEY =
+    "hbase.regionserver.hostname.disable.master.reversedns";
 
   /**
    * This servers startcode.
@@ -458,10 +464,8 @@ public class HRegionServer extends HasThread implements
 
   private RegionServerProcedureManagerHost rspmHost;
 
-  private RegionServerQuotaManager rsQuotaManager;
-
-  // Table level lock manager for locking for region operations
-  protected TableLockManager tableLockManager;
+  private RegionServerRpcQuotaManager rsQuotaManager;
+  private RegionServerSpaceQuotaManager rsSpaceQuotaManager;
 
   /**
    * Nonce manager. Nonces are used to make operations like increment and append idempotent
@@ -487,7 +491,7 @@ public class HRegionServer extends HasThread implements
 
   protected final RSRpcServices rpcServices;
 
-  protected BaseCoordinatedStateManager csm;
+  protected CoordinatedStateManager csm;
 
   /**
    * Configuration manager is used to register/deregister and notify the configuration observers
@@ -495,156 +499,189 @@ public class HRegionServer extends HasThread implements
    */
   protected final ConfigurationManager configurationManager;
 
-  private CompactedHFilesDischarger compactedFileDischarger;
+  @VisibleForTesting
+  CompactedHFilesDischarger compactedFileDischarger;
 
   private volatile ThroughputController flushThroughputController;
 
-  protected final SecureBulkLoadManager secureBulkLoadManager;
+  protected SecureBulkLoadManager secureBulkLoadManager;
+
+  protected FileSystemUtilizationChore fsUtilizationChore;
+
+  private final NettyEventLoopGroupConfig eventLoopGroupConfig;
 
   /**
-   * Starts a HRegionServer at the default location.
+   * True if this RegionServer is coming up in a cluster where there is no Master;
+   * means it needs to just come up and make do without a Master to talk to: e.g. in test or
+   * HRegionServer is doing other than its usual duties: e.g. as an hollowed-out host whose only
+   * purpose is as a Replication-stream sink; see HBASE-18846 for more.
    */
-  public HRegionServer(Configuration conf) throws IOException, InterruptedException {
-    this(conf, CoordinatedStateManagerFactory.getCoordinatedStateManager(conf));
-  }
+  private final boolean masterless;
+  static final String MASTERLESS_CONFIG_NAME = "hbase.masterless";
+
 
   /**
    * Starts a HRegionServer at the default location
-   * @param csm implementation of CoordinatedStateManager to be used
    */
-  public HRegionServer(Configuration conf, CoordinatedStateManager csm) throws IOException {
+  // Don't start any services or managers in here in the Constructor.
+  // Defer till after we register with the Master as much as possible. See #startServices.
+  public HRegionServer(Configuration conf) throws IOException {
     super("RegionServer");  // thread name
-    this.fsOk = true;
-    this.conf = conf;
-    HFile.checkHFileVersion(this.conf);
-    checkCodecs(this.conf);
-    this.userProvider = UserProvider.instantiate(conf);
-    FSUtils.setupShortCircuitRead(this.conf);
-    // Disable usage of meta replicas in the regionserver
-    this.conf.setBoolean(HConstants.USE_META_REPLICAS, false);
+    TraceUtil.initTracer(conf);
+    try {
+      this.startcode = System.currentTimeMillis();
+      this.conf = conf;
+      this.fsOk = true;
+      this.masterless = conf.getBoolean(MASTERLESS_CONFIG_NAME, false);
+      this.eventLoopGroupConfig = setupNetty(this.conf);
+      MemorySizeUtil.checkForClusterFreeHeapMemoryLimit(this.conf);
+      HFile.checkHFileVersion(this.conf);
+      checkCodecs(this.conf);
+      this.userProvider = UserProvider.instantiate(conf);
+      FSUtils.setupShortCircuitRead(this.conf);
+      Replication.decorateRegionServerConfiguration(this.conf);
 
-    // Config'ed params
-    this.numRetries = this.conf.getInt(HConstants.HBASE_CLIENT_RETRIES_NUMBER,
-        HConstants.DEFAULT_HBASE_CLIENT_RETRIES_NUMBER);
-    this.threadWakeFrequency = conf.getInt(HConstants.THREAD_WAKE_FREQUENCY, 10 * 1000);
-    this.msgInterval = conf.getInt("hbase.regionserver.msginterval", 3 * 1000);
+      // Disable usage of meta replicas in the regionserver
+      this.conf.setBoolean(HConstants.USE_META_REPLICAS, false);
+      // Config'ed params
+      this.numRetries = this.conf.getInt(HConstants.HBASE_CLIENT_RETRIES_NUMBER,
+          HConstants.DEFAULT_HBASE_CLIENT_RETRIES_NUMBER);
+      this.threadWakeFrequency = conf.getInt(HConstants.THREAD_WAKE_FREQUENCY, 10 * 1000);
+      this.msgInterval = conf.getInt("hbase.regionserver.msginterval", 3 * 1000);
 
-    this.sleeper = new Sleeper(this.msgInterval, this);
+      this.sleeper = new Sleeper(this.msgInterval, this);
 
-    boolean isNoncesEnabled = conf.getBoolean(HConstants.HBASE_RS_NONCES_ENABLED, true);
-    this.nonceManager = isNoncesEnabled ? new ServerNonceManager(this.conf) : null;
+      boolean isNoncesEnabled = conf.getBoolean(HConstants.HBASE_RS_NONCES_ENABLED, true);
+      this.nonceManager = isNoncesEnabled ? new ServerNonceManager(this.conf) : null;
 
-    this.numRegionsToReport = conf.getInt(
-      "hbase.regionserver.numregionstoreport", 10);
+      this.numRegionsToReport = conf.getInt("hbase.regionserver.numregionstoreport", 10);
 
-    this.operationTimeout = conf.getInt(
-      HConstants.HBASE_CLIENT_OPERATION_TIMEOUT,
-      HConstants.DEFAULT_HBASE_CLIENT_OPERATION_TIMEOUT);
+      this.operationTimeout = conf.getInt(HConstants.HBASE_CLIENT_OPERATION_TIMEOUT,
+          HConstants.DEFAULT_HBASE_CLIENT_OPERATION_TIMEOUT);
 
-    this.shortOperationTimeout = conf.getInt(
-      HConstants.HBASE_RPC_SHORTOPERATION_TIMEOUT_KEY,
-      HConstants.DEFAULT_HBASE_RPC_SHORTOPERATION_TIMEOUT);
+      this.shortOperationTimeout = conf.getInt(HConstants.HBASE_RPC_SHORTOPERATION_TIMEOUT_KEY,
+          HConstants.DEFAULT_HBASE_RPC_SHORTOPERATION_TIMEOUT);
 
-    this.abortRequested = false;
-    this.stopped = false;
+      this.abortRequested = false;
+      this.stopped = false;
 
-    rpcServices = createRpcServices();
-    this.startcode = System.currentTimeMillis();
-    if (this instanceof HMaster) {
-      useThisHostnameInstead = conf.get(MASTER_HOSTNAME_KEY);
-    } else {
-      useThisHostnameInstead = conf.get(RS_HOSTNAME_KEY);
-    }
-    String hostName = shouldUseThisHostnameInstead() ? useThisHostnameInstead :
-      rpcServices.isa.getHostName();
-    serverName = ServerName.valueOf(hostName, rpcServices.isa.getPort(), startcode);
-
-    rpcControllerFactory = RpcControllerFactory.instantiate(this.conf);
-    rpcRetryingCallerFactory = RpcRetryingCallerFactory.instantiate(this.conf);
-
-    // login the zookeeper client principal (if using security)
-    ZKUtil.loginClient(this.conf, HConstants.ZK_CLIENT_KEYTAB_FILE,
-      HConstants.ZK_CLIENT_KERBEROS_PRINCIPAL, hostName);
-    // login the server principal (if using secure Hadoop)
-    login(userProvider, hostName);
-    // init superusers and add the server principal (if using security)
-    // or process owner as default super user.
-    Superusers.initialize(conf);
-
-    regionServerAccounting = new RegionServerAccounting();
-    cacheConfig = new CacheConfig(conf);
-    mobCacheConfig = new MobCacheConfig(conf);
-    uncaughtExceptionHandler = new UncaughtExceptionHandler() {
-      @Override
-      public void uncaughtException(Thread t, Throwable e) {
-        abort("Uncaught exception in service thread " + t.getName(), e);
+      rpcServices = createRpcServices();
+      if (this instanceof HMaster) {
+        useThisHostnameInstead = conf.get(MASTER_HOSTNAME_KEY);
+      } else {
+        useThisHostnameInstead = conf.get(RS_HOSTNAME_KEY);
+        if (conf.getBoolean(RS_HOSTNAME_DISABLE_MASTER_REVERSEDNS_KEY, false)) {
+          if (shouldUseThisHostnameInstead()) {
+            String msg = RS_HOSTNAME_DISABLE_MASTER_REVERSEDNS_KEY + " and " + RS_HOSTNAME_KEY +
+                " are mutually exclusive. Do not set " + RS_HOSTNAME_DISABLE_MASTER_REVERSEDNS_KEY +
+                " to true while " + RS_HOSTNAME_KEY + " is used";
+            throw new IOException(msg);
+          } else {
+            useThisHostnameInstead = rpcServices.isa.getHostName();
+          }
+        }
       }
-    };
+      String hostName = shouldUseThisHostnameInstead() ?
+          this.useThisHostnameInstead : this.rpcServices.isa.getHostName();
+      serverName = ServerName.valueOf(hostName, this.rpcServices.isa.getPort(), this.startcode);
 
-    initializeFileSystem();
+      rpcControllerFactory = RpcControllerFactory.instantiate(this.conf);
+      rpcRetryingCallerFactory = RpcRetryingCallerFactory.instantiate(this.conf);
 
-    service = new ExecutorService(getServerName().toShortString());
-    spanReceiverHost = SpanReceiverHost.getInstance(getConfiguration());
+      // login the zookeeper client principal (if using security)
+      ZKUtil.loginClient(this.conf, HConstants.ZK_CLIENT_KEYTAB_FILE,
+          HConstants.ZK_CLIENT_KERBEROS_PRINCIPAL, hostName);
+      // login the server principal (if using secure Hadoop)
+      login(userProvider, hostName);
+      // init superusers and add the server principal (if using security)
+      // or process owner as default super user.
+      Superusers.initialize(conf);
 
-    // Some unit tests don't need a cluster, so no zookeeper at all
-    if (!conf.getBoolean("hbase.testing.nocluster", false)) {
-      // Open connection to zookeeper and set primary watcher
-      zooKeeper = new ZooKeeperWatcher(conf, getProcessName() + ":" +
-        rpcServices.isa.getPort(), this, canCreateBaseZNode());
+      regionServerAccounting = new RegionServerAccounting(conf);
+      cacheConfig = new CacheConfig(conf);
+      mobCacheConfig = new MobCacheConfig(conf);
+      uncaughtExceptionHandler = new UncaughtExceptionHandler() {
+        @Override
+        public void uncaughtException(Thread t, Throwable e) {
+          abort("Uncaught exception in executorService thread " + t.getName(), e);
+        }
+      };
 
-      this.csm = (BaseCoordinatedStateManager) csm;
-      this.csm.initialize(this);
-      this.csm.start();
+      initializeFileSystem();
+      spanReceiverHost = SpanReceiverHost.getInstance(getConfiguration());
 
-      tableLockManager = TableLockManager.createTableLockManager(
-        conf, zooKeeper, serverName);
+      this.configurationManager = new ConfigurationManager();
+      setupWindows(getConfiguration(), getConfigurationManager());
 
-      masterAddressTracker = new MasterAddressTracker(getZooKeeper(), this);
-      masterAddressTracker.start();
+      // Some unit tests don't need a cluster, so no zookeeper at all
+      if (!conf.getBoolean("hbase.testing.nocluster", false)) {
+        // Open connection to zookeeper and set primary watcher
+        zooKeeper = new ZKWatcher(conf, getProcessName() + ":" +
+          rpcServices.isa.getPort(), this, canCreateBaseZNode());
 
-      clusterStatusTracker = new ClusterStatusTracker(zooKeeper, this);
-      clusterStatusTracker.start();
+        // If no master in cluster, skip trying to track one or look for a cluster status.
+        if (!this.masterless) {
+          this.csm = new ZkCoordinatedStateManager(this);
+
+          masterAddressTracker = new MasterAddressTracker(getZooKeeper(), this);
+          masterAddressTracker.start();
+
+          clusterStatusTracker = new ClusterStatusTracker(zooKeeper, this);
+          clusterStatusTracker.start();
+        }
+      }
+      // This violates 'no starting stuff in Constructor' but Master depends on the below chore
+      // and executor being created and takes a different startup route. Lots of overlap between HRS
+      // and M (An M IS A HRS now). Need to refactor so less duplication between M and its super
+      // Master expects Constructor to put up web servers. Ugh.
+      // class HRS. TODO.
+      this.choreService = new ChoreService(getServerName().toString(), true);
+      this.executorService = new ExecutorService(getServerName().toShortString());
+      this.rpcServices.start();
+      putUpWebUI();
+    } catch (Throwable t) {
+      // Make sure we log the exception. HRegionServer is often started via reflection and the
+      // cause of failed startup is lost.
+      LOG.error("Failed construction RegionServer", t);
+      throw t;
     }
-    this.configurationManager = new ConfigurationManager();
+  }
 
-    this.secureBulkLoadManager = new SecureBulkLoadManager(this.conf);
-    this.secureBulkLoadManager.start();
-
-    rpcServices.start();
-    putUpWebUI();
-    this.walRoller = new LogRoller(this, this);
-    this.choreService = new ChoreService(getServerName().toString(), true);
-    this.flushThroughputController = FlushThroughputControllerFactory.create(this, conf);
-
+  /**
+   * If running on Windows, do windows-specific setup.
+   */
+  private static void setupWindows(final Configuration conf, ConfigurationManager cm) {
     if (!SystemUtils.IS_OS_WINDOWS) {
       Signal.handle(new Signal("HUP"), new SignalHandler() {
         @Override
         public void handle(Signal signal) {
-          getConfiguration().reloadConfiguration();
-          configurationManager.notifyAllObservers(getConfiguration());
+          conf.reloadConfiguration();
+          cm.notifyAllObservers(conf);
         }
       });
     }
-    // Create the CompactedFileDischarger chore service. This chore helps to
-    // remove the compacted files
-    // that will no longer be used in reads.
-    // Default is 2 mins. The default value for TTLCleaner is 5 mins so we set this to
-    // 2 mins so that compacted files can be archived before the TTLCleaner runs
-    int cleanerInterval =
-        conf.getInt("hbase.hfile.compaction.discharger.interval", 2 * 60 * 1000);
-    this.compactedFileDischarger =
-        new CompactedHFilesDischarger(cleanerInterval, (Stoppable)this, (RegionServerServices)this);
-    choreService.scheduleChore(compactedFileDischarger);
+  }
+
+  private static NettyEventLoopGroupConfig setupNetty(Configuration conf) {
+    // Initialize netty event loop group at start as we may use it for rpc server, rpc client & WAL.
+    NettyEventLoopGroupConfig nelgc =
+      new NettyEventLoopGroupConfig(conf, "RS-EventLoopGroup");
+    NettyRpcClientConfigHelper.setEventLoopConfig(conf, nelgc.group(), nelgc.clientChannelClass());
+    NettyAsyncFSWALConfigHelper.setEventLoopConfig(conf, nelgc.group(), nelgc.clientChannelClass());
+    return nelgc;
   }
 
   private void initializeFileSystem() throws IOException {
+    // Get fs instance used by this RS.  Do we use checksum verification in the hbase? If hbase
+    // checksum verification enabled, then automatically switch off hdfs checksum verification.
+    boolean useHBaseChecksum = conf.getBoolean(HConstants.HBASE_CHECKSUM_VERIFICATION, true);
+    FSUtils.setFsDefault(this.conf, FSUtils.getWALRootDir(this.conf));
+    this.walFs = new HFileSystem(this.conf, useHBaseChecksum);
+    this.walRootDir = FSUtils.getWALRootDir(this.conf);
     // Set 'fs.defaultFS' to match the filesystem on hbase.rootdir else
     // underlying hadoop hdfs accessors will be going against wrong filesystem
     // (unless all is set to defaults).
     FSUtils.setFsDefault(this.conf, FSUtils.getRootDir(this.conf));
-    // Get fs instance used by this RS.  Do we use checksum verification in the hbase? If hbase
-    // checksum verification enabled, then automatically switch off hdfs checksum verification.
-    boolean useHBaseChecksum = conf.getBoolean(HConstants.HBASE_CHECKSUM_VERIFICATION, true);
     this.fs = new HFileSystem(this.conf, useHBaseChecksum);
     this.rootDir = FSUtils.getRootDir(this.conf);
     this.tableDescriptors = getFsTableDescriptors();
@@ -652,7 +689,11 @@ public class HRegionServer extends HasThread implements
 
   protected TableDescriptors getFsTableDescriptors() throws IOException {
     return new FSTableDescriptors(this.conf,
-      this.fs, this.rootDir, !canUpdateTableDescriptor(), false);
+      this.fs, this.rootDir, !canUpdateTableDescriptor(), false, getMetaTableObserver());
+  }
+
+  protected Function<TableDescriptorBuilder, TableDescriptorBuilder> getMetaTableObserver() {
+    return null;
   }
 
   protected void setInitLatch(CountDownLatch latch) {
@@ -671,7 +712,7 @@ public class HRegionServer extends HasThread implements
       "hbase.regionserver.kerberos.principal", host);
   }
 
-  protected void waitForMasterActive(){
+  protected void waitForMasterActive() {
   }
 
   protected String getProcessName() {
@@ -679,7 +720,7 @@ public class HRegionServer extends HasThread implements
   }
 
   protected boolean canCreateBaseZNode() {
-    return false;
+    return this.masterless;
   }
 
   protected boolean canUpdateTableDescriptor() {
@@ -702,28 +743,28 @@ public class HRegionServer extends HasThread implements
   @Override
   public boolean registerService(com.google.protobuf.Service instance) {
     /*
-     * No stacking of instances is allowed for a single service name
+     * No stacking of instances is allowed for a single executorService name
      */
     com.google.protobuf.Descriptors.ServiceDescriptor serviceDesc =
         instance.getDescriptorForType();
     String serviceName = CoprocessorRpcUtils.getServiceName(serviceDesc);
     if (coprocessorServiceHandlers.containsKey(serviceName)) {
-      LOG.error("Coprocessor service " + serviceName
+      LOG.error("Coprocessor executorService " + serviceName
           + " already registered, rejecting request from " + instance);
       return false;
     }
 
     coprocessorServiceHandlers.put(serviceName, instance);
     if (LOG.isDebugEnabled()) {
-      LOG.debug("Registered regionserver coprocessor service: service=" + serviceName);
+      LOG.debug("Registered regionserver coprocessor executorService: executorService=" + serviceName);
     }
     return true;
   }
 
   /**
    * Create a 'smarter' Connection, one that is capable of by-passing RPC if the request is to
-   * the local server. Safe to use going to local or remote server.
-   * Create this instance in a method can be intercepted and mocked in tests.
+   * the local server; i.e. a short-circuit Connection. Safe to use going to local or remote
+   * server. Create this instance in a method can be intercepted and mocked in tests.
    * @throws IOException
    */
   @VisibleForTesting
@@ -769,25 +810,19 @@ public class HRegionServer extends HasThread implements
 
   /**
    * All initialization needed before we go register with Master.
+   * Do bare minimum. Do bulk of initializations AFTER we've connected to the Master.
+   * In here we just put up the RpcServer, setup Connection, and ZooKeeper.
    *
    * @throws IOException
    * @throws InterruptedException
    */
-  private void preRegistrationInitialization(){
+  private void preRegistrationInitialization() {
     try {
       setupClusterConnection();
-
-      // Health checker thread.
-      if (isHealthCheckerConfigured()) {
-        int sleepTime = this.conf.getInt(HConstants.HEALTH_CHORE_WAKE_FREQ,
-          HConstants.DEFAULT_THREAD_WAKE_FREQUENCY);
-        healthCheckChore = new HealthCheckChore(sleepTime, this, getConfiguration());
-      }
-
       initializeZooKeeper();
-      if (!isStopped() && !isAborted()) {
-        initializeThreads();
-      }
+      // Setup RPC client for master communication
+      this.rpcClient = RpcClientFactory.createClient(conf, clusterId, new InetSocketAddress(
+          this.rpcServices.isa.getAddress(), 0), clusterConnection.getConnectionMetrics());
     } catch (Throwable t) {
       // Call stop if error or process will stick around for ever since server
       // puts up non-daemon threads.
@@ -807,6 +842,9 @@ public class HRegionServer extends HasThread implements
   @edu.umd.cs.findbugs.annotations.SuppressWarnings(value="RV_RETURN_VALUE_IGNORED_BAD_PRACTICE",
     justification="cluster Id znode read would give us correct response")
   private void initializeZooKeeper() throws IOException, InterruptedException {
+    // Nothing to do in here if no Master in the mix.
+    if (this.masterless) return;
+
     // Create the master address tracker, register with zk, and start it.  Then
     // block until a master is available.  No point in starting up if no master
     // running.
@@ -846,14 +884,12 @@ public class HRegionServer extends HasThread implements
       rspmHost.loadProcedures(conf);
       rspmHost.initialize(this);
     } catch (KeeperException e) {
-      this.abort("Failed to reach zk cluster when creating procedure handler.", e);
+      this.abort("Failed to reach coordination cluster when creating procedure handler.", e);
     }
-    // register watcher for recovering regions
-    this.recoveringRegionWatcher = new RecoveringRegionWatcher(this.zooKeeper, this);
   }
 
   @edu.umd.cs.findbugs.annotations.SuppressWarnings(value="RV_RETURN_VALUE_IGNORED",
-      justification="We don't care about the return")
+    justification="We don't care about the return")
   private void doLatch(final CountDownLatch latch) throws InterruptedException {
     if (latch != null) {
       // Result is ignored intentionally but if I remove the below, findbugs complains (the
@@ -869,7 +905,7 @@ public class HRegionServer extends HasThread implements
    * @throws IOException any IO exception, plus if the RS is stopped
    * @throws InterruptedException
    */
-  private void blockAndCheckIfStopped(ZooKeeperNodeTracker tracker)
+  private void blockAndCheckIfStopped(ZKNodeTracker tracker)
       throws IOException, InterruptedException {
     while (tracker.blockUntilAvailable(this.msgInterval, false) == null) {
       if (this.stopped) {
@@ -879,62 +915,11 @@ public class HRegionServer extends HasThread implements
   }
 
   /**
-   * @return False if cluster shutdown in progress
+   * @return True if the cluster is up.
    */
   private boolean isClusterUp() {
-    return clusterStatusTracker != null && clusterStatusTracker.isClusterUp();
-  }
-
-  private void initializeThreads() throws IOException {
-    // Cache flushing thread.
-    this.cacheFlusher = new MemStoreFlusher(conf, this);
-
-    // Compaction thread
-    this.compactSplitThread = new CompactSplitThread(this);
-
-    // Background thread to check for compactions; needed if region has not gotten updates
-    // in a while. It will take care of not checking too frequently on store-by-store basis.
-    this.compactionChecker = new CompactionChecker(this, this.threadWakeFrequency, this);
-    this.periodicFlusher = new PeriodicMemstoreFlusher(this.threadWakeFrequency, this);
-    this.leases = new Leases(this.threadWakeFrequency);
-
-    // Create the thread to clean the moved regions list
-    movedRegionsCleaner = MovedRegionsCleaner.create(this);
-
-    if (this.nonceManager != null) {
-      // Create the scheduled chore that cleans up nonces.
-      nonceManagerChore = this.nonceManager.createCleanupScheduledChore(this);
-    }
-
-    // Setup the Quota Manager
-    rsQuotaManager = new RegionServerQuotaManager(this);
-
-    // Setup RPC client for master communication
-    rpcClient = RpcClientFactory.createClient(conf, clusterId, new InetSocketAddress(
-        rpcServices.isa.getAddress(), 0), clusterConnection.getConnectionMetrics());
-
-    boolean onlyMetaRefresh = false;
-    int storefileRefreshPeriod = conf.getInt(
-        StorefileRefresherChore.REGIONSERVER_STOREFILE_REFRESH_PERIOD
-      , StorefileRefresherChore.DEFAULT_REGIONSERVER_STOREFILE_REFRESH_PERIOD);
-    if (storefileRefreshPeriod == 0) {
-      storefileRefreshPeriod = conf.getInt(
-          StorefileRefresherChore.REGIONSERVER_META_STOREFILE_REFRESH_PERIOD,
-          StorefileRefresherChore.DEFAULT_REGIONSERVER_STOREFILE_REFRESH_PERIOD);
-      onlyMetaRefresh = true;
-    }
-    if (storefileRefreshPeriod > 0) {
-      this.storefileRefresher = new StorefileRefresherChore(storefileRefreshPeriod,
-          onlyMetaRefresh, this, this);
-    }
-    registerConfigurationObservers();
-  }
-
-  private void registerConfigurationObservers() {
-    // Registering the compactSplitThread object with the ConfigurationManager.
-    configurationManager.registerObserver(this.compactSplitThread);
-    configurationManager.registerObserver(this.rpcServices);
-    configurationManager.registerObserver(this);
+    return this.masterless ||
+        this.clusterStatusTracker != null && this.clusterStatusTracker.isClusterUp();
   }
 
   /**
@@ -952,8 +937,6 @@ public class HRegionServer extends HasThread implements
     try {
       if (!isStopped() && !isAborted()) {
         ShutdownHook.install(conf, fs, this, Thread.currentThread());
-        // Set our ephemeral znode up in zookeeper now we have a name.
-        createMyEphemeralNode();
         // Initialize the RegionServerCoprocessorHost now that our ephemeral
         // node was created, in case any coprocessors want to use ZooKeeper
         this.rsHost = new RegionServerCoprocessorHost(this, this.conf);
@@ -961,6 +944,7 @@ public class HRegionServer extends HasThread implements
 
       // Try and register with the Master; tell it we are here.  Break if
       // server is stopped or the clusterup flag is down or hdfs went wacky.
+      // Once registered successfully, go ahead and start up all Services.
       while (keepLooping()) {
         RegionServerStartupResponse w = reportForDuty();
         if (w == null) {
@@ -972,13 +956,19 @@ public class HRegionServer extends HasThread implements
         }
       }
 
-      if (!isStopped() && isHealthy()){
+      if (!isStopped() && isHealthy()) {
         // start the snapshot handler and other procedure handlers,
         // since the server is ready to run
-        rspmHost.start();
-
+        if (this.rspmHost != null) {
+          this.rspmHost.start();
+        }
         // Start the Quota Manager
-        rsQuotaManager.start(getRpcServer().getScheduler());
+        if (this.rsQuotaManager != null) {
+          rsQuotaManager.start(getRpcServer().getScheduler());
+        }
+        if (this.rsSpaceQuotaManager != null) {
+          this.rsSpaceQuotaManager.start();
+        }
       }
 
       // We registered with the Master.  Go into run mode.
@@ -1070,6 +1060,10 @@ public class HRegionServer extends HasThread implements
     if (rsQuotaManager != null) {
       rsQuotaManager.stop();
     }
+    if (rsSpaceQuotaManager != null) {
+      rsSpaceQuotaManager.stop();
+      rsSpaceQuotaManager = null;
+    }
 
     // Stop the snapshot and other procedure handlers, forcefully killing all running tasks
     if (rspmHost != null) {
@@ -1113,8 +1107,7 @@ public class HRegionServer extends HasThread implements
 
     if (!this.killed && this.fsOk) {
       waitOnAllRegionsToClose(abortRequested);
-      LOG.info("stopping server " + this.serverName +
-        "; all regions closed.");
+      LOG.info("stopping server " + this.serverName + "; all regions closed.");
     }
 
     //fsOk flag may be changed when closing regions throws exception.
@@ -1125,6 +1118,9 @@ public class HRegionServer extends HasThread implements
     // Make sure the proxy is down.
     if (this.rssStub != null) {
       this.rssStub = null;
+    }
+    if (this.lockStub != null) {
+      this.lockStub = null;
     }
     if (this.rpcClient != null) {
       this.rpcClient.close();
@@ -1157,21 +1153,20 @@ public class HRegionServer extends HasThread implements
     if (this.zooKeeper != null) {
       this.zooKeeper.close();
     }
-    LOG.info("stopping server " + this.serverName +
-      "; zookeeper connection closed.");
+    LOG.info("stopping server " + this.serverName + "; zookeeper connection closed.");
 
     LOG.info(Thread.currentThread().getName() + " exiting");
   }
 
   private boolean containsMetaTableRegions() {
-    return onlineRegions.containsKey(HRegionInfo.FIRST_META_REGIONINFO.getEncodedName());
+    return onlineRegions.containsKey(RegionInfoBuilder.FIRST_META_REGIONINFO.getEncodedName());
   }
 
   private boolean areAllUserRegionsOffline() {
     if (getNumberOfOnlineRegions() > 2) return false;
     boolean allUserRegionsOffline = true;
-    for (Map.Entry<String, Region> e: this.onlineRegions.entrySet()) {
-      if (!e.getValue().getRegionInfo().isMetaTable()) {
+    for (Map.Entry<String, HRegion> e: this.onlineRegions.entrySet()) {
+      if (!e.getValue().getRegionInfo().isMetaRegion()) {
         allUserRegionsOffline = false;
         break;
       }
@@ -1184,7 +1179,7 @@ public class HRegionServer extends HasThread implements
    */
   private long getWriteRequestCount() {
     long writeCount = 0;
-    for (Map.Entry<String, Region> e: this.onlineRegions.entrySet()) {
+    for (Map.Entry<String, HRegion> e: this.onlineRegions.entrySet()) {
       writeCount += e.getValue().getWriteRequestsCount();
     }
     return writeCount;
@@ -1201,8 +1196,7 @@ public class HRegionServer extends HasThread implements
     ClusterStatusProtos.ServerLoad sl = buildServerLoad(reportStartTime, reportEndTime);
     try {
       RegionServerReportRequest.Builder request = RegionServerReportRequest.newBuilder();
-      ServerName sn = ServerName.parseVersionedServerName(
-        this.serverName.getVersionedBytes());
+      ServerName sn = ServerName.parseVersionedServerName(this.serverName.getVersionedBytes());
       request.setServer(ProtobufUtil.toServerName(sn));
       request.setLoad(sl);
       rss.regionServerReport(null, request.build());
@@ -1221,6 +1215,79 @@ public class HRegionServer extends HasThread implements
     }
   }
 
+  /**
+   * Reports the given map of Regions and their size on the filesystem to the active Master.
+   *
+   * @param onlineRegionSizes A map of region info to size in bytes
+   * @return false if FileSystemUtilizationChore should pause reporting to master. true otherwise
+   */
+  public boolean reportRegionSizesForQuotas(final Map<RegionInfo, Long> onlineRegionSizes) {
+    RegionServerStatusService.BlockingInterface rss = rssStub;
+    if (rss == null) {
+      // the current server could be stopping.
+      LOG.trace("Skipping Region size report to HMaster as stub is null");
+      return true;
+    }
+    try {
+      RegionSpaceUseReportRequest request = buildRegionSpaceUseReportRequest(
+          Objects.requireNonNull(onlineRegionSizes));
+      rss.reportRegionSpaceUse(null, request);
+    } catch (ServiceException se) {
+      IOException ioe = ProtobufUtil.getRemoteException(se);
+      if (ioe instanceof PleaseHoldException) {
+        LOG.trace("Failed to report region sizes to Master because it is initializing."
+            + " This will be retried.", ioe);
+        // The Master is coming up. Will retry the report later. Avoid re-creating the stub.
+        return true;
+      }
+      if (rssStub == rss) {
+        rssStub = null;
+      }
+      createRegionServerStatusStub(true);
+      if (ioe instanceof DoNotRetryIOException) {
+        DoNotRetryIOException doNotRetryEx = (DoNotRetryIOException) ioe;
+        if (doNotRetryEx.getCause() != null) {
+          Throwable t = doNotRetryEx.getCause();
+          if (t instanceof UnsupportedOperationException) {
+            LOG.debug("master doesn't support ReportRegionSpaceUse, pause before retrying");
+            return false;
+          }
+        }
+      }
+      LOG.debug("Failed to report region sizes to Master. This will be retried.", ioe);
+    }
+    return true;
+  }
+
+  /**
+   * Builds a {@link RegionSpaceUseReportRequest} protobuf message from the region size map.
+   *
+   * @param regionSizes Map of region info to size in bytes.
+   * @return The corresponding protocol buffer message.
+   */
+  RegionSpaceUseReportRequest buildRegionSpaceUseReportRequest(Map<RegionInfo,Long> regionSizes) {
+    RegionSpaceUseReportRequest.Builder request = RegionSpaceUseReportRequest.newBuilder();
+    for (Entry<RegionInfo, Long> entry : Objects.requireNonNull(regionSizes).entrySet()) {
+      request.addSpaceUse(convertRegionSize(entry.getKey(), entry.getValue()));
+    }
+    return request.build();
+  }
+
+  /**
+   * Converts a pair of {@link RegionInfo} and {@code long} into a {@link RegionSpaceUse}
+   * protobuf message.
+   *
+   * @param regionInfo The RegionInfo
+   * @param sizeInBytes The size in bytes of the Region
+   * @return The protocol buffer
+   */
+  RegionSpaceUse convertRegionSize(RegionInfo regionInfo, Long sizeInBytes) {
+    return RegionSpaceUse.newBuilder()
+        .setRegionInfo(ProtobufUtil.toRegionInfo(Objects.requireNonNull(regionInfo)))
+        .setRegionSize(Objects.requireNonNull(sizeInBytes))
+        .build();
+  }
+
   ClusterStatusProtos.ServerLoad buildServerLoad(long reportStartTime, long reportEndTime)
       throws IOException {
     // We're getting the MetricsRegionServerWrapper here because the wrapper computes requests
@@ -1231,15 +1298,20 @@ public class HRegionServer extends HasThread implements
     // improved; Additionally the load balancer will be able to take advantage of a more complete
     // history.
     MetricsRegionServerWrapper regionServerWrapper = metricsRegionServer.getRegionServerWrapper();
-    Collection<Region> regions = getOnlineRegionsLocalContext();
-    MemoryUsage memory = ManagementFactory.getMemoryMXBean().getHeapMemoryUsage();
+    Collection<HRegion> regions = getOnlineRegionsLocalContext();
+    long usedMemory = -1L;
+    long maxMemory = -1L;
+    final MemoryUsage usage = MemorySizeUtil.safeGetHeapMemoryUsage();
+    if (usage != null) {
+      usedMemory = usage.getUsed();
+      maxMemory = usage.getMax();
+    }
 
-    ClusterStatusProtos.ServerLoad.Builder serverLoad =
-      ClusterStatusProtos.ServerLoad.newBuilder();
+    ClusterStatusProtos.ServerLoad.Builder serverLoad = ClusterStatusProtos.ServerLoad.newBuilder();
     serverLoad.setNumberOfRequests((int) regionServerWrapper.getRequestsPerSecond());
-    serverLoad.setTotalNumberOfRequests((int) regionServerWrapper.getTotalRequestCount());
-    serverLoad.setUsedHeapMB((int)(memory.getUsed() / 1024 / 1024));
-    serverLoad.setMaxHeapMB((int) (memory.getMax() / 1024 / 1024));
+    serverLoad.setTotalNumberOfRequests(regionServerWrapper.getTotalRequestCount());
+    serverLoad.setUsedHeapMB((int)(usedMemory / 1024 / 1024));
+    serverLoad.setMaxHeapMB((int) (maxMemory / 1024 / 1024));
     Set<String> coprocessors = getWAL(null).getCoprocessorHost().getCoprocessors();
     Builder coprocessorBuilder = Coprocessor.newBuilder();
     for (String coprocessor : coprocessors) {
@@ -1247,7 +1319,7 @@ public class HRegionServer extends HasThread implements
     }
     RegionLoad.Builder regionLoadBldr = RegionLoad.newBuilder();
     RegionSpecifier.Builder regionSpecifier = RegionSpecifier.newBuilder();
-    for (Region region : regions) {
+    for (HRegion region : regions) {
       if (region.getCoprocessorHost() != null) {
         Set<String> regionCoprocessors = region.getCoprocessorHost().getCoprocessors();
         Iterator<String> iterator = regionCoprocessors.iterator();
@@ -1269,7 +1341,7 @@ public class HRegionServer extends HasThread implements
       serverLoad.setInfoServerPort(-1);
     }
 
-    // for the replicationLoad purpose. Only need to get from one service
+    // for the replicationLoad purpose. Only need to get from one executorService
     // either source or sink will get the same info
     ReplicationSourceService rsources = getReplicationSourceService();
 
@@ -1303,7 +1375,7 @@ public class HRegionServer extends HasThread implements
     // Wait till all regions are closed before going out.
     int lastCount = -1;
     long previousLogTime = 0;
-    Set<String> closedRegions = new HashSet<String>();
+    Set<String> closedRegions = new HashSet<>();
     boolean interrupted = false;
     try {
       while (!isOnlineRegionsEmpty()) {
@@ -1318,21 +1390,21 @@ public class HRegionServer extends HasThread implements
             // Only print out regions still closing if a small number else will
             // swamp the log.
             if (count < 10 && LOG.isDebugEnabled()) {
-              LOG.debug(this.onlineRegions);
+              LOG.debug("Online Regions=" + this.onlineRegions);
             }
           }
         }
         // Ensure all user regions have been sent a close. Use this to
         // protect against the case where an open comes in after we start the
         // iterator of onlineRegions to close all user regions.
-        for (Map.Entry<String, Region> e : this.onlineRegions.entrySet()) {
-          HRegionInfo hri = e.getValue().getRegionInfo();
-          if (!this.regionsInTransitionInRS.containsKey(hri.getEncodedNameAsBytes())
-              && !closedRegions.contains(hri.getEncodedName())) {
+        for (Map.Entry<String, HRegion> e : this.onlineRegions.entrySet()) {
+          RegionInfo hri = e.getValue().getRegionInfo();
+          if (!this.regionsInTransitionInRS.containsKey(hri.getEncodedNameAsBytes()) &&
+              !closedRegions.contains(hri.getEncodedName())) {
             closedRegions.add(hri.getEncodedName());
             // Don't update zk with this close transition; pass false.
             closeRegionIgnoreErrors(hri, abort);
-              }
+          }
         }
         // No regions in RIT, we could stop waiting now.
         if (this.regionsInTransitionInRS.isEmpty()) {
@@ -1394,8 +1466,8 @@ public class HRegionServer extends HasThread implements
         // The hostname the master sees us as.
         if (key.equals(HConstants.KEY_FOR_HOSTNAME_SEEN_BY_MASTER)) {
           String hostnameFromMasterPOV = e.getValue();
-          this.serverName = ServerName.valueOf(hostnameFromMasterPOV,
-            rpcServices.isa.getPort(), this.startcode);
+          this.serverName = ServerName.valueOf(hostnameFromMasterPOV, rpcServices.isa.getPort(),
+              this.startcode);
           if (shouldUseThisHostnameInstead() &&
               !hostnameFromMasterPOV.equals(useThisHostnameInstead)) {
             String msg = "Master passed us a different hostname to use; was=" +
@@ -1424,6 +1496,8 @@ public class HRegionServer extends HasThread implements
         }
         this.conf.set(key, value);
       }
+      // Set our ephemeral znode up in zookeeper now we have a name.
+      createMyEphemeralNode();
 
       if (updateRootDir) {
         // initialize file system by the config fs.defaultFS and hbase.rootdir from master
@@ -1433,28 +1507,35 @@ public class HRegionServer extends HasThread implements
       // hack! Maps DFSClient => RegionServer for logs.  HDFS made this
       // config param for task trackers, but we can piggyback off of it.
       if (this.conf.get("mapreduce.task.attempt.id") == null) {
-        this.conf.set("mapreduce.task.attempt.id", "hb_rs_" +
-          this.serverName.toString());
+        this.conf.set("mapreduce.task.attempt.id", "hb_rs_" + this.serverName.toString());
       }
 
       // Save it in a file, this will allow to see if we crash
       ZNodeClearer.writeMyEphemeralNodeOnDisk(getMyEphemeralNodePath());
 
-      this.cacheConfig = new CacheConfig(conf);
-      this.walFactory = setupWALAndReplication();
+      // This call sets up an initialized replication and WAL. Later we start it up.
+      setupWALAndReplication();
       // Init in here rather than in constructor after thread name has been set
-      this.metricsRegionServer = new MetricsRegionServer(new MetricsRegionServerWrapperImpl(this));
+      this.metricsRegionServer = new MetricsRegionServer(
+          new MetricsRegionServerWrapperImpl(this), conf);
       this.metricsTable = new MetricsTable(new MetricsTableWrapperAggregateImpl(this));
       // Now that we have a metrics source, start the pause monitor
       this.pauseMonitor = new JvmPauseMonitor(conf, getMetrics().getMetricsSource());
       pauseMonitor.start();
 
-      startServiceThreads();
-      startHeapMemoryManager();
-      LOG.info("Serving as " + this.serverName +
-        ", RpcServer on " + rpcServices.isa +
-        ", sessionid=0x" +
-        Long.toHexString(this.zooKeeper.getRecoverableZooKeeper().getSessionId()));
+      // There is a rare case where we do NOT want services to start. Check config.
+      if (getConfiguration().getBoolean("hbase.regionserver.workers", true)) {
+        startServices();
+      }
+      // In here we start up the replication Service. Above we initialized it. TODO. Reconcile.
+      // or make sense of it.
+      startReplicationService();
+
+
+      // Set up ZK
+      LOG.info("Serving as " + this.serverName + ", RpcServer on " + rpcServices.isa +
+          ", sessionid=0x" +
+          Long.toHexString(this.zooKeeper.getRecoverableZooKeeper().getSessionId()));
 
       // Wake up anyone waiting for this server to online
       synchronized (online) {
@@ -1470,16 +1551,32 @@ public class HRegionServer extends HasThread implements
     }
   }
 
+  protected void initializeMemStoreChunkCreator() {
+    if (MemStoreLAB.isEnabled(conf)) {
+      // MSLAB is enabled. So initialize MemStoreChunkPool
+      // By this time, the MemstoreFlusher is already initialized. We can get the global limits from
+      // it.
+      Pair<Long, MemoryType> pair = MemorySizeUtil.getGlobalMemStoreSize(conf);
+      long globalMemStoreSize = pair.getFirst();
+      boolean offheap = this.regionServerAccounting.isOffheap();
+      // When off heap memstore in use, take full area for chunk pool.
+      float poolSizePercentage = offheap? 1.0F:
+          conf.getFloat(MemStoreLAB.CHUNK_POOL_MAXSIZE_KEY, MemStoreLAB.POOL_MAX_SIZE_DEFAULT);
+      float initialCountPercentage = conf.getFloat(MemStoreLAB.CHUNK_POOL_INITIALSIZE_KEY,
+          MemStoreLAB.POOL_INITIAL_SIZE_DEFAULT);
+      int chunkSize = conf.getInt(MemStoreLAB.CHUNK_SIZE_KEY, MemStoreLAB.CHUNK_SIZE_DEFAULT);
+      // init the chunkCreator
+      ChunkCreator chunkCreator =
+          ChunkCreator.initialize(chunkSize, offheap, globalMemStoreSize, poolSizePercentage,
+      initialCountPercentage, this.hMemManager);
+    }
+  }
+
   private void startHeapMemoryManager() {
-    this.hMemManager = HeapMemoryManager.create(this.conf, this.cacheFlusher,
-        this, this.regionServerAccounting);
+    this.hMemManager = HeapMemoryManager.create(this.conf, this.cacheFlusher, this,
+        this.regionServerAccounting);
     if (this.hMemManager != null) {
       this.hMemManager.start(getChoreService());
-      MemStoreChunkPool chunkPool = MemStoreChunkPool.getPool(this.conf);
-      if (chunkPool != null) {
-        // Register it as HeapMemoryTuneObserver
-        this.hMemManager.registerTuneObserver(chunkPool);
-      }
     }
   }
 
@@ -1488,8 +1585,7 @@ public class HRegionServer extends HasThread implements
     rsInfo.setInfoPort(infoServer != null ? infoServer.getPort() : -1);
     rsInfo.setVersionInfo(ProtobufUtil.getVersionInfo());
     byte[] data = ProtobufUtil.prependPBMagic(rsInfo.build().toByteArray());
-    ZKUtil.createEphemeralNodeAndWatch(this.zooKeeper,
-      getMyEphemeralNodePath(), data);
+    ZKUtil.createEphemeralNodeAndWatch(this.zooKeeper, getMyEphemeralNodePath(), data);
   }
 
   private void deleteMyEphemeralNode() throws KeeperException {
@@ -1501,11 +1597,6 @@ public class HRegionServer extends HasThread implements
     return regionServerAccounting;
   }
 
-  @Override
-  public TableLockManager getTableLockManager() {
-    return tableLockManager;
-  }
-
   /*
    * @param r Region to get RegionLoad for.
    * @param regionLoadBldr the RegionLoad.Builder, can be null
@@ -1514,33 +1605,34 @@ public class HRegionServer extends HasThread implements
    *
    * @throws IOException
    */
-  private RegionLoad createRegionLoad(final Region r, RegionLoad.Builder regionLoadBldr,
+  RegionLoad createRegionLoad(final HRegion r, RegionLoad.Builder regionLoadBldr,
       RegionSpecifier.Builder regionSpecifier) throws IOException {
     byte[] name = r.getRegionInfo().getRegionName();
     int stores = 0;
     int storefiles = 0;
     int storeUncompressedSizeMB = 0;
     int storefileSizeMB = 0;
-    int memstoreSizeMB = (int) (r.getMemstoreSize() / 1024 / 1024);
-    int storefileIndexSizeMB = 0;
-    int rootIndexSizeKB = 0;
+    int memstoreSizeMB = (int) (r.getMemStoreSize() / 1024 / 1024);
+    long storefileIndexSizeKB = 0;
+    int rootLevelIndexSizeKB = 0;
     int totalStaticIndexSizeKB = 0;
     int totalStaticBloomSizeKB = 0;
     long totalCompactingKVs = 0;
     long currentCompactedKVs = 0;
-    List<Store> storeList = r.getStores();
+    List<HStore> storeList = r.getStores();
     stores += storeList.size();
-    for (Store store : storeList) {
+    for (HStore store : storeList) {
       storefiles += store.getStorefilesCount();
       storeUncompressedSizeMB += (int) (store.getStoreSizeUncompressed() / 1024 / 1024);
       storefileSizeMB += (int) (store.getStorefilesSize() / 1024 / 1024);
-      storefileIndexSizeMB += (int) (store.getStorefilesIndexSize() / 1024 / 1024);
+      //TODO: storefileIndexSizeKB is same with rootLevelIndexSizeKB?
+      storefileIndexSizeKB += store.getStorefilesRootLevelIndexSize() / 1024;
       CompactionProgress progress = store.getCompactionProgress();
       if (progress != null) {
         totalCompactingKVs += progress.totalCompactingKVs;
         currentCompactedKVs += progress.currentCompactedKVs;
       }
-      rootIndexSizeKB += (int) (store.getStorefilesIndexSize() / 1024);
+      rootLevelIndexSizeKB += (int) (store.getStorefilesRootLevelIndexSize() / 1024);
       totalStaticIndexSizeKB += (int) (store.getTotalStaticIndexSize() / 1024);
       totalStaticBloomSizeKB += (int) (store.getTotalStaticBloomSize() / 1024);
     }
@@ -1560,9 +1652,9 @@ public class HRegionServer extends HasThread implements
       .setStorefiles(storefiles)
       .setStoreUncompressedSizeMB(storeUncompressedSizeMB)
       .setStorefileSizeMB(storefileSizeMB)
-      .setMemstoreSizeMB(memstoreSizeMB)
-      .setStorefileIndexSizeMB(storefileIndexSizeMB)
-      .setRootIndexSizeKB(rootIndexSizeKB)
+      .setMemStoreSizeMB(memstoreSizeMB)
+      .setStorefileIndexSizeKB(storefileIndexSizeKB)
+      .setRootIndexSizeKB(rootLevelIndexSizeKB)
       .setTotalStaticIndexSizeKB(totalStaticIndexSizeKB)
       .setTotalStaticBloomSizeKB(totalStaticBloomSizeKB)
       .setReadRequestsCount(r.getReadRequestsCount())
@@ -1572,7 +1664,7 @@ public class HRegionServer extends HasThread implements
       .setCurrentCompactedKVs(currentCompactedKVs)
       .setDataLocality(dataLocality)
       .setLastMajorCompactionTs(r.getOldestHfileTs(true));
-    ((HRegion)r).setCompleteSequenceId(regionLoadBldr);
+    r.setCompleteSequenceId(regionLoadBldr);
 
     return regionLoadBldr.build();
   }
@@ -1582,7 +1674,7 @@ public class HRegionServer extends HasThread implements
    * @return An instance of RegionLoad.
    */
   public RegionLoad createRegionLoad(final String encodedRegionName) throws IOException {
-    Region r = onlineRegions.get(encodedRegionName);
+    HRegion r = onlineRegions.get(encodedRegionName);
     return r != null ? createRegionLoad(r, null, null) : null;
   }
 
@@ -1593,10 +1685,11 @@ public class HRegionServer extends HasThread implements
     private final HRegionServer instance;
     private final int majorCompactPriority;
     private final static int DEFAULT_PRIORITY = Integer.MAX_VALUE;
-    private long iteration = 0;
+    //Iteration is 1-based rather than 0-based so we don't check for compaction
+    // immediately upon region server startup
+    private long iteration = 1;
 
-    CompactionChecker(final HRegionServer h, final int sleepTime,
-        final Stoppable stopper) {
+    CompactionChecker(final HRegionServer h, final int sleepTime, final Stoppable stopper) {
       super("CompactionChecker", stopper, sleepTime);
       this.instance = h;
       LOG.info(this.getName() + " runs every " + StringUtils.formatTime(sleepTime));
@@ -1605,33 +1698,40 @@ public class HRegionServer extends HasThread implements
        * If not set, the compaction will use default priority.
        */
       this.majorCompactPriority = this.instance.conf.
-        getInt("hbase.regionserver.compactionChecker.majorCompactPriority",
-        DEFAULT_PRIORITY);
+          getInt("hbase.regionserver.compactionChecker.majorCompactPriority",
+              DEFAULT_PRIORITY);
     }
 
     @Override
     protected void chore() {
       for (Region r : this.instance.onlineRegions.values()) {
-        if (r == null)
+        if (r == null) {
           continue;
-        for (Store s : r.getStores()) {
+        }
+        HRegion hr = (HRegion) r;
+        for (HStore s : hr.stores.values()) {
           try {
             long multiplier = s.getCompactionCheckMultiplier();
             assert multiplier > 0;
-            if (iteration % multiplier != 0) continue;
+            if (iteration % multiplier != 0) {
+              continue;
+            }
             if (s.needsCompaction()) {
               // Queue a compaction. Will recognize if major is needed.
-              this.instance.compactSplitThread.requestSystemCompaction(r, s, getName()
-                  + " requests compaction");
-            } else if (s.isMajorCompaction()) {
-              if (majorCompactPriority == DEFAULT_PRIORITY
-                  || majorCompactPriority > ((HRegion)r).getCompactPriority()) {
-                this.instance.compactSplitThread.requestCompaction(r, s, getName()
-                    + " requests major compaction; use default priority", null);
+              this.instance.compactSplitThread.requestSystemCompaction(hr, s,
+                getName() + " requests compaction");
+            } else if (s.shouldPerformMajorCompaction()) {
+              s.triggerMajorCompaction();
+              if (majorCompactPriority == DEFAULT_PRIORITY ||
+                  majorCompactPriority > hr.getCompactPriority()) {
+                this.instance.compactSplitThread.requestCompaction(hr, s,
+                    getName() + " requests major compaction; use default priority",
+                    Store.NO_PRIORITY,
+                CompactionLifeCycleTracker.DUMMY, null);
               } else {
-                this.instance.compactSplitThread.requestCompaction(r, s, getName()
-                    + " requests major compaction; use configured priority",
-                  this.majorCompactPriority, null, null);
+                this.instance.compactSplitThread.requestCompaction(hr, s,
+                    getName() + " requests major compaction; use configured priority",
+                    this.majorCompactPriority, CompactionLifeCycleTracker.DUMMY, null);
               }
             }
           } catch (IOException e) {
@@ -1643,24 +1743,24 @@ public class HRegionServer extends HasThread implements
     }
   }
 
-  static class PeriodicMemstoreFlusher extends ScheduledChore {
+  static class PeriodicMemStoreFlusher extends ScheduledChore {
     final HRegionServer server;
     final static int RANGE_OF_DELAY = 5 * 60 * 1000; // 5 min in milliseconds
     final static int MIN_DELAY_TIME = 0; // millisec
-    public PeriodicMemstoreFlusher(int cacheFlushInterval, final HRegionServer server) {
-      super(server.getServerName() + "-MemstoreFlusherChore", server, cacheFlushInterval);
+    public PeriodicMemStoreFlusher(int cacheFlushInterval, final HRegionServer server) {
+      super("MemstoreFlusherChore", server, cacheFlushInterval);
       this.server = server;
     }
 
     @Override
     protected void chore() {
-      final StringBuffer whyFlush = new StringBuffer();
-      for (Region r : this.server.onlineRegions.values()) {
+      final StringBuilder whyFlush = new StringBuilder();
+      for (HRegion r : this.server.onlineRegions.values()) {
         if (r == null) continue;
-        if (((HRegion)r).shouldFlush(whyFlush)) {
+        if (r.shouldFlush(whyFlush)) {
           FlushRequester requester = server.getFlushRequester();
           if (requester != null) {
-            long randomDelay = RandomUtils.nextInt(RANGE_OF_DELAY) + MIN_DELAY_TIME;
+            long randomDelay = RandomUtils.nextInt(0, RANGE_OF_DELAY) + MIN_DELAY_TIME;
             LOG.info(getName() + " requesting flush of " +
               r.getRegionInfo().getRegionNameAsString() + " because " +
               whyFlush.toString() +
@@ -1677,7 +1777,7 @@ public class HRegionServer extends HasThread implements
 
   /**
    * Report the status of the server. A server is online once all the startup is
-   * completed (setting up filesystem, starting service threads, etc.). This
+   * completed (setting up filesystem, starting executorService threads, etc.). This
    * method is designed mostly to be useful in tests.
    *
    * @return true if online, false if not.
@@ -1689,27 +1789,27 @@ public class HRegionServer extends HasThread implements
   /**
    * Setup WAL log and replication if enabled.
    * Replication setup is done in here because it wants to be hooked up to WAL.
-   * @return A WAL instance.
+   *
    * @throws IOException
    */
-  private WALFactory setupWALAndReplication() throws IOException {
+  private void setupWALAndReplication() throws IOException {
     // TODO Replication make assumptions here based on the default filesystem impl
-    final Path oldLogDir = new Path(rootDir, HConstants.HREGION_OLDLOGDIR_NAME);
-    final String logName = AbstractFSWALProvider.getWALDirectoryName(this.serverName.toString());
+    Path oldLogDir = new Path(walRootDir, HConstants.HREGION_OLDLOGDIR_NAME);
+    String logName = AbstractFSWALProvider.getWALDirectoryName(this.serverName.toString());
 
-    Path logdir = new Path(rootDir, logName);
-    if (LOG.isDebugEnabled()) LOG.debug("logdir=" + logdir);
-    if (this.fs.exists(logdir)) {
+    Path logDir = new Path(walRootDir, logName);
+    if (LOG.isDebugEnabled()) LOG.debug("logDir=" + logDir);
+    if (this.walFs.exists(logDir)) {
       throw new RegionServerRunningException("Region server has already " +
-        "created directory at " + this.serverName.toString());
+          "created directory at " + this.serverName.toString());
     }
 
-    // Instantiate replication manager if replication enabled.  Pass it the
-    // log directories.
-    createNewReplicationInstance(conf, this, this.fs, logdir, oldLogDir);
+    // Instantiate replication if replication enabled.  Pass it the log directories.
+    // In here we create the Replication instances. Later they are initialized and started up.
+    createNewReplicationInstance(conf, this, this.walFs, logDir, oldLogDir);
 
     // listeners the wal factory will add to wals it creates.
-    final List<WALActionsListener> listeners = new ArrayList<WALActionsListener>();
+    List<WALActionsListener> listeners = new ArrayList<>();
     listeners.add(new MetricsWAL());
     if (this.replicationSourceHandler != null &&
         this.replicationSourceHandler.getWALActionsListener() != null) {
@@ -1717,8 +1817,42 @@ public class HRegionServer extends HasThread implements
       listeners.add(this.replicationSourceHandler.getWALActionsListener());
     }
 
-    return new WALFactory(conf, listeners, serverName.toString());
+    // There is a cyclic dependency between ReplicationSourceHandler and WALFactory.
+    // We use WALActionsListener to get the newly rolled WALs, so we need to get the
+    // WALActionsListeners from ReplicationSourceHandler before constructing WALFactory. And then
+    // ReplicationSourceHandler need to use WALFactory get the length of the wal file being written.
+    // So we here we need to construct WALFactory first, and then pass it to the initialized method
+    // of ReplicationSourceHandler.
+    // TODO: I can't follow replication; it has initialize and then later on we start it!
+    WALFactory factory = new WALFactory(conf, listeners, serverName.toString());
+    this.walFactory = factory;
+    if (this.replicationSourceHandler != null) {
+      this.replicationSourceHandler.initialize(this, walFs, logDir, oldLogDir, factory);
+    }
+    if (this.replicationSinkHandler != null &&
+        this.replicationSinkHandler != this.replicationSourceHandler) {
+      this.replicationSinkHandler.initialize(this, walFs, logDir, oldLogDir, factory);
+    }
   }
+
+  /**
+   * Start up replication source and sink handlers.
+   * @throws IOException
+   */
+  private void startReplicationService() throws IOException {
+    if (this.replicationSourceHandler == this.replicationSinkHandler &&
+        this.replicationSourceHandler != null) {
+      this.replicationSourceHandler.startReplicationService();
+    } else {
+      if (this.replicationSourceHandler != null) {
+        this.replicationSourceHandler.startReplicationService();
+      }
+      if (this.replicationSinkHandler != null) {
+        this.replicationSinkHandler.startReplicationService();
+      }
+    }
+  }
+
 
   public MetricsRegionServer getRegionServerMetrics() {
     return this.metricsRegionServer;
@@ -1733,6 +1867,8 @@ public class HRegionServer extends HasThread implements
 
   /*
    * Start maintenance Threads, Server, Worker and lease checker threads.
+   * Start all threads we need to run. This is called after we've successfully
+   * registered with the Master.
    * Install an UncaughtExceptionHandler that calls abort of RegionServer if we
    * get an unhandled exception. We cannot set the handler on all threads.
    * Server's internal Listener thread is off limits. For Server, if an OOME, it
@@ -1743,35 +1879,62 @@ public class HRegionServer extends HasThread implements
    * keeps its own internal stop mechanism so needs to be stopped by this
    * hosting server. Worker logs the exception and exits.
    */
-  private void startServiceThreads() throws IOException {
-    // Start executor services
-    this.service.startExecutorService(ExecutorType.RS_OPEN_REGION,
-      conf.getInt("hbase.regionserver.executor.openregion.threads", 3));
-    this.service.startExecutorService(ExecutorType.RS_OPEN_META,
-      conf.getInt("hbase.regionserver.executor.openmeta.threads", 1));
-    this.service.startExecutorService(ExecutorType.RS_OPEN_PRIORITY_REGION,
-      conf.getInt("hbase.regionserver.executor.openpriorityregion.threads", 3));
-    this.service.startExecutorService(ExecutorType.RS_CLOSE_REGION,
-      conf.getInt("hbase.regionserver.executor.closeregion.threads", 3));
-    this.service.startExecutorService(ExecutorType.RS_CLOSE_META,
-      conf.getInt("hbase.regionserver.executor.closemeta.threads", 1));
-    if (conf.getBoolean(StoreScanner.STORESCANNER_PARALLEL_SEEK_ENABLE, false)) {
-      this.service.startExecutorService(ExecutorType.RS_PARALLEL_SEEK,
-        conf.getInt("hbase.storescanner.parallel.seek.threads", 10));
+  private void startServices() throws IOException {
+    if (!isStopped() && !isAborted()) {
+      initializeThreads();
     }
-    this.service.startExecutorService(ExecutorType.RS_LOG_REPLAY_OPS, conf.getInt(
-       "hbase.regionserver.wal.max.splitters", SplitLogWorkerCoordination.DEFAULT_MAX_SPLITTERS));
+    this.secureBulkLoadManager = new SecureBulkLoadManager(this.conf, clusterConnection);
+    this.secureBulkLoadManager.start();
+
+    // Health checker thread.
+    if (isHealthCheckerConfigured()) {
+      int sleepTime = this.conf.getInt(HConstants.HEALTH_CHORE_WAKE_FREQ,
+      HConstants.DEFAULT_THREAD_WAKE_FREQUENCY);
+      healthCheckChore = new HealthCheckChore(sleepTime, this, getConfiguration());
+    }
+
+    this.walRoller = new LogRoller(this, this);
+    this.flushThroughputController = FlushThroughputControllerFactory.create(this, conf);
+
+    // Create the CompactedFileDischarger chore executorService. This chore helps to
+    // remove the compacted files
+    // that will no longer be used in reads.
+    // Default is 2 mins. The default value for TTLCleaner is 5 mins so we set this to
+    // 2 mins so that compacted files can be archived before the TTLCleaner runs
+    int cleanerInterval =
+    conf.getInt("hbase.hfile.compaction.discharger.interval", 2 * 60 * 1000);
+    this.compactedFileDischarger =
+    new CompactedHFilesDischarger(cleanerInterval, this, this);
+    choreService.scheduleChore(compactedFileDischarger);
+
+    // Start executor services
+    this.executorService.startExecutorService(ExecutorType.RS_OPEN_REGION,
+        conf.getInt("hbase.regionserver.executor.openregion.threads", 3));
+    this.executorService.startExecutorService(ExecutorType.RS_OPEN_META,
+        conf.getInt("hbase.regionserver.executor.openmeta.threads", 1));
+    this.executorService.startExecutorService(ExecutorType.RS_OPEN_PRIORITY_REGION,
+        conf.getInt("hbase.regionserver.executor.openpriorityregion.threads", 3));
+    this.executorService.startExecutorService(ExecutorType.RS_CLOSE_REGION,
+        conf.getInt("hbase.regionserver.executor.closeregion.threads", 3));
+    this.executorService.startExecutorService(ExecutorType.RS_CLOSE_META,
+        conf.getInt("hbase.regionserver.executor.closemeta.threads", 1));
+    if (conf.getBoolean(StoreScanner.STORESCANNER_PARALLEL_SEEK_ENABLE, false)) {
+      this.executorService.startExecutorService(ExecutorType.RS_PARALLEL_SEEK,
+          conf.getInt("hbase.storescanner.parallel.seek.threads", 10));
+    }
+    this.executorService.startExecutorService(ExecutorType.RS_LOG_REPLAY_OPS, conf.getInt(
+    "hbase.regionserver.wal.max.splitters", SplitLogWorkerCoordination.DEFAULT_MAX_SPLITTERS));
     // Start the threads for compacted files discharger
-    this.service.startExecutorService(ExecutorType.RS_COMPACTED_FILES_DISCHARGER,
-      conf.getInt(CompactionConfiguration.HBASE_HFILE_COMPACTION_DISCHARGER_THREAD_COUNT, 10));
+    this.executorService.startExecutorService(ExecutorType.RS_COMPACTED_FILES_DISCHARGER,
+        conf.getInt(CompactionConfiguration.HBASE_HFILE_COMPACTION_DISCHARGER_THREAD_COUNT, 10));
     if (ServerRegionReplicaUtil.isRegionReplicaWaitForPrimaryFlushEnabled(conf)) {
-      this.service.startExecutorService(ExecutorType.RS_REGION_REPLICA_FLUSH_OPS,
-        conf.getInt("hbase.regionserver.region.replica.flusher.threads",
-          conf.getInt("hbase.regionserver.executor.openregion.threads", 3)));
+      this.executorService.startExecutorService(ExecutorType.RS_REGION_REPLICA_FLUSH_OPS,
+          conf.getInt("hbase.regionserver.region.replica.flusher.threads",
+              conf.getInt("hbase.regionserver.executor.openregion.threads", 3)));
     }
 
     Threads.setDaemonThreadRunning(this.walRoller.getThread(), getName() + ".logRoller",
-        uncaughtExceptionHandler);
+    uncaughtExceptionHandler);
     this.cacheFlusher.start(uncaughtExceptionHandler);
 
     if (this.compactionChecker != null) choreService.scheduleChore(compactionChecker);
@@ -1780,23 +1943,12 @@ public class HRegionServer extends HasThread implements
     if (this.nonceManagerChore != null) choreService.scheduleChore(nonceManagerChore);
     if (this.storefileRefresher != null) choreService.scheduleChore(storefileRefresher);
     if (this.movedRegionsCleaner != null) choreService.scheduleChore(movedRegionsCleaner);
+    if (this.fsUtilizationChore != null) choreService.scheduleChore(fsUtilizationChore);
 
     // Leases is not a Thread. Internally it runs a daemon thread. If it gets
     // an unhandled exception, it will just exit.
     Threads.setDaemonThreadRunning(this.leases.getThread(), getName() + ".leaseChecker",
-      uncaughtExceptionHandler);
-
-    if (this.replicationSourceHandler == this.replicationSinkHandler &&
-        this.replicationSourceHandler != null) {
-      this.replicationSourceHandler.startReplicationService();
-    } else {
-      if (this.replicationSourceHandler != null) {
-        this.replicationSourceHandler.startReplicationService();
-      }
-      if (this.replicationSinkHandler != null) {
-        this.replicationSinkHandler.startReplicationService();
-      }
-    }
+    uncaughtExceptionHandler);
 
     // Create the log splitting worker and start it
     // set a smaller retries to fast fail otherwise splitlogworker could be blocked for
@@ -1804,12 +1956,77 @@ public class HRegionServer extends HasThread implements
     // tasks even after current task is preempted after a split task times out.
     Configuration sinkConf = HBaseConfiguration.create(conf);
     sinkConf.setInt(HConstants.HBASE_CLIENT_RETRIES_NUMBER,
-      conf.getInt("hbase.log.replay.retries.number", 8)); // 8 retries take about 23 seconds
+        conf.getInt("hbase.log.replay.retries.number", 8)); // 8 retries take about 23 seconds
     sinkConf.setInt(HConstants.HBASE_RPC_TIMEOUT_KEY,
-      conf.getInt("hbase.log.replay.rpc.timeout", 30000)); // default 30 seconds
-    sinkConf.setInt("hbase.client.serverside.retries.multiplier", 1);
-    this.splitLogWorker = new SplitLogWorker(this, sinkConf, this, this, walFactory);
-    splitLogWorker.start();
+        conf.getInt("hbase.log.replay.rpc.timeout", 30000)); // default 30 seconds
+    sinkConf.setInt(HConstants.HBASE_CLIENT_SERVERSIDE_RETRIES_MULTIPLIER, 1);
+    if (this.csm != null) {
+      // SplitLogWorker needs csm. If none, don't start this.
+      this.splitLogWorker = new SplitLogWorker(this, sinkConf, this,
+          this, walFactory);
+      splitLogWorker.start();
+    } else {
+      LOG.warn("SplitLogWorker Service NOT started; CoordinatedStateManager is null");
+    }
+
+    // Memstore services.
+    startHeapMemoryManager();
+    // Call it after starting HeapMemoryManager.
+    initializeMemStoreChunkCreator();
+  }
+
+  private void initializeThreads() throws IOException {
+    // Cache flushing thread.
+    this.cacheFlusher = new MemStoreFlusher(conf, this);
+
+    // Compaction thread
+    this.compactSplitThread = new CompactSplit(this);
+
+    // Background thread to check for compactions; needed if region has not gotten updates
+    // in a while. It will take care of not checking too frequently on store-by-store basis.
+    this.compactionChecker = new CompactionChecker(this, this.threadWakeFrequency, this);
+    this.periodicFlusher = new PeriodicMemStoreFlusher(this.threadWakeFrequency, this);
+    this.leases = new Leases(this.threadWakeFrequency);
+
+    // Create the thread to clean the moved regions list
+    movedRegionsCleaner = MovedRegionsCleaner.create(this);
+
+    if (this.nonceManager != null) {
+      // Create the scheduled chore that cleans up nonces.
+      nonceManagerChore = this.nonceManager.createCleanupScheduledChore(this);
+    }
+
+    // Setup the Quota Manager
+    rsQuotaManager = new RegionServerRpcQuotaManager(this);
+    rsSpaceQuotaManager = new RegionServerSpaceQuotaManager(this);
+
+    if (QuotaUtil.isQuotaEnabled(conf)) {
+      this.fsUtilizationChore = new FileSystemUtilizationChore(this);
+    }
+
+
+    boolean onlyMetaRefresh = false;
+    int storefileRefreshPeriod = conf.getInt(
+        StorefileRefresherChore.REGIONSERVER_STOREFILE_REFRESH_PERIOD,
+        StorefileRefresherChore.DEFAULT_REGIONSERVER_STOREFILE_REFRESH_PERIOD);
+    if (storefileRefreshPeriod == 0) {
+      storefileRefreshPeriod = conf.getInt(
+          StorefileRefresherChore.REGIONSERVER_META_STOREFILE_REFRESH_PERIOD,
+          StorefileRefresherChore.DEFAULT_REGIONSERVER_STOREFILE_REFRESH_PERIOD);
+      onlyMetaRefresh = true;
+    }
+    if (storefileRefreshPeriod > 0) {
+      this.storefileRefresher = new StorefileRefresherChore(storefileRefreshPeriod,
+          onlyMetaRefresh, this, this);
+    }
+    registerConfigurationObservers();
+  }
+
+  private void registerConfigurationObservers() {
+    // Registering the compactSplitThread object with the ConfigurationManager.
+    configurationManager.registerObserver(this.compactSplitThread);
+    configurationManager.registerObserver(this.rpcServices);
+    configurationManager.registerObserver(this);
   }
 
   /**
@@ -1877,14 +2094,15 @@ public class HRegionServer extends HasThread implements
       return false;
     }
     // Verify that all threads are alive
-    if (!(leases.isAlive()
-        && cacheFlusher.isAlive() && walRoller.isAlive()
-        && this.compactionChecker.isScheduled()
-        && this.periodicFlusher.isScheduled())) {
+    boolean healthy = (this.leases == null || this.leases.isAlive())
+        && (this.cacheFlusher == null || this.cacheFlusher.isAlive())
+        && (this.walRoller == null || this.walRoller.isAlive())
+        && (this.compactionChecker == null || this.compactionChecker.isScheduled())
+        && (this.periodicFlusher == null || this.periodicFlusher.isScheduled());
+    if (!healthy) {
       stop("One or more threads are no longer alive -- stop");
-      return false;
     }
-    return true;
+    return healthy;
   }
 
   private static final byte[] UNSPECIFIED_REGION = new byte[]{};
@@ -1895,11 +2113,11 @@ public class HRegionServer extends HasThread implements
   }
 
   @Override
-  public WAL getWAL(HRegionInfo regionInfo) throws IOException {
+  public WAL getWAL(RegionInfo regionInfo) throws IOException {
     WAL wal;
     // _ROOT_ and hbase:meta regions have separate WAL.
-    if (regionInfo != null && regionInfo.isMetaTable()
-        && regionInfo.getReplicaId() == HRegionInfo.DEFAULT_REPLICA_ID) {
+    if (regionInfo != null && regionInfo.isMetaRegion()
+        && regionInfo.getReplicaId() == RegionInfo.DEFAULT_REPLICA_ID) {
       wal = walFactory.getMetaWAL(regionInfo.getEncodedNameAsBytes());
     } else if (regionInfo == null) {
       wal = walFactory.getWAL(UNSPECIFIED_REGION, null);
@@ -1907,8 +2125,14 @@ public class HRegionServer extends HasThread implements
       byte[] namespace = regionInfo.getTable().getNamespace();
       wal = walFactory.getWAL(regionInfo.getEncodedNameAsBytes(), namespace);
     }
-    walRoller.addWAL(wal);
+    if (this.walRoller != null) {
+      this.walRoller.addWAL(wal);
+    }
     return wal;
+  }
+
+  public LogRoller getWalRoller() {
+    return walRoller;
   }
 
   @Override
@@ -1928,19 +2152,34 @@ public class HRegionServer extends HasThread implements
 
   @Override
   public void stop(final String msg) {
+    stop(msg, false, RpcServer.getRequestUser().orElse(null));
+  }
+
+  /**
+   * Stops the regionserver.
+   * @param msg Status message
+   * @param force True if this is a regionserver abort
+   * @param user The user executing the stop request, or null if no user is associated
+   */
+  public void stop(final String msg, final boolean force, final User user) {
     if (!this.stopped) {
       LOG.info("***** STOPPING region server '" + this + "' *****");
-      try {
-        if (this.rsHost != null) {
-          this.rsHost.preStop(msg);
+      if (this.rsHost != null) {
+        // when forced via abort don't allow CPs to override
+        try {
+          this.rsHost.preStop(msg, user);
+        } catch (IOException ioe) {
+          if (!force) {
+            LOG.warn("The region server did not stop", ioe);
+            return;
+          }
+          LOG.warn("Skipping coprocessor exception on preStop() due to forced shutdown", ioe);
         }
-        this.stopped = true;
-        LOG.info("STOPPED: " + msg);
-        // Wakes run() if it is sleeping
-        sleeper.skipSleepCycle();
-      } catch (IOException exp) {
-        LOG.warn("The region server did not stop", exp);
       }
+      this.stopped = true;
+      LOG.info("STOPPED: " + msg);
+      // Wakes run() if it is sleeping
+      sleeper.skipSleepCycle();
     }
   }
 
@@ -1958,22 +2197,16 @@ public class HRegionServer extends HasThread implements
   }
 
   @Override
-  public void postOpenDeployTasks(final Region r) throws KeeperException, IOException {
-    postOpenDeployTasks(new PostOpenDeployContext(r, -1));
-  }
-
-  @Override
   public void postOpenDeployTasks(final PostOpenDeployContext context)
       throws KeeperException, IOException {
-    Region r = context.getRegion();
+    HRegion r = context.getRegion();
     long masterSystemTime = context.getMasterSystemTime();
-    Preconditions.checkArgument(r instanceof HRegion, "r must be an HRegion");
     rpcServices.checkOpen();
     LOG.info("Post open deploy tasks for " + r.getRegionInfo().getRegionNameAsString());
     // Do checks to see if we need to compact (references or too many files)
-    for (Store s : r.getStores()) {
+    for (HStore s : r.stores.values()) {
       if (s.hasReferences() || s.needsCompaction()) {
-       this.compactSplitThread.requestSystemCompaction(r, s, "Opening Region");
+        this.compactSplitThread.requestSystemCompaction(r, s, "Opening Region");
       }
     }
     long openSeqNum = r.getOpenSeqNum();
@@ -1984,9 +2217,6 @@ public class HRegionServer extends HasThread implements
       openSeqNum = 0;
     }
 
-    // Update flushed sequence id of a recovering region in ZK
-    updateRecoveringRegionLastFlushedSequenceId(r);
-
     // Notify master
     if (!reportRegionStateTransition(new RegionStateTransitionContext(
         TransitionCode.OPENED, openSeqNum, masterSystemTime, r.getRegionInfo()))) {
@@ -1994,21 +2224,9 @@ public class HRegionServer extends HasThread implements
         + r.getRegionInfo().getRegionNameAsString());
     }
 
-    triggerFlushInPrimaryRegion((HRegion)r);
+    triggerFlushInPrimaryRegion(r);
 
     LOG.debug("Finished post open deploy task for " + r.getRegionInfo().getRegionNameAsString());
-  }
-
-  @Override
-  public boolean reportRegionStateTransition(TransitionCode code, HRegionInfo... hris) {
-    return reportRegionStateTransition(code, HConstants.NO_SEQNUM, hris);
-  }
-
-  @Override
-  public boolean reportRegionStateTransition(
-      TransitionCode code, long openSeqNum, HRegionInfo... hris) {
-    return reportRegionStateTransition(
-      new RegionStateTransitionContext(code, HConstants.NO_SEQNUM, -1, hris));
   }
 
   @Override
@@ -2016,7 +2234,7 @@ public class HRegionServer extends HasThread implements
     TransitionCode code = context.getCode();
     long openSeqNum = context.getOpenSeqNum();
     long masterSystemTime = context.getMasterSystemTime();
-    HRegionInfo[] hris = context.getHris();
+    RegionInfo[] hris = context.getHris();
 
     if (TEST_SKIP_REPORTING_TRANSITION) {
       // This is for testing only in case there is no master
@@ -2052,11 +2270,16 @@ public class HRegionServer extends HasThread implements
     if (code == TransitionCode.OPENED && openSeqNum >= 0) {
       transition.setOpenSeqNum(openSeqNum);
     }
-    for (HRegionInfo hri: hris) {
-      transition.addRegionInfo(HRegionInfo.convert(hri));
+    for (RegionInfo hri: hris) {
+      transition.addRegionInfo(ProtobufUtil.toRegionInfo(hri));
     }
     ReportRegionStateTransitionRequest request = builder.build();
-    while (keepLooping()) {
+    int tries = 0;
+    long pauseTime = INIT_PAUSE_TIME_MS;
+    // Keep looping till we get an error. We want to send reports even though server is going down.
+    // Only go down if clusterConnection is null. It is set to null almost as last thing as the
+    // HRegionServer does down.
+    while (this.clusterConnection != null && !this.clusterConnection.isClosed()) {
       RegionServerStatusService.BlockingInterface rss = rssStub;
       try {
         if (rss == null) {
@@ -2066,95 +2289,40 @@ public class HRegionServer extends HasThread implements
         ReportRegionStateTransitionResponse response =
           rss.reportRegionStateTransition(null, request);
         if (response.hasErrorMessage()) {
-          LOG.info("Failed to transition " + hris[0]
-            + " to " + code + ": " + response.getErrorMessage());
-          return false;
+          LOG.info("TRANSITION FAILED " + request + ": " + response.getErrorMessage());
+          break;
         }
+        // Log if we had to retry else don't log unless TRACE. We want to
+        // know if were successful after an attempt showed in logs as failed.
+        if (tries > 0 || LOG.isTraceEnabled()) {
+          LOG.info("TRANSITION REPORTED " + request);
+        }
+        // NOTE: Return mid-method!!!
         return true;
       } catch (ServiceException se) {
         IOException ioe = ProtobufUtil.getRemoteException(se);
-        LOG.info("Failed to report region transition, will retry", ioe);
+        boolean pause = ioe instanceof ServerNotRunningYetException ||
+            ioe instanceof PleaseHoldException;
+        if (pause) {
+          // Do backoff else we flood the Master with requests.
+          pauseTime = ConnectionUtils.getPauseTime(INIT_PAUSE_TIME_MS, tries);
+        } else {
+          pauseTime = INIT_PAUSE_TIME_MS; // Reset.
+        }
+        LOG.info("Failed report transition " +
+          TextFormat.shortDebugString(request) + "; retry (#" + tries + ")" +
+            (pause?
+                " after " + pauseTime + "ms delay (Master is coming online...).":
+                " immediately."),
+            ioe);
+        if (pause) Threads.sleep(pauseTime);
+        tries++;
         if (rssStub == rss) {
           rssStub = null;
         }
       }
     }
     return false;
-  }
-
-  @Override
-  public long requestRegionSplit(final HRegionInfo regionInfo, final byte[] splitRow) {
-    NonceGenerator ng = clusterConnection.getNonceGenerator();
-    final long nonceGroup = ng.getNonceGroup();
-    final long nonce = ng.newNonce();
-    long procId = -1;
-    SplitTableRegionRequest request =
-        RequestConverter.buildSplitTableRegionRequest(regionInfo, splitRow, nonceGroup, nonce);
-
-    while (keepLooping()) {
-      RegionServerStatusService.BlockingInterface rss = rssStub;
-      try {
-        if (rss == null) {
-          createRegionServerStatusStub();
-          continue;
-        }
-        SplitTableRegionResponse response = rss.splitRegion(null, request);
-
-        //TODO: should we limit the retry number before quitting?
-        if (response == null || (procId = response.getProcId()) == -1) {
-          LOG.warn("Failed to split " + regionInfo + " retrying...");
-          continue;
-        }
-
-        break;
-      } catch (ServiceException se) {
-        // TODO: retry or just fail
-        IOException ioe = ProtobufUtil.getRemoteException(se);
-        LOG.info("Failed to split region, will retry", ioe);
-        if (rssStub == rss) {
-          rssStub = null;
-        }
-      }
-    }
-    return procId;
-  }
-
-  @Override
-  public boolean isProcedureFinished(final long procId) throws IOException {
-    GetProcedureResultRequest request =
-        GetProcedureResultRequest.newBuilder().setProcId(procId).build();
-
-    while (keepLooping()) {
-      RegionServerStatusService.BlockingInterface rss = rssStub;
-      try {
-        if (rss == null) {
-          createRegionServerStatusStub();
-          continue;
-        }
-        // TODO: find a way to get proc result
-        GetProcedureResultResponse response = rss.getProcedureResult(null, request);
-
-        if (response == null) {
-          LOG.warn("Failed to get procedure (id=" + procId + ") status.");
-          return false;
-        } else if (response.getState() == GetProcedureResultResponse.State.RUNNING) {
-          return false;
-        } else if (response.hasException()) {
-          // Procedure failed.
-          throw ForeignExceptionUtil.toIOException(response.getException());
-        }
-        // Procedure completes successfully
-        break;
-      } catch (ServiceException se) {
-        // TODO: retry or just fail
-        IOException ioe = ProtobufUtil.getRemoteException(se);
-        LOG.warn("Failed to get split region procedure result.  Retrying", ioe);
-        if (rssStub == rss) {
-          rssStub = null;
-        }
-      }
-    }
-    return true;
   }
 
   /**
@@ -2176,9 +2344,10 @@ public class HRegionServer extends HasThread implements
     // RegionReplicaFlushHandler might reset this.
 
     // submit it to be handled by one of the handlers so that we do not block OpenRegionHandler
-    this.service.submit(
-      new RegionReplicaFlushHandler(this, clusterConnection,
-        rpcRetryingCallerFactory, rpcControllerFactory, operationTimeout, region));
+    if (this.executorService != null) {
+      this.executorService.submit(new RegionReplicaFlushHandler(this, clusterConnection,
+          rpcRetryingCallerFactory, rpcControllerFactory, operationTimeout, region));
+    }
   }
 
   @Override
@@ -2205,19 +2374,19 @@ public class HRegionServer extends HasThread implements
   public void abort(String reason, Throwable cause) {
     String msg = "***** ABORTING region server " + this + ": " + reason + " *****";
     if (cause != null) {
-      LOG.fatal(msg, cause);
+      LOG.error(HBaseMarkers.FATAL, msg, cause);
     } else {
-      LOG.fatal(msg);
+      LOG.error(HBaseMarkers.FATAL, msg);
     }
     this.abortRequested = true;
     // HBASE-4014: show list of coprocessors that were loaded to help debug
     // regionserver crashes.Note that we're implicitly using
     // java.util.HashSet's toString() method to print the coprocessor names.
-    LOG.fatal("RegionServer abort: loaded coprocessors are: " +
+    LOG.error(HBaseMarkers.FATAL, "RegionServer abort: loaded coprocessors are: " +
         CoprocessorHost.getLoadedCoprocessors());
     // Try and dump metrics if abort -- might give clue as to how fatal came about....
     try {
-      LOG.info("Dump of metrics as JSON on abort: " + JSONBean.dumpRegionServerMetrics());
+      LOG.info("Dump of metrics as JSON on abort: " + DumpRegionServerMetrics.dumpMetrics());
     } catch (MalformedObjectNameException | IOException e) {
       LOG.warn("Failed dumping metrics", e);
     }
@@ -2240,7 +2409,8 @@ public class HRegionServer extends HasThread implements
     } catch (Throwable t) {
       LOG.warn("Unable to report fatal error to master", t);
     }
-    stop(reason);
+    // shutdown should be run as the internal user
+    stop(reason, true, null);
   }
 
   /**
@@ -2260,6 +2430,7 @@ public class HRegionServer extends HasThread implements
    * logs but it does close socket in case want to bring up server on old
    * hostname+port immediately.
    */
+  @VisibleForTesting
   protected void kill() {
     this.killed = true;
     abort("Simulated kill");
@@ -2284,6 +2455,7 @@ public class HRegionServer extends HasThread implements
     if (this.healthCheckChore != null) healthCheckChore.cancel(true);
     if (this.storefileRefresher != null) storefileRefresher.cancel(true);
     if (this.movedRegionsCleaner != null) movedRegionsCleaner.cancel(true);
+    if (this.fsUtilizationChore != null) fsUtilizationChore.cancel(true);
 
     if (this.cacheFlusher != null) {
       this.cacheFlusher.join();
@@ -2298,7 +2470,7 @@ public class HRegionServer extends HasThread implements
     if (this.compactSplitThread != null) {
       this.compactSplitThread.join();
     }
-    if (this.service != null) this.service.shutdown();
+    if (this.executorService != null) this.executorService.shutdown();
     if (this.replicationSourceHandler != null &&
         this.replicationSourceHandler == this.replicationSinkHandler) {
       this.replicationSourceHandler.stopReplicationService();
@@ -2314,15 +2486,16 @@ public class HRegionServer extends HasThread implements
 
   /**
    * @return Return the object that implements the replication
-   * source service.
+   * source executorService.
    */
-  ReplicationSourceService getReplicationSourceService() {
+  @VisibleForTesting
+  public ReplicationSourceService getReplicationSourceService() {
     return replicationSourceHandler;
   }
 
   /**
    * @return Return the object that implements the replication
-   * sink service.
+   * sink executorService.
    */
   ReplicationSinkService getReplicationSinkService() {
     return replicationSinkHandler;
@@ -2356,7 +2529,8 @@ public class HRegionServer extends HasThread implements
     }
     ServerName sn = null;
     long previousLogTime = 0;
-    RegionServerStatusService.BlockingInterface intf = null;
+    RegionServerStatusService.BlockingInterface intRssStub = null;
+    LockService.BlockingInterface intLockStub = null;
     boolean interrupted = false;
     try {
       while (keepLooping()) {
@@ -2380,14 +2554,16 @@ public class HRegionServer extends HasThread implements
 
         // If we are on the active master, use the shortcut
         if (this instanceof HMaster && sn.equals(getServerName())) {
-          intf = ((HMaster)this).getMasterRpcServices();
+          intRssStub = ((HMaster)this).getMasterRpcServices();
+          intLockStub = ((HMaster)this).getMasterRpcServices();
           break;
         }
         try {
           BlockingRpcChannel channel =
             this.rpcClient.createBlockingRpcChannel(sn, userProvider.getCurrent(),
               shortOperationTimeout);
-          intf = RegionServerStatusService.newBlockingStub(channel);
+          intRssStub = RegionServerStatusService.newBlockingStub(channel);
+          intLockStub = LockService.newBlockingStub(channel);
           break;
         } catch (IOException e) {
           if (System.currentTimeMillis() > (previousLogTime + 1000)) {
@@ -2410,7 +2586,8 @@ public class HRegionServer extends HasThread implements
         Thread.currentThread().interrupt();
       }
     }
-    rssStub = intf;
+    this.rssStub = intRssStub;
+    this.lockStub = intLockStub;
     return sn;
   }
 
@@ -2430,6 +2607,7 @@ public class HRegionServer extends HasThread implements
    * @throws IOException
    */
   private RegionServerStartupResponse reportForDuty() throws IOException {
+    if (this.masterless) return RegionServerStartupResponse.getDefaultInstance();
     ServerName masterServerName = createRegionServerStatusStub(true);
     if (masterServerName == null) return null;
     RegionServerStartupResponse result = null;
@@ -2454,7 +2632,8 @@ public class HRegionServer extends HasThread implements
     } catch (ServiceException se) {
       IOException ioe = ProtobufUtil.getRemoteException(se);
       if (ioe instanceof ClockOutOfSyncException) {
-        LOG.fatal("Master rejected startup because clock is out of sync", ioe);
+        LOG.error(HBaseMarkers.FATAL, "Master rejected startup because clock is out of sync",
+            ioe);
         // Re-throw IOE will cause RS to abort
         throw ioe;
       } else if (ioe instanceof ServerNotRunningYetException) {
@@ -2509,11 +2688,11 @@ public class HRegionServer extends HasThread implements
    * @param abort Whether we're running an abort.
    */
   void closeMetaTableRegions(final boolean abort) {
-    Region meta = null;
+    HRegion meta = null;
     this.lock.writeLock().lock();
     try {
-      for (Map.Entry<String, Region> e: onlineRegions.entrySet()) {
-        HRegionInfo hri = e.getValue().getRegionInfo();
+      for (Map.Entry<String, HRegion> e: onlineRegions.entrySet()) {
+        RegionInfo hri = e.getValue().getRegionInfo();
         if (hri.isMetaRegion()) {
           meta = e.getValue();
         }
@@ -2534,9 +2713,9 @@ public class HRegionServer extends HasThread implements
   void closeUserRegions(final boolean abort) {
     this.lock.writeLock().lock();
     try {
-      for (Map.Entry<String, Region> e: this.onlineRegions.entrySet()) {
-        Region r = e.getValue();
-        if (!r.getRegionInfo().isMetaTable() && r.isAvailable()) {
+      for (Map.Entry<String, HRegion> e: this.onlineRegions.entrySet()) {
+        HRegion r = e.getValue();
+        if (!r.getRegionInfo().isMetaRegion() && r.isAvailable()) {
           // Don't update zk with this close transition; pass false.
           closeRegionIgnoreErrors(r.getRegionInfo(), abort);
         }
@@ -2562,11 +2741,6 @@ public class HRegionServer extends HasThread implements
   @Override
   public boolean isStopping() {
     return this.stopping;
-  }
-
-  @Override
-  public Map<String, Region> getRecoveringRegions() {
-    return this.recoveringRegions;
   }
 
   /**
@@ -2596,13 +2770,13 @@ public class HRegionServer extends HasThread implements
    * This method will only work if HRegionServer is in the same JVM as client;
    * HRegion cannot be serialized to cross an rpc.
    */
-  public Collection<Region> getOnlineRegionsLocalContext() {
-    Collection<Region> regions = this.onlineRegions.values();
+  public Collection<HRegion> getOnlineRegionsLocalContext() {
+    Collection<HRegion> regions = this.onlineRegions.values();
     return Collections.unmodifiableCollection(regions);
   }
 
   @Override
-  public void addToOnlineRegions(Region region) {
+  public void addRegion(HRegion region) {
     this.onlineRegions.put(region.getRegionInfo().getEncodedName(), region);
     configurationManager.registerObserver(region);
   }
@@ -2612,9 +2786,9 @@ public class HRegionServer extends HasThread implements
    * biggest.  If two regions are the same size, then the last one found wins; i.e. this method
    * may NOT return all regions.
    */
-  SortedMap<Long, Region> getCopyOfOnlineRegionsSortedBySize() {
+  SortedMap<Long, HRegion> getCopyOfOnlineRegionsSortedBySize() {
     // we'll sort the regions in reverse
-    SortedMap<Long, Region> sortedRegions = new TreeMap<Long, Region>(
+    SortedMap<Long, HRegion> sortedRegions = new TreeMap<>(
         new Comparator<Long>() {
           @Override
           public int compare(Long a, Long b) {
@@ -2622,8 +2796,8 @@ public class HRegionServer extends HasThread implements
           }
         });
     // Copy over all regions. Regions are sorted by size with biggest first.
-    for (Region region : this.onlineRegions.values()) {
-      sortedRegions.put(region.getMemstoreSize(), region);
+    for (HRegion region : this.onlineRegions.values()) {
+      sortedRegions.put(region.getMemStoreSize(), region);
     }
     return sortedRegions;
   }
@@ -2641,14 +2815,19 @@ public class HRegionServer extends HasThread implements
     return this.cacheFlusher;
   }
 
+  @Override
+  public CompactionRequester getCompactionRequestor() {
+    return this.compactSplitThread;
+  }
+
   /**
    * Get the top N most loaded regions this server is serving so we can tell the
    * master which regions it can reallocate if we're overloaded. TODO: actually
    * calculate which regions are most loaded. (Right now, we're just grabbing
    * the first N regions being served regardless of load.)
    */
-  protected HRegionInfo[] getMostLoadedRegions() {
-    ArrayList<HRegionInfo> regions = new ArrayList<HRegionInfo>();
+  protected RegionInfo[] getMostLoadedRegions() {
+    ArrayList<RegionInfo> regions = new ArrayList<>();
     for (Region r : onlineRegions.values()) {
       if (!r.isAvailable()) {
         continue;
@@ -2659,7 +2838,7 @@ public class HRegionServer extends HasThread implements
         break;
       }
     }
-    return regions.toArray(new HRegionInfo[regions.size()]);
+    return regions.toArray(new RegionInfo[regions.size()]);
   }
 
   @Override
@@ -2682,6 +2861,20 @@ public class HRegionServer extends HasThread implements
     return fs;
   }
 
+  /**
+   * @return Return the walRootDir.
+   */
+  protected Path getWALRootDir() {
+    return walRootDir;
+  }
+
+  /**
+   * @return Return the walFs.
+   */
+  protected FileSystem getWALFileSystem() {
+    return walFs;
+  }
+
   @Override
   public String toString() {
     return getServerName().toString();
@@ -2697,23 +2890,18 @@ public class HRegionServer extends HasThread implements
   }
 
   @Override
-  public ZooKeeperWatcher getZooKeeper() {
+  public ZKWatcher getZooKeeper() {
     return zooKeeper;
   }
 
   @Override
-  public BaseCoordinatedStateManager getCoordinatedStateManager() {
+  public CoordinatedStateManager getCoordinatedStateManager() {
     return csm;
   }
 
   @Override
   public ServerName getServerName() {
     return serverName;
-  }
-
-  @Override
-  public CompactionRequestor getCompactionRequester() {
-    return this.compactSplitThread;
   }
 
   public RegionServerCoprocessorHost getRegionServerCoprocessorHost(){
@@ -2727,7 +2915,7 @@ public class HRegionServer extends HasThread implements
 
   @Override
   public ExecutorService getExecutorService() {
-    return service;
+    return executorService;
   }
 
   @Override
@@ -2736,7 +2924,7 @@ public class HRegionServer extends HasThread implements
   }
 
   @Override
-  public RegionServerQuotaManager getRegionServerQuotaManager() {
+  public RegionServerRpcQuotaManager getRegionServerRpcQuotaManager() {
     return rsQuotaManager;
   }
 
@@ -2745,59 +2933,53 @@ public class HRegionServer extends HasThread implements
   //
 
   /**
-   * Load the replication service objects, if any
+   * Load the replication executorService objects, if any
    */
-  static private void createNewReplicationInstance(Configuration conf,
-    HRegionServer server, FileSystem fs, Path logDir, Path oldLogDir) throws IOException{
+  private static void createNewReplicationInstance(Configuration conf, HRegionServer server,
+      FileSystem walFs, Path walDir, Path oldWALDir) throws IOException {
 
-    if ((server instanceof HMaster) &&
-        (!BaseLoadBalancer.userTablesOnMaster(conf))) {
+    if ((server instanceof HMaster) && (!LoadBalancer.isTablesOnMaster(conf) ||
+        LoadBalancer.isSystemTablesOnlyOnMaster(conf))) {
       return;
     }
 
     // read in the name of the source replication class from the config file.
     String sourceClassname = conf.get(HConstants.REPLICATION_SOURCE_SERVICE_CLASSNAME,
-                               HConstants.REPLICATION_SERVICE_CLASSNAME_DEFAULT);
+      HConstants.REPLICATION_SERVICE_CLASSNAME_DEFAULT);
 
     // read in the name of the sink replication class from the config file.
     String sinkClassname = conf.get(HConstants.REPLICATION_SINK_SERVICE_CLASSNAME,
-                             HConstants.REPLICATION_SERVICE_CLASSNAME_DEFAULT);
+      HConstants.REPLICATION_SERVICE_CLASSNAME_DEFAULT);
 
     // If both the sink and the source class names are the same, then instantiate
     // only one object.
     if (sourceClassname.equals(sinkClassname)) {
-      server.replicationSourceHandler = (ReplicationSourceService)
-                                         newReplicationInstance(sourceClassname,
-                                         conf, server, fs, logDir, oldLogDir);
-      server.replicationSinkHandler = (ReplicationSinkService)
-                                         server.replicationSourceHandler;
+      server.replicationSourceHandler =
+          (ReplicationSourceService) newReplicationInstance(sourceClassname, conf, server, walFs,
+            walDir, oldWALDir);
+      server.replicationSinkHandler = (ReplicationSinkService) server.replicationSourceHandler;
     } else {
-      server.replicationSourceHandler = (ReplicationSourceService)
-                                         newReplicationInstance(sourceClassname,
-                                         conf, server, fs, logDir, oldLogDir);
-      server.replicationSinkHandler = (ReplicationSinkService)
-                                         newReplicationInstance(sinkClassname,
-                                         conf, server, fs, logDir, oldLogDir);
+      server.replicationSourceHandler =
+          (ReplicationSourceService) newReplicationInstance(sourceClassname, conf, server, walFs,
+            walDir, oldWALDir);
+      server.replicationSinkHandler = (ReplicationSinkService) newReplicationInstance(sinkClassname,
+        conf, server, walFs, walDir, oldWALDir);
     }
   }
 
-  static private ReplicationService newReplicationInstance(String classname,
-    Configuration conf, HRegionServer server, FileSystem fs, Path logDir,
-    Path oldLogDir) throws IOException{
-
-    Class<?> clazz = null;
+  private static ReplicationService newReplicationInstance(String classname, Configuration conf,
+      HRegionServer server, FileSystem walFs, Path logDir, Path oldLogDir) throws IOException {
+    Class<? extends ReplicationService> clazz = null;
     try {
       ClassLoader classLoader = Thread.currentThread().getContextClassLoader();
-      clazz = Class.forName(classname, true, classLoader);
+      clazz = Class.forName(classname, true, classLoader).asSubclass(ReplicationService.class);
     } catch (java.lang.ClassNotFoundException nfe) {
       throw new IOException("Could not find class for " + classname);
     }
 
-    // create an instance of the replication object.
-    ReplicationService service = (ReplicationService)
-                              ReflectionUtils.newInstance(clazz, conf);
-    service.initialize(server, fs, logDir, oldLogDir);
-    return service;
+    // create an instance of the replication object, but do not initialize it here as we need to use
+    // WALFactory when initializing.
+    return ReflectionUtils.newInstance(clazz, conf);
   }
 
   /**
@@ -2809,11 +2991,11 @@ public class HRegionServer extends HasThread implements
    */
   public static HRegionServer constructRegionServer(
       Class<? extends HRegionServer> regionServerClass,
-      final Configuration conf2, CoordinatedStateManager cp) {
+      final Configuration conf2) {
     try {
       Constructor<? extends HRegionServer> c = regionServerClass
-          .getConstructor(Configuration.class, CoordinatedStateManager.class);
-      return c.newInstance(conf2, cp);
+          .getConstructor(Configuration.class);
+      return c.newInstance(conf2);
     } catch (Exception e) {
       throw new RuntimeException("Failed construction of " + "Regionserver: "
           + regionServerClass.toString(), e);
@@ -2824,7 +3006,7 @@ public class HRegionServer extends HasThread implements
    * @see org.apache.hadoop.hbase.regionserver.HRegionServerCommandLine
    */
   public static void main(String[] args) throws Exception {
-    LOG.info("***** STARTING service '" + HRegionServer.class.getSimpleName() + "' *****");
+    LOG.info("STARTING executorService " + HRegionServer.class.getSimpleName());
     VersionInfo.logVersion();
     Configuration conf = HBaseConfiguration.create();
     @SuppressWarnings("unchecked")
@@ -2845,11 +3027,11 @@ public class HRegionServer extends HasThread implements
    * @return Online regions from <code>tableName</code>
    */
   @Override
-  public List<Region> getOnlineRegions(TableName tableName) {
-     List<Region> tableRegions = new ArrayList<Region>();
+  public List<HRegion> getRegions(TableName tableName) {
+     List<HRegion> tableRegions = new ArrayList<>();
      synchronized (this.onlineRegions) {
-       for (Region region: this.onlineRegions.values()) {
-         HRegionInfo regionInfo = region.getRegionInfo();
+       for (HRegion region: this.onlineRegions.values()) {
+         RegionInfo regionInfo = region.getRegionInfo();
          if(regionInfo.getTable().equals(tableName)) {
            tableRegions.add(region);
          }
@@ -2859,25 +3041,25 @@ public class HRegionServer extends HasThread implements
    }
 
   @Override
-  public List<Region> getOnlineRegions() {
-    List<Region> allRegions = new ArrayList<Region>();
+  public List<HRegion> getRegions() {
+    List<HRegion> allRegions = new ArrayList<>();
     synchronized (this.onlineRegions) {
       // Return a clone copy of the onlineRegions
       allRegions.addAll(onlineRegions.values());
     }
     return allRegions;
   }
+
   /**
    * Gets the online tables in this RS.
    * This method looks at the in-memory onlineRegions.
    * @return all the online tables in this RS
    */
-  @Override
   public Set<TableName> getOnlineTables() {
-    Set<TableName> tables = new HashSet<TableName>();
+    Set<TableName> tables = new HashSet<>();
     synchronized (this.onlineRegions) {
       for (Region region: this.onlineRegions.values()) {
-        tables.add(region.getTableDesc().getTableName());
+        tables.add(region.getTableDescriptor().getTableName());
       }
     }
     return tables;
@@ -2885,7 +3067,7 @@ public class HRegionServer extends HasThread implements
 
   // used by org/apache/hbase/tmpl/regionserver/RSStatusTmpl.jamon (HBASE-4070).
   public String[] getRegionServerCoprocessors() {
-    TreeSet<String> coprocessors = new TreeSet<String>();
+    TreeSet<String> coprocessors = new TreeSet<>();
     try {
       coprocessors.addAll(getWAL(null).getCoprocessorHost().getCoprocessors());
     } catch (IOException exception) {
@@ -2893,8 +3075,8 @@ public class HRegionServer extends HasThread implements
           "skipping.");
       LOG.debug("Exception details for failure to fetch wal coprocessor information.", exception);
     }
-    Collection<Region> regions = getOnlineRegionsLocalContext();
-    for (Region region: regions) {
+    Collection<HRegion> regions = getOnlineRegionsLocalContext();
+    for (HRegion region: regions) {
       coprocessors.addAll(region.getCoprocessorHost().getCoprocessors());
       try {
         coprocessors.addAll(getWAL(region.getRegionInfo()).getCoprocessorHost().getCoprocessors());
@@ -2904,6 +3086,7 @@ public class HRegionServer extends HasThread implements
         LOG.debug("Exception details for failure to fetch wal coprocessor information.", exception);
       }
     }
+    coprocessors.addAll(rsHost.getCoprocessors());
     return coprocessors.toArray(new String[coprocessors.size()]);
   }
 
@@ -2911,7 +3094,7 @@ public class HRegionServer extends HasThread implements
    * Try to close the region, logs a warning on failure but continues.
    * @param region Region to close
    */
-  private void closeRegionIgnoreErrors(HRegionInfo region, final boolean abort) {
+  private void closeRegionIgnoreErrors(RegionInfo region, final boolean abort) {
     try {
       if (!closeRegion(region.getEncodedName(), abort, null)) {
         LOG.warn("Failed to close " + region.getRegionNameAsString() +
@@ -2944,7 +3127,7 @@ public class HRegionServer extends HasThread implements
   protected boolean closeRegion(String encodedName, final boolean abort, final ServerName sn)
       throws NotServingRegionException {
     //Check for permissions to close.
-    Region actualRegion = this.getFromOnlineRegions(encodedName);
+    HRegion actualRegion = this.getRegion(encodedName);
     // Can be null if we're calling close on a region that's not online
     if ((actualRegion != null) && (actualRegion.getCoprocessorHost() != null)) {
       try {
@@ -2969,7 +3152,7 @@ public class HRegionServer extends HasThread implements
         return closeRegion(encodedName, abort, sn);
       }
       // Let's get the region from the online region list again
-      actualRegion = this.getFromOnlineRegions(encodedName);
+      actualRegion = this.getRegion(encodedName);
       if (actualRegion == null) { // If already online, we still need to close it.
         LOG.info("The opening previously in progress has been cancelled by a CLOSE request.");
         // The master deletes the znode when it receives this exception.
@@ -2991,65 +3174,69 @@ public class HRegionServer extends HasThread implements
     }
 
     CloseRegionHandler crh;
-    final HRegionInfo hri = actualRegion.getRegionInfo();
+    final RegionInfo hri = actualRegion.getRegionInfo();
     if (hri.isMetaRegion()) {
       crh = new CloseMetaHandler(this, this, hri, abort);
     } else {
       crh = new CloseRegionHandler(this, this, hri, abort, sn);
     }
-    this.service.submit(crh);
+    this.executorService.submit(crh);
     return true;
   }
 
   /**
-   * Close and offline the region for split
+   * Close and offline the region for split or merge
    *
-   * @param parentRegionEncodedName the name of the region to close
-   * @return True if closed the region successfully.
+   * @param regionEncodedName the name of the region(s) to close
+   * @return true if closed the region successfully.
    * @throws IOException
   */
- protected boolean closeAndOfflineRegionForSplit(
-     final String parentRegionEncodedName) throws IOException {
-   Region parentRegion = this.getFromOnlineRegions(parentRegionEncodedName);
-   if (parentRegion != null) {
-     Map<byte[], List<StoreFile>> hstoreFilesToSplit = null;
-     Exception exceptionToThrow = null;
-     try{
-       hstoreFilesToSplit = ((HRegion)parentRegion).close(false);
-     } catch (Exception e) {
-       exceptionToThrow = e;
-     }
-     if (exceptionToThrow == null && hstoreFilesToSplit == null) {
-       // The region was closed by someone else
-       exceptionToThrow =
-           new IOException("Failed to close region: already closed by another thread");
-     }
-
-     if (exceptionToThrow != null) {
-       if (exceptionToThrow instanceof IOException) throw (IOException)exceptionToThrow;
-       throw new IOException(exceptionToThrow);
-     }
-     if (parentRegion.getTableDesc().hasSerialReplicationScope()) {
-       // For serial replication, we need add a final barrier on this region. But the splitting may
-       // be reverted, so we should make sure if we reopen this region, the open barrier is same as
-       // this final barrier
-       long seq = parentRegion.getMaxFlushedSeqId();
-       if (seq == HConstants.NO_SEQNUM) {
-         // No edits in WAL for this region; get the sequence number when the region was opened.
-         seq = parentRegion.getOpenSeqNum();
-         if (seq == HConstants.NO_SEQNUM) {
-           // This region has no data
-           seq = 0;
-         }
-       } else {
-         seq++;
+ protected boolean closeAndOfflineRegionForSplitOrMerge(
+     final List<String> regionEncodedName) throws IOException {
+   for (int i = 0; i < regionEncodedName.size(); ++i) {
+     HRegion regionToClose = this.getRegion(regionEncodedName.get(i));
+     if (regionToClose != null) {
+       Map<byte[], List<HStoreFile>> hstoreFiles = null;
+       Exception exceptionToThrow = null;
+       try{
+         hstoreFiles = regionToClose.close(false);
+       } catch (Exception e) {
+         exceptionToThrow = e;
        }
-       Put finalBarrier = MetaTableAccessor.makeBarrierPut(Bytes.toBytes(parentRegionEncodedName),
-           seq, parentRegion.getTableDesc().getTableName().getName());
-       MetaTableAccessor.putToMetaTable(getConnection(), finalBarrier);
+       if (exceptionToThrow == null && hstoreFiles == null) {
+         // The region was closed by someone else
+         exceptionToThrow =
+             new IOException("Failed to close region: already closed by another thread");
+       }
+
+       if (exceptionToThrow != null) {
+         if (exceptionToThrow instanceof IOException) throw (IOException)exceptionToThrow;
+         throw new IOException(exceptionToThrow);
+       }
+       if (regionToClose.getTableDescriptor().hasSerialReplicationScope()) {
+         // For serial replication, we need add a final barrier on this region. But the splitting
+         // or merging may be reverted, so we should make sure if we reopen this region, the open
+         // barrier is same as this final barrier
+         long seq = regionToClose.getMaxFlushedSeqId();
+         if (seq == HConstants.NO_SEQNUM) {
+           // No edits in WAL for this region; get the sequence number when the region was opened.
+           seq = regionToClose.getOpenSeqNum();
+           if (seq == HConstants.NO_SEQNUM) {
+             // This region has no data
+             seq = 0;
+           }
+         } else {
+           seq++;
+         }
+         Put finalBarrier = MetaTableAccessor.makeBarrierPut(
+           Bytes.toBytes(regionEncodedName.get(i)),
+           seq,
+           regionToClose.getTableDescriptor().getTableName().getName());
+         MetaTableAccessor.putToMetaTable(getConnection(), finalBarrier);
+       }
+       // Offline the region
+       this.removeRegion(regionToClose, null);
      }
-     // Offline the region
-     this.removeFromOnlineRegions(parentRegion, null);
    }
    return true;
   }
@@ -3059,8 +3246,8 @@ public class HRegionServer extends HasThread implements
    * @return HRegion for the passed binary <code>regionName</code> or null if
    *         named region is not member of the online regions.
    */
-  public Region getOnlineRegion(final byte[] regionName) {
-    String encodedRegionName = HRegionInfo.encodeRegionName(regionName);
+  public HRegion getOnlineRegion(final byte[] regionName) {
+    String encodedRegionName = RegionInfo.encodeRegionName(regionName);
     return this.onlineRegions.get(encodedRegionName);
   }
 
@@ -3069,14 +3256,14 @@ public class HRegionServer extends HasThread implements
   }
 
   @Override
-  public Region getFromOnlineRegions(final String encodedRegionName) {
+  public HRegion getRegion(final String encodedRegionName) {
     return this.onlineRegions.get(encodedRegionName);
   }
 
 
   @Override
-  public boolean removeFromOnlineRegions(final Region r, ServerName destination) {
-    Region toReturn = this.onlineRegions.remove(r.getRegionInfo().getEncodedName());
+  public boolean removeRegion(final HRegion r, ServerName destination) {
+    HRegion toReturn = this.onlineRegions.remove(r.getRegionInfo().getEncodedName());
     if (destination != null) {
       long closeSeqNum = r.getMaxFlushedSeqId();
       if (closeSeqNum == HConstants.NO_SEQNUM) {
@@ -3091,27 +3278,27 @@ public class HRegionServer extends HasThread implements
   }
 
   /**
-   * Protected utility method for safely obtaining an HRegion handle.
+   * Protected Utility method for safely obtaining an HRegion handle.
    *
    * @param regionName
    *          Name of online {@link HRegion} to return
    * @return {@link HRegion} for <code>regionName</code>
    * @throws NotServingRegionException
    */
-  protected Region getRegion(final byte[] regionName)
+  protected HRegion getRegion(final byte[] regionName)
       throws NotServingRegionException {
-    String encodedRegionName = HRegionInfo.encodeRegionName(regionName);
+    String encodedRegionName = RegionInfo.encodeRegionName(regionName);
     return getRegionByEncodedName(regionName, encodedRegionName);
   }
 
-  public Region getRegionByEncodedName(String encodedRegionName)
+  public HRegion getRegionByEncodedName(String encodedRegionName)
       throws NotServingRegionException {
     return getRegionByEncodedName(null, encodedRegionName);
   }
 
-  protected Region getRegionByEncodedName(byte[] regionName, String encodedRegionName)
+  protected HRegion getRegionByEncodedName(byte[] regionName, String encodedRegionName)
     throws NotServingRegionException {
-    Region region = this.onlineRegions.get(encodedRegionName);
+    HRegion region = this.onlineRegions.get(encodedRegionName);
     if (region == null) {
       MovedRegionInfo moveInfo = getMovedRegion(encodedRegionName);
       if (moveInfo != null) {
@@ -3124,7 +3311,7 @@ public class HRegionServer extends HasThread implements
         throw new RegionOpeningException("Region " + regionNameStr +
           " is opening on " + this.serverName);
       }
-      throw new NotServingRegionException("Region " + regionNameStr +
+      throw new NotServingRegionException("" + regionNameStr +
         " is not online on " + this.serverName);
     }
     return region;
@@ -3242,16 +3429,15 @@ public class HRegionServer extends HasThread implements
   }
 
   // This map will contains all the regions that we closed for a move.
-  //  We add the time it was moved as we don't want to keep too old information
-  protected Map<String, MovedRegionInfo> movedRegions =
-      new ConcurrentHashMap<String, MovedRegionInfo>(3000);
+  // We add the time it was moved as we don't want to keep too old information
+  protected Map<String, MovedRegionInfo> movedRegions = new ConcurrentHashMap<>(3000);
 
   // We need a timeout. If not there is a risk of giving a wrong information: this would double
   //  the number of network calls instead of reducing them.
   private static final int TIMEOUT_REGION_MOVED = (2 * 60 * 1000);
 
   protected void addToMovedRegions(String encodedName, ServerName destination, long closeSeqNum) {
-    if (ServerName.isSameHostnameAndPort(destination, this.getServerName())) {
+    if (ServerName.isSameAddress(destination, this.getServerName())) {
       LOG.warn("Not adding moved region record: " + encodedName + " to self.");
       return;
     }
@@ -3305,7 +3491,6 @@ public class HRegionServer extends HasThread implements
   /**
    * Creates a Chore thread to clean the moved region cache.
    */
-
   protected final static class MovedRegionsCleaner extends ScheduledChore implements Stoppable {
     private HRegionServer regionServer;
     Stoppable stoppable;
@@ -3345,104 +3530,19 @@ public class HRegionServer extends HasThread implements
   }
 
   private String getMyEphemeralNodePath() {
-    return ZKUtil.joinZNode(this.zooKeeper.znodePaths.rsZNode, getServerName().toString());
+    return ZNodePaths.joinZNode(this.zooKeeper.znodePaths.rsZNode, getServerName().toString());
   }
 
   private boolean isHealthCheckerConfigured() {
     String healthScriptLocation = this.conf.get(HConstants.HEALTH_SCRIPT_LOC);
-    return org.apache.commons.lang.StringUtils.isNotBlank(healthScriptLocation);
+    return org.apache.commons.lang3.StringUtils.isNotBlank(healthScriptLocation);
   }
 
   /**
-   * @return the underlying {@link CompactSplitThread} for the servers
+   * @return the underlying {@link CompactSplit} for the servers
    */
-  public CompactSplitThread getCompactSplitThread() {
+  public CompactSplit getCompactSplitThread() {
     return this.compactSplitThread;
-  }
-
-  /**
-   * A helper function to store the last flushed sequence Id with the previous failed RS for a
-   * recovering region. The Id is used to skip wal edits which are flushed. Since the flushed
-   * sequence id is only valid for each RS, we associate the Id with corresponding failed RS.
-   * @throws KeeperException
-   * @throws IOException
-   */
-  private void updateRecoveringRegionLastFlushedSequenceId(Region r) throws KeeperException,
-      IOException {
-    if (!r.isRecovering()) {
-      // return immdiately for non-recovering regions
-      return;
-    }
-
-    HRegionInfo regionInfo = r.getRegionInfo();
-    ZooKeeperWatcher zkw = getZooKeeper();
-    String previousRSName = this.getLastFailedRSFromZK(regionInfo.getEncodedName());
-    Map<byte[], Long> maxSeqIdInStores = r.getMaxStoreSeqId();
-    long minSeqIdForLogReplay = -1;
-    for (Long storeSeqIdForReplay : maxSeqIdInStores.values()) {
-      if (minSeqIdForLogReplay == -1 || storeSeqIdForReplay < minSeqIdForLogReplay) {
-        minSeqIdForLogReplay = storeSeqIdForReplay;
-      }
-    }
-
-    try {
-      long lastRecordedFlushedSequenceId = -1;
-      String nodePath = ZKUtil.joinZNode(this.zooKeeper.znodePaths.recoveringRegionsZNode,
-        regionInfo.getEncodedName());
-      // recovering-region level
-      byte[] data;
-      try {
-        data = ZKUtil.getData(zkw, nodePath);
-      } catch (InterruptedException e) {
-        throw new InterruptedIOException();
-      }
-      if (data != null) {
-        lastRecordedFlushedSequenceId = ZKSplitLog.parseLastFlushedSequenceIdFrom(data);
-      }
-      if (data == null || lastRecordedFlushedSequenceId < minSeqIdForLogReplay) {
-        ZKUtil.setData(zkw, nodePath, ZKUtil.positionToByteArray(minSeqIdForLogReplay));
-      }
-      if (previousRSName != null) {
-        // one level deeper for the failed RS
-        nodePath = ZKUtil.joinZNode(nodePath, previousRSName);
-        ZKUtil.setData(zkw, nodePath,
-          ZKUtil.regionSequenceIdsToByteArray(minSeqIdForLogReplay, maxSeqIdInStores));
-        LOG.debug("Update last flushed sequence id of region " + regionInfo.getEncodedName() +
-          " for " + previousRSName);
-      } else {
-        LOG.warn("Can't find failed region server for recovering region " +
-            regionInfo.getEncodedName());
-      }
-    } catch (NoNodeException ignore) {
-      LOG.debug("Region " + regionInfo.getEncodedName() +
-        " must have completed recovery because its recovery znode has been removed", ignore);
-    }
-  }
-
-  /**
-   * Return the last failed RS name under /hbase/recovering-regions/encodedRegionName
-   * @param encodedRegionName
-   * @throws KeeperException
-   */
-  private String getLastFailedRSFromZK(String encodedRegionName) throws KeeperException {
-    String result = null;
-    long maxZxid = 0;
-    ZooKeeperWatcher zkw = this.getZooKeeper();
-    String nodePath = ZKUtil.joinZNode(zkw.znodePaths.recoveringRegionsZNode, encodedRegionName);
-    List<String> failedServers = ZKUtil.listChildrenNoWatch(zkw, nodePath);
-    if (failedServers == null || failedServers.isEmpty()) {
-      return result;
-    }
-    for (String failedServer : failedServers) {
-      String rsPath = ZKUtil.joinZNode(nodePath, failedServer);
-      Stat stat = new Stat();
-      ZKUtil.getDataNoWatch(zkw, rsPath, stat);
-      if (maxZxid < stat.getCzxid()) {
-        maxZxid = stat.getCzxid();
-        result = failedServer;
-      }
-    }
-    return result;
   }
 
   public CoprocessorServiceResponse execRegionServerService(
@@ -3454,7 +3554,7 @@ public class HRegionServer extends HasThread implements
       String serviceName = call.getServiceName();
       com.google.protobuf.Service service = coprocessorServiceHandlers.get(serviceName);
       if (service == null) {
-        throw new UnknownProtocolException(null, "No registered coprocessor service found for " +
+        throw new UnknownProtocolException(null, "No registered coprocessor executorService found for " +
             serviceName);
       }
       com.google.protobuf.Descriptors.ServiceDescriptor serviceDesc =
@@ -3465,7 +3565,7 @@ public class HRegionServer extends HasThread implements
           serviceDesc.findMethodByName(methodName);
       if (methodDesc == null) {
         throw new UnknownProtocolException(service.getClass(), "Unknown method " + methodName +
-            " called on service " + serviceName);
+            " called on executorService " + serviceName);
       }
 
       com.google.protobuf.Message request =
@@ -3522,9 +3622,19 @@ public class HRegionServer extends HasThread implements
     configurationManager.notifyAllObservers(conf);
   }
 
-  @Override
-  public HeapMemoryManager getHeapMemoryManager() {
-    return hMemManager;
+  public CacheEvictionStats clearRegionBlockCache(Region region) {
+    BlockCache blockCache = this.getCacheConfig().getBlockCache();
+    long evictedBlocks = 0;
+
+    for(Store store : region.getStores()) {
+      for(StoreFile hFile : store.getStorefiles()) {
+        evictedBlocks += blockCache.evictBlocksByHfileName(hFile.getPath().getName());
+      }
+    }
+
+    return CacheEvictionStats.builder()
+        .withEvictedBlocks(evictedBlocks)
+        .build();
   }
 
   @Override
@@ -3539,6 +3649,11 @@ public class HRegionServer extends HasThread implements
       }
     }
     return max;
+  }
+
+  @Override
+  public HeapMemoryManager getHeapMemoryManager() {
+    return hMemManager;
   }
 
   /**
@@ -3561,8 +3676,7 @@ public class HRegionServer extends HasThread implements
       // return 0 during RS initialization
       return 0.0;
     }
-    return getRegionServerAccounting().getGlobalMemstoreSize() * 1.0
-        / cacheFlusher.globalMemStoreLimitLowMark;
+    return getRegionServerAccounting().getFlushPressure();
   }
 
   @Override
@@ -3582,5 +3696,33 @@ public class HRegionServer extends HasThread implements
   @Override
   public SecureBulkLoadManager getSecureBulkLoadManager() {
     return this.secureBulkLoadManager;
+  }
+
+  @Override
+  public EntityLock regionLock(List<RegionInfo> regionInfos, String description,
+      Abortable abort) throws IOException {
+    return new LockServiceClient(conf, lockStub, clusterConnection.getNonceGenerator())
+      .regionLock(regionInfos, description, abort);
+  }
+
+  @Override
+  public void unassign(byte[] regionName) throws IOException {
+    clusterConnection.getAdmin().unassign(regionName, false);
+  }
+
+  @Override
+  public RegionServerSpaceQuotaManager getRegionServerSpaceQuotaManager() {
+    return this.rsSpaceQuotaManager;
+  }
+
+  public NettyEventLoopGroupConfig getEventLoopGroupConfig() {
+    return eventLoopGroupConfig;
+  }
+
+  @Override
+  public Connection createConnection(Configuration conf) throws IOException {
+    User user = UserProvider.instantiate(conf).getCurrent();
+    return ConnectionUtils.createShortCircuitConnection(conf, null, user, this.serverName,
+        this.rpcServices, this.rpcServices);
   }
 }

@@ -19,26 +19,26 @@
  */
 package org.apache.hadoop.hbase.replication;
 
+import static org.junit.Assert.assertEquals;
+
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.HTestConst;
 import org.apache.hadoop.hbase.MetaTableAccessor;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Put;
+import org.apache.hadoop.hbase.client.RegionInfo;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.ResultScanner;
 import org.apache.hadoop.hbase.client.Scan;
@@ -52,19 +52,19 @@ import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.hbase.util.Threads;
 import org.apache.hadoop.hbase.zookeeper.MiniZooKeeperCluster;
-import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher;
+import org.apache.hadoop.hbase.zookeeper.ZKWatcher;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
-import org.junit.Ignore;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
-
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
+import org.junit.rules.TestName;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Category({ ReplicationTests.class, LargeTests.class })
 public class TestSerialReplication {
-  private static final Log LOG = LogFactory.getLog(TestSerialReplication.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestSerialReplication.class);
 
   private static Configuration conf1;
   private static Configuration conf2;
@@ -76,6 +76,9 @@ public class TestSerialReplication {
   private static final byte[] VALUE = Bytes.toBytes("v");
   private static final byte[] ROW = Bytes.toBytes("r");
   private static final byte[][] ROWS = HTestConst.makeNAscii(ROW, 100);
+
+  @Rule
+  public TestName name = new TestName();
 
   @BeforeClass
   public static void setUpBeforeClass() throws Exception {
@@ -99,35 +102,35 @@ public class TestSerialReplication {
     utility1 = new HBaseTestingUtility(conf1);
     utility1.startMiniZKCluster();
     MiniZooKeeperCluster miniZK = utility1.getZkCluster();
-    new ZooKeeperWatcher(conf1, "cluster1", null, true);
+    new ZKWatcher(conf1, "cluster1", null, true);
 
     conf2 = new Configuration(conf1);
     conf2.set(HConstants.ZOOKEEPER_ZNODE_PARENT, "/2");
 
     utility2 = new HBaseTestingUtility(conf2);
     utility2.setZkCluster(miniZK);
-    new ZooKeeperWatcher(conf2, "cluster2", null, true);
+    new ZKWatcher(conf2, "cluster2", null, true);
+
+    utility1.startMiniCluster(1, 10);
+    utility2.startMiniCluster(1, 1);
 
     ReplicationAdmin admin1 = new ReplicationAdmin(conf1);
     ReplicationPeerConfig rpc = new ReplicationPeerConfig();
     rpc.setClusterKey(utility2.getClusterKey());
     admin1.addPeer("1", rpc, null);
 
-    utility1.startMiniCluster(1, 10);
-    utility2.startMiniCluster(1, 1);
-
-    utility1.getHBaseAdmin().setBalancerRunning(false, true);
+    utility1.getAdmin().setBalancerRunning(false, true);
   }
 
   @Test
   public void testRegionMoveAndFailover() throws Exception {
-    TableName tableName = TableName.valueOf("testRSFailover");
+    final TableName tableName = TableName.valueOf(name.getMethodName());
     HTableDescriptor table = new HTableDescriptor(tableName);
     HColumnDescriptor fam = new HColumnDescriptor(famName);
     fam.setScope(HConstants.REPLICATION_SCOPE_SERIAL);
     table.addFamily(fam);
-    utility1.getHBaseAdmin().createTable(table);
-    utility2.getHBaseAdmin().createTable(table);
+    utility1.getAdmin().createTable(table);
+    utility2.getAdmin().createTable(table);
     try(Table t1 = utility1.getConnection().getTable(tableName);
         Table t2 = utility2.getConnection().getTable(tableName)) {
       LOG.info("move to 1");
@@ -180,13 +183,13 @@ public class TestSerialReplication {
 
   @Test
   public void testRegionSplit() throws Exception {
-    TableName tableName = TableName.valueOf("testRegionSplit");
+    final TableName tableName = TableName.valueOf(name.getMethodName());
     HTableDescriptor table = new HTableDescriptor(tableName);
     HColumnDescriptor fam = new HColumnDescriptor(famName);
     fam.setScope(HConstants.REPLICATION_SCOPE_SERIAL);
     table.addFamily(fam);
-    utility1.getHBaseAdmin().createTable(table);
-    utility2.getHBaseAdmin().createTable(table);
+    utility1.getAdmin().createTable(table);
+    utility2.getAdmin().createTable(table);
     try(Table t1 = utility1.getConnection().getTable(tableName);
         Table t2 = utility2.getConnection().getTable(tableName)) {
 
@@ -195,7 +198,7 @@ public class TestSerialReplication {
         put.addColumn(famName, VALUE, VALUE);
         t1.put(put);
       }
-      utility1.getHBaseAdmin().split(tableName, ROWS[50]);
+      utility1.getAdmin().split(tableName, ROWS[50]);
       waitTableHasRightNumberOfRegions(tableName, 2);
       for (int i = 11; i < 100; i += 10) {
         Put put = new Put(ROWS[i]);
@@ -250,15 +253,15 @@ public class TestSerialReplication {
 
   @Test
   public void testRegionMerge() throws Exception {
-    TableName tableName = TableName.valueOf("testRegionMerge");
+    final TableName tableName = TableName.valueOf(name.getMethodName());
     HTableDescriptor table = new HTableDescriptor(tableName);
     HColumnDescriptor fam = new HColumnDescriptor(famName);
     fam.setScope(HConstants.REPLICATION_SCOPE_SERIAL);
     table.addFamily(fam);
-    utility1.getHBaseAdmin().createTable(table);
-    utility2.getHBaseAdmin().createTable(table);
+    utility1.getAdmin().createTable(table);
+    utility2.getAdmin().createTable(table);
     Threads.sleep(5000);
-    utility1.getHBaseAdmin().split(tableName, ROWS[50]);
+    utility1.getAdmin().split(tableName, ROWS[50]);
     waitTableHasRightNumberOfRegions(tableName, 2);
 
     try(Table t1 = utility1.getConnection().getTable(tableName);
@@ -268,9 +271,9 @@ public class TestSerialReplication {
         put.addColumn(famName, VALUE, VALUE);
         t1.put(put);
       }
-      List<Pair<HRegionInfo, ServerName>> regions =
+      List<Pair<RegionInfo, ServerName>> regions =
           MetaTableAccessor.getTableRegionsAndLocations(utility1.getConnection(), tableName);
-      utility1.getHBaseAdmin().mergeRegions(regions.get(0).getFirst().getRegionName(),
+      utility1.getAdmin().mergeRegionsAsync(regions.get(0).getFirst().getRegionName(),
           regions.get(1).getFirst().getRegionName(), true);
       waitTableHasRightNumberOfRegions(tableName, 1);
       for (int i = 11; i < 100; i += 10) {
@@ -317,7 +320,7 @@ public class TestSerialReplication {
   }
 
   private List<Integer> getRowNumbers(List<Cell> cells) {
-    List<Integer> listOfRowNumbers = new ArrayList<>();
+    List<Integer> listOfRowNumbers = new ArrayList<>(cells.size());
     for (Cell c : cells) {
       listOfRowNumbers.add(Integer.parseInt(Bytes
           .toString(c.getRowArray(), c.getRowOffset() + ROW.length,
@@ -333,10 +336,10 @@ public class TestSerialReplication {
   }
 
   private void moveRegion(Table table, int index) throws IOException {
-    List<Pair<HRegionInfo, ServerName>> regions =
+    List<Pair<RegionInfo, ServerName>> regions =
         MetaTableAccessor.getTableRegionsAndLocations(utility1.getConnection(), table.getName());
     assertEquals(1, regions.size());
-    HRegionInfo regionInfo = regions.get(0).getFirst();
+    RegionInfo regionInfo = regions.get(0).getFirst();
     ServerName name = utility1.getHBaseCluster().getRegionServer(index).getServerName();
     utility1.getAdmin()
         .move(regionInfo.getEncodedNameAsBytes(), Bytes.toBytes(name.getServerName()));
@@ -351,12 +354,12 @@ public class TestSerialReplication {
   }
 
   private void balanceTwoRegions(Table table) throws Exception {
-    List<Pair<HRegionInfo, ServerName>> regions =
+    List<Pair<RegionInfo, ServerName>> regions =
         MetaTableAccessor.getTableRegionsAndLocations(utility1.getConnection(), table.getName());
     assertEquals(2, regions.size());
-    HRegionInfo regionInfo1 = regions.get(0).getFirst();
+    RegionInfo regionInfo1 = regions.get(0).getFirst();
     ServerName name1 = utility1.getHBaseCluster().getRegionServer(0).getServerName();
-    HRegionInfo regionInfo2 = regions.get(1).getFirst();
+    RegionInfo regionInfo2 = regions.get(1).getFirst();
     ServerName name2 = utility1.getHBaseCluster().getRegionServer(1).getServerName();
     utility1.getAdmin()
         .move(regionInfo1.getEncodedNameAsBytes(), Bytes.toBytes(name1.getServerName()));
@@ -374,7 +377,7 @@ public class TestSerialReplication {
 
   private void waitTableHasRightNumberOfRegions(TableName tableName, int num) throws IOException {
     while (true) {
-      List<Pair<HRegionInfo, ServerName>> regions =
+      List<Pair<RegionInfo, ServerName>> regions =
           MetaTableAccessor.getTableRegionsAndLocations(utility1.getConnection(), tableName);
       if (regions.size() == num) {
         return;

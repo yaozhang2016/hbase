@@ -22,26 +22,25 @@ import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 
-import org.apache.commons.lang.math.RandomUtils;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.apache.commons.lang3.RandomUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HRegionLocation;
 import org.apache.hadoop.hbase.TableName;
-import org.apache.hadoop.hbase.client.ClusterConnection;
 import org.apache.hadoop.hbase.client.Get;
 
 import org.apache.hadoop.hbase.client.Consistency;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.util.test.LoadTestDataGenerator;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** Creates multiple threads that read and verify previously written data */
 public class MultiThreadedReader extends MultiThreadedAction
 {
-  private static final Log LOG = LogFactory.getLog(MultiThreadedReader.class);
+  private static final Logger LOG = LoggerFactory.getLogger(MultiThreadedReader.class);
 
-  protected Set<HBaseReaderThread> readers = new HashSet<HBaseReaderThread>();
+  protected Set<HBaseReaderThread> readers = new HashSet<>();
   private final double verifyPercent;
   protected volatile boolean aborted;
 
@@ -277,7 +276,7 @@ public class MultiThreadedReader extends MultiThreadedAction
         try {
           gets[i] = createGet(keyToRead);
           if (keysToRead.length == 1) {
-            queryKey(gets[i], RandomUtils.nextInt(100) < verifyPercent, keyToRead);
+            queryKey(gets[i], RandomUtils.nextInt(0, 100) < verifyPercent, keyToRead);
           }
           i++;
         } catch (IOException e) {
@@ -286,14 +285,14 @@ public class MultiThreadedReader extends MultiThreadedAction
               + ", time from start: "
               + (System.currentTimeMillis() - startTimeMs) + " ms");
           if (printExceptionTrace) {
-            LOG.warn(e);
+            LOG.warn(e.toString(), e);
             printExceptionTrace = false;
           }
         }
       }
       if (keysToRead.length > 1) {
         try {
-          queryKey(gets, RandomUtils.nextInt(100) < verifyPercent, keysToRead);
+          queryKey(gets, RandomUtils.nextInt(0, 100) < verifyPercent, keysToRead);
         } catch (IOException e) {
           numReadFailures.addAndGet(gets.length);
           for (long keyToRead : keysToRead) {
@@ -302,7 +301,7 @@ public class MultiThreadedReader extends MultiThreadedAction
                 + (System.currentTimeMillis() - startTimeMs) + " ms");
           }
           if (printExceptionTrace) {
-            LOG.warn(e);
+            LOG.warn(e.toString(), e);
             printExceptionTrace = false;
           }
         }
@@ -379,7 +378,7 @@ public class MultiThreadedReader extends MultiThreadedAction
           numKeysVerified.incrementAndGet();
         }
       } else {
-        HRegionLocation hloc = ((ClusterConnection) connection).getRegionLocation(tableName,
+        HRegionLocation hloc = connection.getRegionLocation(tableName,
           get.getRow(), false);
         String rowKey = Bytes.toString(get.getRow());
         LOG.info("Key = " + rowKey + ", Region location: " + hloc);

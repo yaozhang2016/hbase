@@ -23,10 +23,7 @@ import java.nio.charset.IllegalCharsetNameException;
 import java.util.Arrays;
 import java.util.regex.Pattern;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.hbase.exceptions.DeserializationException;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ComparatorProtos;
 import org.apache.hadoop.hbase.util.Bytes;
@@ -37,8 +34,9 @@ import org.joni.Matcher;
 import org.joni.Option;
 import org.joni.Regex;
 import org.joni.Syntax;
-
-import org.apache.hadoop.hbase.shaded.com.google.protobuf.InvalidProtocolBufferException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.apache.hbase.thirdparty.com.google.protobuf.InvalidProtocolBufferException;
 
 /**
  * This comparator is for use with {@link CompareFilter} implementations, such
@@ -71,16 +69,14 @@ import org.apache.hadoop.hbase.shaded.com.google.protobuf.InvalidProtocolBufferE
  * @see java.util.regex.Pattern
  */
 @InterfaceAudience.Public
-@InterfaceStability.Stable
 public class RegexStringComparator extends ByteArrayComparable {
 
-  private static final Log LOG = LogFactory.getLog(RegexStringComparator.class);
+  private static final Logger LOG = LoggerFactory.getLogger(RegexStringComparator.class);
 
   private Engine engine;
 
   /** Engine implementation type (default=JAVA) */
   @InterfaceAudience.Public
-  @InterfaceStability.Stable
   public enum EngineType {
     JAVA,
     JONI

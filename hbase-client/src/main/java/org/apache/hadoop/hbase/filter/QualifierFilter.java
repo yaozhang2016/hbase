@@ -23,12 +23,12 @@ import java.io.IOException;
 import java.util.ArrayList;
 
 import org.apache.hadoop.hbase.Cell;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.hadoop.hbase.CompareOperator;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.hbase.exceptions.DeserializationException;
 import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.FilterProtos;
-import org.apache.hadoop.hbase.shaded.com.google.protobuf.InvalidProtocolBufferException;
+import org.apache.hbase.thirdparty.com.google.protobuf.InvalidProtocolBufferException;
 
 /**
  * This filter is used to filter based on the column qualifier. It takes an
@@ -45,24 +45,42 @@ import org.apache.hadoop.hbase.shaded.com.google.protobuf.InvalidProtocolBufferE
  * directly rather than a filter.
  */
 @InterfaceAudience.Public
-@InterfaceStability.Stable
 public class QualifierFilter extends CompareFilter {
 
   /**
    * Constructor.
    * @param op the compare op for column qualifier matching
    * @param qualifierComparator the comparator for column qualifier matching
+   * @deprecated Since 2.0.0. Will be removed in 3.0.0.
+   * Use {@link #QualifierFilter(CompareOperator, ByteArrayComparable)} instead.
    */
+  @Deprecated
   public QualifierFilter(final CompareOp op,
       final ByteArrayComparable qualifierComparator) {
     super(op, qualifierComparator);
   }
 
+  /**
+   * Constructor.
+   * @param op the compare op for column qualifier matching
+   * @param qualifierComparator the comparator for column qualifier matching
+   */
+  public QualifierFilter(final CompareOperator op,
+                         final ByteArrayComparable qualifierComparator) {
+    super(op, qualifierComparator);
+  }
+
+  @Deprecated
   @Override
-  public ReturnCode filterKeyValue(Cell v) {
-    int qualifierLength = v.getQualifierLength();
+  public ReturnCode filterKeyValue(final Cell c) {
+    return filterCell(c);
+  }
+
+  @Override
+  public ReturnCode filterCell(final Cell c) {
+    int qualifierLength = c.getQualifierLength();
     if (qualifierLength > 0) {
-      if (compareQualifier(this.compareOp, this.comparator, v)) {
+      if (compareQualifier(getCompareOperator(), this.comparator, c)) {
         return ReturnCode.SKIP;
       }
     }
@@ -71,7 +89,7 @@ public class QualifierFilter extends CompareFilter {
 
   public static Filter createFilterFromArguments(ArrayList<byte []> filterArguments) {
     ArrayList<?> arguments = CompareFilter.extractArguments(filterArguments);
-    CompareOp compareOp = (CompareOp)arguments.get(0);
+    CompareOperator compareOp = (CompareOperator)arguments.get(0);
     ByteArrayComparable comparator = (ByteArrayComparable)arguments.get(1);
     return new QualifierFilter(compareOp, comparator);
   }
@@ -79,6 +97,7 @@ public class QualifierFilter extends CompareFilter {
   /**
    * @return The filter serialized using pb
    */
+  @Override
   public byte [] toByteArray() {
     FilterProtos.QualifierFilter.Builder builder =
       FilterProtos.QualifierFilter.newBuilder();
@@ -100,8 +119,8 @@ public class QualifierFilter extends CompareFilter {
     } catch (InvalidProtocolBufferException e) {
       throw new DeserializationException(e);
     }
-    final CompareOp valueCompareOp =
-      CompareOp.valueOf(proto.getCompareFilter().getCompareOp().name());
+    final CompareOperator valueCompareOp =
+      CompareOperator.valueOf(proto.getCompareFilter().getCompareOp().name());
     ByteArrayComparable valueComparator = null;
     try {
       if (proto.getCompareFilter().hasComparator()) {
@@ -114,10 +133,10 @@ public class QualifierFilter extends CompareFilter {
   }
 
   /**
-   * @param other
    * @return true if and only if the fields of the filter that are serialized
    * are equal to the corresponding fields in other.  Used for testing.
    */
+  @Override
   boolean areSerializedFieldsEqual(Filter o) {
     if (o == this) return true;
     if (!(o instanceof QualifierFilter)) return false;

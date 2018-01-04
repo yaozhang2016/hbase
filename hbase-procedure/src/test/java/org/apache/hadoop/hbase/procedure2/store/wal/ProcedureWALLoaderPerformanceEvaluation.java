@@ -31,8 +31,6 @@ import org.apache.commons.cli.Option;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.HBaseCommonTestingUtility;
-import org.apache.hadoop.hbase.ProcedureInfo;
-import org.apache.hadoop.hbase.procedure2.Procedure;
 import org.apache.hadoop.hbase.procedure2.ProcedureTestingUtility;
 import org.apache.hadoop.hbase.procedure2.ProcedureTestingUtility.TestProcedure;
 import org.apache.hadoop.hbase.procedure2.store.ProcedureStore;
@@ -82,18 +80,14 @@ public class ProcedureWALLoaderPerformanceEvaluation extends AbstractHBaseTool {
     @Override
     public void load(ProcedureIterator procIter) throws IOException {
       while (procIter.hasNext()) {
-        if (procIter.isNextCompleted()) {
-          ProcedureInfo proc = procIter.nextAsProcedureInfo();
-        } else {
-          Procedure proc = procIter.nextAsProcedure();
-        }
+        procIter.next();
       }
     }
 
     @Override
     public void handleCorrupted(ProcedureIterator procIter) throws IOException {
       while (procIter.hasNext()) {
-        Procedure proc = procIter.nextAsProcedure();
+        procIter.next();
       }
     }
   }
@@ -132,7 +126,7 @@ public class ProcedureWALLoaderPerformanceEvaluation extends AbstractHBaseTool {
     Path logDir = new Path(testDir, "proc-logs");
     System.out.println("\n\nLogs directory : " + logDir.toString() + "\n\n");
     fs.delete(logDir, true);
-    store = ProcedureTestingUtility.createWalStore(conf, fs, logDir);
+    store = ProcedureTestingUtility.createWalStore(conf, logDir);
     store.start(1);
     store.recoverLease();
     store.load(new LoadCounter());
@@ -223,10 +217,10 @@ public class ProcedureWALLoaderPerformanceEvaluation extends AbstractHBaseTool {
   public void tearDownProcedureStore() {
     store.stop(false);
     try {
-      store.getFileSystem().delete(store.getLogDir(), true);
+      store.getFileSystem().delete(store.getWALDir(), true);
     } catch (IOException e) {
       System.err.println("Error: Couldn't delete log dir. You can delete it manually to free up "
-          + "disk space. Location: " + store.getLogDir().toString());
+          + "disk space. Location: " + store.getWALDir().toString());
       System.err.println(e.toString());
     }
   }

@@ -19,11 +19,12 @@ package org.apache.hadoop.hbase.master;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.util.ReflectionUtils;
@@ -36,7 +37,7 @@ import org.apache.hadoop.net.ScriptBasedMapping;
  */
 @InterfaceAudience.Private
 public class RackManager {
-  private static final Log LOG = LogFactory.getLog(RackManager.class);
+  private static final Logger LOG = LoggerFactory.getLogger(RackManager.class);
   public static final String UNKNOWN_RACK = "Unknown Rack";
 
   private DNSToSwitchMapping switchMapping;
@@ -63,7 +64,7 @@ public class RackManager {
     }
     // just a note - switchMapping caches results (at least the implementation should unless the
     // resolution is really a lightweight process)
-    List<String> racks = switchMapping.resolve(Arrays.asList(server.getHostname()));
+    List<String> racks = switchMapping.resolve(Collections.singletonList(server.getHostname()));
     if (racks != null && !racks.isEmpty()) {
       return racks.get(0);
     }
@@ -79,7 +80,7 @@ public class RackManager {
   public List<String> getRack(List<ServerName> servers) {
     // just a note - switchMapping caches results (at least the implementation should unless the
     // resolution is really a lightweight process)
-    List<String> serversAsString = new ArrayList<String>(servers.size());
+    List<String> serversAsString = new ArrayList<>(servers.size());
     for (ServerName server : servers) {
       serversAsString.add(server.getHostname());
     }

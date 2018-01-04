@@ -27,9 +27,12 @@ import org.apache.hadoop.hbase.testclassification.RestTests;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
 
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Category({RestTests.class, SmallTests.class})
 public class TestTableSchemaModel extends TestModelBase<TableSchemaModel> {
+  private static final Logger LOG = LoggerFactory.getLogger(TestTableSchemaModel.class);
 
   public static final String TABLE_NAME = "testTable";
   private static final boolean IS_META = false;

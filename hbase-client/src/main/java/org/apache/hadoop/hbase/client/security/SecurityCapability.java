@@ -18,14 +18,12 @@
  */
 package org.apache.hadoop.hbase.client.security;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * Available security capabilities
  */
 @InterfaceAudience.Public
-@InterfaceStability.Evolving
 public enum SecurityCapability {
   // Note to implementors: These must match the numbering of Capability values in MasterProtos
   SIMPLE_AUTHENTICATION(0),
@@ -34,7 +32,7 @@ public enum SecurityCapability {
   CELL_AUTHORIZATION(3),
   CELL_VISIBILITY(4);
 
-  private int value;
+  private final int value;
 
   public int getValue() {
     return value;
@@ -59,5 +57,4 @@ public enum SecurityCapability {
         throw new IllegalArgumentException("Unknown SecurityCapability value " + value);
     }
   }
-};
-
+}

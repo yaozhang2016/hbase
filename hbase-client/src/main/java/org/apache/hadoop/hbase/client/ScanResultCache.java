@@ -19,7 +19,7 @@ package org.apache.hadoop.hbase.client;
 
 import java.io.IOException;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * Used to separate the row constructing logic.
@@ -29,7 +29,7 @@ import org.apache.hadoop.hbase.classification.InterfaceAudience;
  * <ol>
  * <li>Get results from ScanResponse proto.</li>
  * <li>Pass them to ScanResultCache and get something back.</li>
- * <li>If we actually get something back, then pass it to ScanObserver.</li>
+ * <li>If we actually get something back, then pass it to ScanConsumer.</li>
  * </ol>
  */
 @InterfaceAudience.Private
@@ -50,4 +50,9 @@ interface ScanResultCache {
    * again.
    */
   void clear();
+
+  /**
+   * Return the number of complete rows. Used to implement limited scan.
+   */
+  int numberOfCompleteRows();
 }

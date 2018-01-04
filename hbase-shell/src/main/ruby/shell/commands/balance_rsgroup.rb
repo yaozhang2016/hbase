@@ -1,6 +1,3 @@
-#
-# Copyright The Apache Software Foundation
-#
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements.  See the NOTICE file
 # distributed with this work for additional information
@@ -22,10 +19,13 @@ module Shell
   module Commands
     class BalanceRsgroup < Command
       def help
-        return <<-EOF
-Balance a region server group
+        <<-EOF
+Balance a RegionServer group
+
+Example:
 
   hbase> balance_rsgroup 'my_group'
+
 EOF
       end
 
@@ -33,7 +33,7 @@ EOF
         # Returns true if balancer was run, otherwise false.
         ret = rsgroup_admin.balance_rs_group(group_name)
         if ret
-          puts "Ran the balancer."
+          puts 'Ran the balancer.'
         else
           puts "Couldn't run the balancer."
         end

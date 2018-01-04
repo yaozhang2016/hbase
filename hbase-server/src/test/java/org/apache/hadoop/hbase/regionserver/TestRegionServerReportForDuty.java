@@ -22,8 +22,6 @@ import static org.junit.Assert.assertTrue;
 
 import java.io.IOException;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.CoordinatedStateManager;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
@@ -31,6 +29,7 @@ import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.LocalHBaseCluster;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.MiniHBaseCluster.MiniHBaseClusterRegionServer;
+import org.apache.hadoop.hbase.master.LoadBalancer;
 import org.apache.hadoop.hbase.master.ServerManager;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.util.JVMClusterUtil.MasterThread;
@@ -40,11 +39,13 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Category(MediumTests.class)
 public class TestRegionServerReportForDuty {
 
-  private static final Log LOG = LogFactory.getLog(TestRegionServerReportForDuty.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestRegionServerReportForDuty.class);
 
   private static final long SLEEP_INTERVAL = 500;
 
@@ -83,8 +84,9 @@ public class TestRegionServerReportForDuty {
     // Use a random unique port
     cluster.getConfiguration().setInt(HConstants.MASTER_PORT, HBaseTestingUtility.randomFreePort());
     // master has a rs. defaultMinToStart = 2
-    cluster.getConfiguration().setInt(ServerManager.WAIT_ON_REGIONSERVERS_MINTOSTART, 2);
-    cluster.getConfiguration().setInt(ServerManager.WAIT_ON_REGIONSERVERS_MAXTOSTART, 2);
+    boolean tablesOnMaster = LoadBalancer.isTablesOnMaster(testUtil.getConfiguration());
+    cluster.getConfiguration().setInt(ServerManager.WAIT_ON_REGIONSERVERS_MINTOSTART, tablesOnMaster? 2: 1);
+    cluster.getConfiguration().setInt(ServerManager.WAIT_ON_REGIONSERVERS_MAXTOSTART, tablesOnMaster? 2: 1);
     master = cluster.addMaster();
     rs = cluster.addRegionServer();
     LOG.debug("Starting master: " + master.getMaster().getServerName());
@@ -110,8 +112,10 @@ public class TestRegionServerReportForDuty {
     // Start a new master and use another random unique port
     // Also let it wait for exactly 2 region severs to report in.
     cluster.getConfiguration().setInt(HConstants.MASTER_PORT, HBaseTestingUtility.randomFreePort());
-    cluster.getConfiguration().setInt(ServerManager.WAIT_ON_REGIONSERVERS_MINTOSTART, 3);
-    cluster.getConfiguration().setInt(ServerManager.WAIT_ON_REGIONSERVERS_MAXTOSTART, 3);
+    cluster.getConfiguration().setInt(ServerManager.WAIT_ON_REGIONSERVERS_MINTOSTART,
+      tablesOnMaster? 3: 2);
+    cluster.getConfiguration().setInt(ServerManager.WAIT_ON_REGIONSERVERS_MAXTOSTART,
+      tablesOnMaster? 3: 2);
     backupMaster = cluster.addMaster();
     LOG.debug("Starting new master: " + backupMaster.getMaster().getServerName());
     backupMaster.start();
@@ -121,7 +125,8 @@ public class TestRegionServerReportForDuty {
     // Do some checking/asserts here.
     assertTrue(backupMaster.getMaster().isActiveMaster());
     assertTrue(backupMaster.getMaster().isInitialized());
-    assertEquals(backupMaster.getMaster().getServerManager().getOnlineServersList().size(), 3);
+    assertEquals(backupMaster.getMaster().getServerManager().getOnlineServersList().size(),
+      tablesOnMaster? 3: 2);
 
   }
 
@@ -159,10 +164,9 @@ public class TestRegionServerReportForDuty {
     private boolean rpcStubCreatedFlag = false;
     private boolean masterChanged = false;
 
-    public MyRegionServer(Configuration conf, CoordinatedStateManager cp)
-      throws IOException, KeeperException,
+    public MyRegionServer(Configuration conf) throws IOException, KeeperException,
         InterruptedException {
-      super(conf, cp);
+      super(conf);
     }
 
     @Override

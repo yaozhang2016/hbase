@@ -36,6 +36,7 @@ import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.regionserver.BloomType;
+import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.InternalScanner;
 import org.apache.hadoop.hbase.regionserver.Region;
 import org.apache.hadoop.hbase.testclassification.IOTests;
@@ -61,7 +62,7 @@ public class TestScannerSelectionUsingKeyRange {
   private static final int NUM_ROWS = 8;
   private static final int NUM_COLS_PER_ROW = 5;
   private static final int NUM_FILES = 2;
-  private static final Map<Object, Integer> TYPE_COUNT = new HashMap<Object, Integer>(3);
+  private static final Map<Object, Integer> TYPE_COUNT = new HashMap<>(3);
   static {
     TYPE_COUNT.put(BloomType.ROWCOL, 0);
     TYPE_COUNT.put(BloomType.ROW, 0);
@@ -73,7 +74,7 @@ public class TestScannerSelectionUsingKeyRange {
 
   @Parameters
   public static Collection<Object[]> parameters() {
-    List<Object[]> params = new ArrayList<Object[]>();
+    List<Object[]> params = new ArrayList<>();
     for (Object type : TYPE_COUNT.keySet()) {
       params.add(new Object[] { type, TYPE_COUNT.get(type) });
     }
@@ -99,7 +100,7 @@ public class TestScannerSelectionUsingKeyRange {
     HTableDescriptor htd = new HTableDescriptor(TABLE);
     htd.addFamily(hcd);
     HRegionInfo info = new HRegionInfo(TABLE);
-    Region region = HBaseTestingUtility.createRegionAndWAL(info, TEST_UTIL.getDataTestDir(), conf,
+    HRegion region = HBaseTestingUtility.createRegionAndWAL(info, TEST_UTIL.getDataTestDir(), conf,
         htd);
 
     for (int iFile = 0; iFile < NUM_FILES; ++iFile) {
@@ -120,7 +121,7 @@ public class TestScannerSelectionUsingKeyRange {
     LruBlockCache cache = (LruBlockCache) cacheConf.getBlockCache();
     cache.clearCache();
     InternalScanner scanner = region.getScanner(scan);
-    List<Cell> results = new ArrayList<Cell>();
+    List<Cell> results = new ArrayList<>();
     while (scanner.next(results)) {
     }
     scanner.close();

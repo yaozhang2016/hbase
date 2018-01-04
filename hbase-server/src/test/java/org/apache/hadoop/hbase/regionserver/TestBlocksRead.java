@@ -24,8 +24,6 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.Cell;
@@ -50,20 +48,22 @@ import org.apache.hadoop.hbase.util.EnvironmentEdgeManagerTestHelper;
 import org.junit.*;
 import org.junit.experimental.categories.Category;
 import org.junit.rules.TestName;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import static junit.framework.TestCase.assertTrue;
 import static org.junit.Assert.assertEquals;
 
 @Category({RegionServerTests.class, MediumTests.class})
 public class TestBlocksRead  {
-  private static final Log LOG = LogFactory.getLog(TestBlocksRead.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestBlocksRead.class);
   @Rule public TestName testName = new TestName();
 
   static final BloomType[] BLOOM_TYPE = new BloomType[] { BloomType.ROWCOL,
       BloomType.ROW, BloomType.NONE };
 
   private static BlockCache blockCache;
-  Region region = null;
+  HRegion region = null;
   private static HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
   private final String DIR = TEST_UTIL.getDataTestDir("TestBlocksRead").toString();
   private Configuration conf = TEST_UTIL.getConfiguration();
@@ -88,7 +88,7 @@ public class TestBlocksRead  {
    * @throws IOException
    * @return created and initialized region.
    */
-  private Region initHRegion(byte[] tableName, String callingMethod,
+  private HRegion initHRegion(byte[] tableName, String callingMethod,
       Configuration conf, String family) throws IOException {
     HTableDescriptor htd = new HTableDescriptor(TableName.valueOf(tableName));
     HColumnDescriptor familyDesc;
@@ -102,7 +102,7 @@ public class TestBlocksRead  {
 
     HRegionInfo info = new HRegionInfo(htd.getTableName(), null, null, false);
     Path path = new Path(DIR + callingMethod);
-    Region r = HBaseTestingUtility.createRegionAndWAL(info, path, conf, htd);
+    HRegion r = HBaseTestingUtility.createRegionAndWAL(info, path, conf, htd);
     blockCache = new CacheConfig(conf).getBlockCache();
     return r;
   }
@@ -189,7 +189,7 @@ public class TestBlocksRead  {
 
   private static void verifyData(Cell kv, String expectedRow,
       String expectedCol, long expectedVersion) {
-    assertTrue("RowCheck", CellUtil.matchingRow(kv,  Bytes.toBytes(expectedRow)));
+    assertTrue("RowCheck", CellUtil.matchingRows(kv,  Bytes.toBytes(expectedRow)));
     assertTrue("ColumnCheck", CellUtil.matchingQualifier(kv, Bytes.toBytes(expectedCol)));
     assertEquals("TSCheck", expectedVersion, kv.getTimestamp());
     assertTrue("ValueCheck", CellUtil.matchingValue(kv, genValue(expectedRow, expectedCol, expectedVersion)));
@@ -389,7 +389,7 @@ public class TestBlocksRead  {
       Scan scan = new Scan();
       scan.setCacheBlocks(false);
       RegionScanner rs = region.getScanner(scan);
-      List<Cell> result = new ArrayList<Cell>(2);
+      List<Cell> result = new ArrayList<>(2);
       rs.next(result);
       assertEquals(2 * BLOOM_TYPE.length, result.size());
       rs.close();
@@ -402,7 +402,7 @@ public class TestBlocksRead  {
       blocksStart = blocksEnd;
       scan.setCacheBlocks(true);
       rs = region.getScanner(scan);
-      result = new ArrayList<Cell>(2);
+      result = new ArrayList<>(2);
       rs.next(result);
       assertEquals(2 * BLOOM_TYPE.length, result.size());
       rs.close();

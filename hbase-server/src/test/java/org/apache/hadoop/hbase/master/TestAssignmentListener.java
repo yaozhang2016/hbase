@@ -26,42 +26,48 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.Abortable;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.MiniHBaseCluster;
 import org.apache.hadoop.hbase.ServerLoad;
+import org.apache.hadoop.hbase.ServerMetricsBuilder;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Admin;
 import org.apache.hadoop.hbase.client.Put;
+import org.apache.hadoop.hbase.client.RegionInfo;
 import org.apache.hadoop.hbase.client.Table;
+import org.apache.hadoop.hbase.master.assignment.AssignmentManager;
 import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.Region;
 import org.apache.hadoop.hbase.testclassification.MasterTests;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.JVMClusterUtil;
-import org.apache.hadoop.hbase.zookeeper.DrainingServerTracker;
-import org.apache.hadoop.hbase.zookeeper.RegionServerTracker;
 import org.apache.hadoop.hbase.zookeeper.ZKUtil;
-import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher;
+import org.apache.hadoop.hbase.zookeeper.ZKWatcher;
+import org.apache.hadoop.hbase.zookeeper.ZNodePaths;
 import org.junit.AfterClass;
 import org.junit.Assert;
 import org.junit.BeforeClass;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.junit.rules.TestName;
 import org.mockito.Mockito;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Category({MasterTests.class, MediumTests.class})
 public class TestAssignmentListener {
-  private static final Log LOG = LogFactory.getLog(TestAssignmentListener.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestAssignmentListener.class);
 
   private static final HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
+
+  @Rule
+  public TestName name = new TestName();
 
   private static final Abortable abortable = new Abortable() {
     @Override
@@ -91,14 +97,14 @@ public class TestAssignmentListener {
     }
 
     @Override
-    public void regionOpened(final HRegionInfo regionInfo, final ServerName serverName) {
+    public void regionOpened(final RegionInfo regionInfo, final ServerName serverName) {
       LOG.info("Assignment open region=" + regionInfo + " server=" + serverName);
       openCount.incrementAndGet();
       modified.incrementAndGet();
     }
 
     @Override
-    public void regionClosed(final HRegionInfo regionInfo) {
+    public void regionClosed(final RegionInfo regionInfo) {
       LOG.info("Assignment close region=" + regionInfo);
       closeCount.incrementAndGet();
       modified.incrementAndGet();
@@ -208,24 +214,23 @@ public class TestAssignmentListener {
   @Test(timeout=60000)
   public void testAssignmentListener() throws IOException, InterruptedException {
     AssignmentManager am = TEST_UTIL.getHBaseCluster().getMaster().getAssignmentManager();
-    Admin admin = TEST_UTIL.getHBaseAdmin();
+    Admin admin = TEST_UTIL.getAdmin();
 
     DummyAssignmentListener listener = new DummyAssignmentListener();
     am.registerListener(listener);
     try {
-      final String TABLE_NAME_STR = "testtb";
-      final TableName TABLE_NAME = TableName.valueOf(TABLE_NAME_STR);
+      final TableName tableName = TableName.valueOf(name.getMethodName());
       final byte[] FAMILY = Bytes.toBytes("cf");
 
       // Create a new table, with a single region
       LOG.info("Create Table");
-      TEST_UTIL.createTable(TABLE_NAME, FAMILY);
+      TEST_UTIL.createTable(tableName, FAMILY);
       listener.awaitModifications(1);
       assertEquals(1, listener.getLoadCount());
       assertEquals(0, listener.getCloseCount());
 
       // Add some data
-      Table table = TEST_UTIL.getConnection().getTable(TABLE_NAME);
+      Table table = TEST_UTIL.getConnection().getTable(tableName);
       try {
         for (int i = 0; i < 10; ++i) {
           byte[] key = Bytes.toBytes("row-" + i);
@@ -240,7 +245,7 @@ public class TestAssignmentListener {
       // Split the table in two
       LOG.info("Split Table");
       listener.reset();
-      admin.split(TABLE_NAME, Bytes.toBytes("row-3"));
+      admin.split(tableName, Bytes.toBytes("row-3"));
       listener.awaitModifications(3);
       assertEquals(2, listener.getLoadCount());     // daughters added
       assertEquals(1, listener.getCloseCount());    // parent removed
@@ -250,10 +255,10 @@ public class TestAssignmentListener {
       int mergeable = 0;
       while (mergeable < 2) {
         Thread.sleep(100);
-        admin.majorCompact(TABLE_NAME);
+        admin.majorCompact(tableName);
         mergeable = 0;
         for (JVMClusterUtil.RegionServerThread regionThread: miniCluster.getRegionServerThreads()) {
-          for (Region region: regionThread.getRegionServer().getOnlineRegions(TABLE_NAME)) {
+          for (Region region: regionThread.getRegionServer().getRegions(tableName)) {
             mergeable += ((HRegion)region).isMergeable() ? 1 : 0;
           }
         }
@@ -262,25 +267,46 @@ public class TestAssignmentListener {
       // Merge the two regions
       LOG.info("Merge Regions");
       listener.reset();
-      List<HRegionInfo> regions = admin.getTableRegions(TABLE_NAME);
+      List<RegionInfo> regions = admin.getRegions(tableName);
       assertEquals(2, regions.size());
+      boolean sameServer = areAllRegionsLocatedOnSameServer(tableName);
+      // If the regions are located by different server, we need to move
+      // regions to same server before merging. So the expected modifications
+      // will increaes to 5. (open + close)
+      final int expectedModifications = sameServer ? 3 : 5;
+      final int expectedLoadCount = sameServer ? 1 : 2;
+      final int expectedCloseCount = sameServer ? 2 : 3;
       admin.mergeRegionsAsync(regions.get(0).getEncodedNameAsBytes(),
         regions.get(1).getEncodedNameAsBytes(), true);
-      listener.awaitModifications(3);
-      assertEquals(1, admin.getTableRegions(TABLE_NAME).size());
-      assertEquals(1, listener.getLoadCount());     // new merged region added
-      assertEquals(2, listener.getCloseCount());    // daughters removed
+      listener.awaitModifications(expectedModifications);
+      assertEquals(1, admin.getTableRegions(tableName).size());
+      assertEquals(expectedLoadCount, listener.getLoadCount());     // new merged region added
+      assertEquals(expectedCloseCount, listener.getCloseCount());    // daughters removed
 
       // Delete the table
       LOG.info("Drop Table");
       listener.reset();
-      TEST_UTIL.deleteTable(TABLE_NAME);
+      TEST_UTIL.deleteTable(tableName);
       listener.awaitModifications(1);
       assertEquals(0, listener.getLoadCount());
       assertEquals(1, listener.getCloseCount());
     } finally {
       am.unregisterListener(listener);
     }
+  }
+
+  private boolean areAllRegionsLocatedOnSameServer(TableName TABLE_NAME) {
+    MiniHBaseCluster miniCluster = TEST_UTIL.getMiniHBaseCluster();
+    int serverCount = 0;
+    for (JVMClusterUtil.RegionServerThread regionThread: miniCluster.getRegionServerThreads()) {
+      if (!regionThread.getRegionServer().getRegions(TABLE_NAME).isEmpty()) {
+        ++serverCount;
+      }
+      if (serverCount > 1) {
+        return false;
+      }
+    }
+    return serverCount == 1;
   }
 
   @Test
@@ -292,11 +318,11 @@ public class TestAssignmentListener {
     // are properly added to the ServerManager.drainingServers when they
     // register with the ServerManager under these circumstances.
     Configuration conf = TEST_UTIL.getConfiguration();
-    ZooKeeperWatcher zooKeeper = new ZooKeeperWatcher(conf,
+    ZKWatcher zooKeeper = new ZKWatcher(conf,
         "zkWatcher-NewServerDrainTest", abortable, true);
     String baseZNode = conf.get(HConstants.ZOOKEEPER_ZNODE_PARENT,
         HConstants.DEFAULT_ZOOKEEPER_ZNODE_PARENT);
-    String drainingZNode = ZKUtil.joinZNode(baseZNode,
+    String drainingZNode = ZNodePaths.joinZNode(baseZNode,
         conf.get("zookeeper.znode.draining.rs", "draining"));
 
     HMaster master = Mockito.mock(HMaster.class);
@@ -308,21 +334,21 @@ public class TestAssignmentListener {
 
     // We'll start with 2 servers in draining that existed before the
     // HMaster started.
-    ArrayList<ServerName> drainingServers = new ArrayList<ServerName>();
+    ArrayList<ServerName> drainingServers = new ArrayList<>();
     drainingServers.add(SERVERNAME_A);
     drainingServers.add(SERVERNAME_B);
 
     // We'll have 2 servers that come online AFTER the DrainingServerTracker
     // is started (just as we see when we failover to the Backup HMaster).
     // One of these will already be a draining server.
-    HashMap<ServerName, ServerLoad> onlineServers = new HashMap<ServerName, ServerLoad>();
-    onlineServers.put(SERVERNAME_A, ServerLoad.EMPTY_SERVERLOAD);
-    onlineServers.put(SERVERNAME_C, ServerLoad.EMPTY_SERVERLOAD);
+    HashMap<ServerName, ServerLoad> onlineServers = new HashMap<>();
+    onlineServers.put(SERVERNAME_A, new ServerLoad(ServerMetricsBuilder.of(SERVERNAME_A)));
+    onlineServers.put(SERVERNAME_C, new ServerLoad(ServerMetricsBuilder.of(SERVERNAME_C)));
 
     // Create draining znodes for the draining servers, which would have been
     // performed when the previous HMaster was running.
     for (ServerName sn : drainingServers) {
-      String znode = ZKUtil.joinZNode(drainingZNode, sn.getServerName());
+      String znode = ZNodePaths.joinZNode(drainingZNode, sn.getServerName());
       ZKUtil.createAndFailSilent(zooKeeper, znode);
     }
 
@@ -345,7 +371,7 @@ public class TestAssignmentListener {
         new ArrayList<ServerName>());
 
     // checkAndRecordNewServer() is how servers are added to the ServerManager.
-    ArrayList<ServerName> onlineDrainingServers = new ArrayList<ServerName>();
+    ArrayList<ServerName> onlineDrainingServers = new ArrayList<>();
     for (ServerName sn : onlineServers.keySet()){
       // Here's the actual test.
       serverManager.checkAndRecordNewServer(sn, onlineServers.get(sn));

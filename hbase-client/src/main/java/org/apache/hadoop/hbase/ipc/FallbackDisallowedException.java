@@ -18,15 +18,13 @@
 package org.apache.hadoop.hbase.ipc;
 
 import org.apache.hadoop.hbase.HBaseIOException;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * Indicate that the rpc server tells client to fallback to simple auth but client is disabled to do
  * so.
  */
 @InterfaceAudience.Public
-@InterfaceStability.Evolving
 public class FallbackDisallowedException extends HBaseIOException {
 
   private static final long serialVersionUID = -6942845066279358253L;

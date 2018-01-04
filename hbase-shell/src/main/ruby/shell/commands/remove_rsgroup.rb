@@ -1,6 +1,3 @@
-#
-# Copyright The Apache Software Foundation
-#
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements.  See the NOTICE file
 # distributed with this work for additional information
@@ -22,10 +19,11 @@ module Shell
   module Commands
     class RemoveRsgroup < Command
       def help
-        return <<-EOF
-Remove a group.
+        <<-EOF
+Remove a RegionServer group.
 
   hbase> remove_rsgroup 'my_group'
+
 EOF
       end
 

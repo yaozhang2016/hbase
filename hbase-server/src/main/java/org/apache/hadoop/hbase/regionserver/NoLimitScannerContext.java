@@ -18,8 +18,8 @@
 package org.apache.hadoop.hbase.regionserver;
 
 import org.apache.hadoop.hbase.HBaseInterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceStability;
 
 /**
  * This is a special {@link ScannerContext} subclass that is designed to be used globally when
@@ -63,7 +63,7 @@ public class NoLimitScannerContext extends ScannerContext {
   }
 
   @Override
-  void setSizeProgress(long sizeProgress) {
+  void setSizeProgress(long sizeProgress, long heapSizeProgress) {
     // Do nothing. NoLimitScannerContext instances are immutable post-construction
   }
 
@@ -78,7 +78,7 @@ public class NoLimitScannerContext extends ScannerContext {
   }
 
   @Override
-  void setProgress(int batchProgress, long sizeProgress, long timeProgress) {
+  void setProgress(int batchProgress, long sizeProgress, long heapSizeProgress, long timeProgress) {
     // Do nothing. NoLimitScannerContext instances are immutable post-construction
   }
 

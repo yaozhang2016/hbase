@@ -34,7 +34,7 @@ import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.filter.FirstKeyOnlyFilter;
-import org.apache.hadoop.hbase.regionserver.Region;
+import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.RegionScanner;
 import org.apache.hadoop.hbase.testclassification.IOTests;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
@@ -48,7 +48,7 @@ import org.junit.experimental.categories.Category;
 public class TestSeekBeforeWithReverseScan {
   private final HBaseTestingUtility testUtil = new HBaseTestingUtility();
 
-  private Region region;
+  private HRegion region;
 
   private byte[] cfName = Bytes.toBytes("a");
   private byte[] cqName = Bytes.toBytes("b");
@@ -92,7 +92,7 @@ public class TestSeekBeforeWithReverseScan {
     scan.setFilter(new FirstKeyOnlyFilter());
     scan.addFamily(cfName);
     RegionScanner scanner = region.getScanner(scan);
-    List<Cell> res = new ArrayList<Cell>();
+    List<Cell> res = new ArrayList<>();
     int count = 1;
     while (scanner.next(res)) {
       count++;
@@ -130,7 +130,7 @@ public class TestSeekBeforeWithReverseScan {
     scan.setFilter(new FirstKeyOnlyFilter());
     scan.addFamily(cfName);
     RegionScanner scanner = region.getScanner(scan);
-    List<Cell> res = new ArrayList<Cell>();
+    List<Cell> res = new ArrayList<>();
     int count = 1;
     while (scanner.next(res)) {
       count++;

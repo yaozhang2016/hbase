@@ -29,8 +29,6 @@ import org.apache.commons.cli.GnuParser;
 import org.apache.commons.cli.HelpFormatter;
 import org.apache.commons.cli.Option;
 import org.apache.commons.cli.Options;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HTableDescriptor;
@@ -47,8 +45,12 @@ import org.apache.hadoop.hbase.io.encoding.DataBlockEncoding;
 import org.apache.hadoop.hbase.testclassification.LargeTests;
 import org.apache.hadoop.hbase.testclassification.RegionServerTests;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.junit.rules.TestName;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Test performance improvement of joined scanners optimization:
@@ -56,7 +58,7 @@ import org.junit.experimental.categories.Category;
  */
 @Category({RegionServerTests.class, LargeTests.class})
 public class TestJoinedScanners {
-  private static final Log LOG = LogFactory.getLog(TestJoinedScanners.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestJoinedScanners.class);
 
   private static final HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
   private static final String DIR = TEST_UTIL.getDataTestDir("TestJoinedScanners").toString();
@@ -70,6 +72,9 @@ public class TestJoinedScanners {
   private static DataBlockEncoding blockEncoding = DataBlockEncoding.FAST_DIFF;
   private static int selectionRatio = 30;
   private static int valueWidth = 128 * 1024;
+
+  @Rule
+  public TestName name = new TestName();
 
   @Test
   public void testJoinedScanners() throws Exception {
@@ -88,14 +93,14 @@ public class TestJoinedScanners {
       cluster = htu.startMiniCluster(1, regionServersCount, dataNodeHosts);
       byte [][] families = {cf_essential, cf_joined};
 
-      TableName tableName = TableName.valueOf(this.getClass().getSimpleName());
+      final TableName tableName = TableName.valueOf(name.getMethodName());
       HTableDescriptor desc = new HTableDescriptor(tableName);
       for(byte[] family : families) {
         HColumnDescriptor hcd = new HColumnDescriptor(family);
         hcd.setDataBlockEncoding(blockEncoding);
         desc.addFamily(hcd);
       }
-      htu.getHBaseAdmin().createTable(desc);
+      htu.getAdmin().createTable(desc);
       Table ht = htu.getConnection().getTable(tableName);
 
       long rows_to_insert = 1000;
@@ -108,7 +113,7 @@ public class TestJoinedScanners {
 
       byte [] val_large = new byte[valueWidth];
 
-      List<Put> puts = new ArrayList<Put>();
+      List<Put> puts = new ArrayList<>();
 
       for (long i = 0; i < rows_to_insert; i++) {
         Put put = new Put(Bytes.toBytes(Long.toString (i)));
@@ -124,7 +129,7 @@ public class TestJoinedScanners {
           puts.clear();
         }
       }
-      if (puts.size() >= 0) {
+      if (!puts.isEmpty()) {
         ht.put(puts);
         puts.clear();
       }

@@ -19,8 +19,6 @@
 
 package org.apache.hadoop.hbase.util;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.testclassification.MiscTests;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
@@ -32,6 +30,8 @@ import org.apache.hadoop.util.NativeCodeLoader;
 import org.apache.hadoop.util.ReflectionUtils;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.BufferedOutputStream;
 import java.io.DataOutputStream;
@@ -41,7 +41,7 @@ import static org.junit.Assert.*;
 
 @Category({MiscTests.class, SmallTests.class})
 public class TestCompressionTest {
-  private static final Log LOG = LogFactory.getLog(TestCompressionTest.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestCompressionTest.class);
 
   @Test
   public void testExceptionCaching() {
@@ -76,6 +76,7 @@ public class TestCompressionTest {
       nativeCodecTest("LZ4", null, "org.apache.hadoop.io.compress.Lz4Codec");
       nativeCodecTest("SNAPPY", "snappy", "org.apache.hadoop.io.compress.SnappyCodec");
       nativeCodecTest("BZIP2", "bzip2", "org.apache.hadoop.io.compress.BZip2Codec");
+      nativeCodecTest("ZSTD", "zstd", "org.apache.hadoop.io.compress.ZStandardCodec");
     } else {
       // Hadoop nativelib is not available
       LOG.debug("Native code not loaded");
@@ -83,6 +84,7 @@ public class TestCompressionTest {
       assertFalse(CompressionTest.testCompression("LZ4"));
       assertFalse(CompressionTest.testCompression("SNAPPY"));
       assertFalse(CompressionTest.testCompression("BZIP2"));
+      assertFalse(CompressionTest.testCompression("ZSTD"));
     }
   }
 

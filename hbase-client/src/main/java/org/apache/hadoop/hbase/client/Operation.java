@@ -21,8 +21,7 @@ package org.apache.hadoop.hbase.client;
 import java.io.IOException;
 import java.util.Map;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.hbase.util.JsonMapper;
 
 /**
@@ -31,7 +30,6 @@ import org.apache.hadoop.hbase.util.JsonMapper;
  * Contains methods for exposure to logging and debugging tools.
  */
 @InterfaceAudience.Public
-@InterfaceStability.Evolving
 public abstract class Operation {
   // TODO make this configurable
   // TODO Do we need this anymore now we have protobuffed it all?

@@ -18,18 +18,25 @@
 
 package org.apache.hadoop.hbase.master.procedure;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import java.io.IOException;
+import java.util.regex.Pattern;
+
+import org.apache.yetus.audience.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceStability;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.apache.hadoop.hbase.master.MasterServices;
+import org.apache.hadoop.hbase.procedure2.Procedure;
+import org.apache.hadoop.hbase.procedure2.ProcedureExecutor;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.RPCProtos.UserInformation;
 import org.apache.hadoop.hbase.security.User;
+import org.apache.hadoop.hbase.util.NonceKey;
 import org.apache.hadoop.security.UserGroupInformation;
 
 @InterfaceAudience.Private
 @InterfaceStability.Evolving
 public final class MasterProcedureUtil {
-  private static final Log LOG = LogFactory.getLog(MasterProcedureUtil.class);
+  private static final Logger LOG = LoggerFactory.getLogger(MasterProcedureUtil.class);
 
   private MasterProcedureUtil() {}
 
@@ -53,5 +60,101 @@ public final class MasterProcedureUtil {
       return User.create(UserGroupInformation.createRemoteUser(effectiveUser));
     }
     return null;
+  }
+
+  /**
+   * Helper Runnable used in conjunction with submitProcedure() to deal with
+   * submitting procs with nonce.
+   * See submitProcedure() for an example.
+   */
+  public static abstract class NonceProcedureRunnable {
+    private final MasterServices master;
+    private final NonceKey nonceKey;
+    private Long procId;
+
+    public NonceProcedureRunnable(final MasterServices master,
+        final long nonceGroup, final long nonce) {
+      this.master = master;
+      this.nonceKey = getProcedureExecutor().createNonceKey(nonceGroup, nonce);
+    }
+
+    protected NonceKey getNonceKey() {
+      return nonceKey;
+    }
+
+    protected MasterServices getMaster() {
+      return master;
+    }
+
+    protected ProcedureExecutor<MasterProcedureEnv> getProcedureExecutor() {
+      return master.getMasterProcedureExecutor();
+    }
+
+    protected long getProcId() {
+      return procId != null ? procId.longValue() : -1;
+    }
+
+    protected long setProcId(final long procId) {
+      this.procId = procId;
+      return procId;
+    }
+
+    protected abstract void run() throws IOException;
+    protected abstract String getDescription();
+
+    protected long submitProcedure(final Procedure proc) {
+      assert procId == null : "submitProcedure() was already called, running procId=" + procId;
+      procId = getProcedureExecutor().submitProcedure(proc, nonceKey);
+      return procId;
+    }
+  }
+
+  /**
+   * Helper used to deal with submitting procs with nonce.
+   * Internally the NonceProcedureRunnable.run() will be called only if no one else
+   * registered the nonce. any Exception thrown by the run() method will be
+   * collected/handled and rethrown.
+   * <code>
+   * long procId = MasterProcedureUtil.submitProcedure(
+   *      new NonceProcedureRunnable(procExec, nonceGroup, nonce) {
+   *   {@literal @}Override
+   *   public void run() {
+   *     cpHost.preOperation();
+   *     submitProcedure(new MyProc());
+   *     cpHost.postOperation();
+   *   }
+   * });
+   * </code>
+   */
+  public static long submitProcedure(final NonceProcedureRunnable runnable) throws IOException {
+    final ProcedureExecutor<MasterProcedureEnv> procExec = runnable.getProcedureExecutor();
+    final long procId = procExec.registerNonce(runnable.getNonceKey());
+    if (procId >= 0) return procId; // someone already registered the nonce
+    try {
+      runnable.run();
+    } catch (IOException e) {
+      procExec.setFailureResultForNonce(runnable.getNonceKey(),
+          runnable.getDescription(),
+          procExec.getEnvironment().getRequestUser(), e);
+      throw e;
+    } finally {
+      procExec.unregisterNonceIfProcedureWasNotSubmitted(runnable.getNonceKey());
+    }
+    return runnable.getProcId();
+  }
+
+  /**
+   * Pattern used to validate a Procedure WAL file name see
+   * {@link #validateProcedureWALFilename(String)} for description.
+   */
+  private static final Pattern pattern = Pattern.compile(".*pv2-\\d{20}.log");
+
+  /**
+   * A Procedure WAL file name is of the format: pv-&lt;wal-id&gt;.log where wal-id is 20 digits.
+   * @param filename name of the file to validate
+   * @return <tt>true</tt> if the filename matches a Procedure WAL, <tt>false</tt> otherwise
+   */
+  public static boolean validateProcedureWALFilename(String filename) {
+    return pattern.matcher(filename).matches();
   }
 }

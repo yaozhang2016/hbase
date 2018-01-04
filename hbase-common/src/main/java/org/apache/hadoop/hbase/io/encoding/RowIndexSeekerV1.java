@@ -18,29 +18,30 @@ package org.apache.hadoop.hbase.io.encoding;
 
 import java.nio.ByteBuffer;
 
-import org.apache.hadoop.hbase.ByteBufferedCell;
-import org.apache.hadoop.hbase.ByteBufferedKeyOnlyKeyValue;
+import org.apache.hadoop.hbase.ByteBufferExtendedCell;
+import org.apache.hadoop.hbase.ByteBufferKeyOnlyKeyValue;
+import org.apache.hadoop.hbase.ByteBufferKeyValue;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellComparator;
 import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.KeyValue;
-import org.apache.hadoop.hbase.OffheapKeyValue;
+import org.apache.hadoop.hbase.PrivateCellUtil;
 import org.apache.hadoop.hbase.SizeCachedKeyValue;
 import org.apache.hadoop.hbase.SizeCachedNoTagsKeyValue;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.io.encoding.AbstractDataBlockEncoder.AbstractEncodedSeeker;
 import org.apache.hadoop.hbase.nio.ByteBuff;
 import org.apache.hadoop.hbase.util.ByteBufferUtils;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.ObjectIntPair;
+import org.apache.yetus.audience.InterfaceAudience;
 
 @InterfaceAudience.Private
 public class RowIndexSeekerV1 extends AbstractEncodedSeeker {
 
   // A temp pair object which will be reused by ByteBuff#asSubByteBuffer calls. This avoids too
   // many object creations.
-  protected final ObjectIntPair<ByteBuffer> tmpPair = new ObjectIntPair<ByteBuffer>();
+  protected final ObjectIntPair<ByteBuffer> tmpPair = new ObjectIntPair<>();
 
   private ByteBuff currentBuffer;
   private SeekerState current = new SeekerState(); // always valid
@@ -153,10 +154,10 @@ public class RowIndexSeekerV1 extends AbstractEncodedSeeker {
   }
 
   private int compareRows(ByteBuffer row, Cell seekCell) {
-    if (seekCell instanceof ByteBufferedCell) {
+    if (seekCell instanceof ByteBufferExtendedCell) {
       return ByteBufferUtils.compareTo(row, row.position(), row.remaining(),
-          ((ByteBufferedCell) seekCell).getRowByteBuffer(),
-          ((ByteBufferedCell) seekCell).getRowPosition(),
+          ((ByteBufferExtendedCell) seekCell).getRowByteBuffer(),
+          ((ByteBufferExtendedCell) seekCell).getRowPosition(),
           seekCell.getRowLength());
     } else {
       return ByteBufferUtils.compareTo(row, row.position(), row.remaining(),
@@ -190,7 +191,7 @@ public class RowIndexSeekerV1 extends AbstractEncodedSeeker {
     }
     do {
       int comp;
-      comp = comparator.compareKeyIgnoresMvcc(seekCell, current.currentKey);
+      comp = PrivateCellUtil.compareKeyIgnoresMvcc(comparator, seekCell, current.currentKey);
       if (comp == 0) { // exact match
         if (seekBefore) {
           if (!previous.isValid()) {
@@ -244,7 +245,7 @@ public class RowIndexSeekerV1 extends AbstractEncodedSeeker {
 
   @Override
   public int compareKey(CellComparator comparator, Cell key) {
-    return comparator.compareKeyIgnoresMvcc(key, current.currentKey);
+    return PrivateCellUtil.compareKeyIgnoresMvcc(comparator, key, current.currentKey);
   }
 
   protected void decodeFirst() {
@@ -315,7 +316,7 @@ public class RowIndexSeekerV1 extends AbstractEncodedSeeker {
     protected long memstoreTS;
     protected int nextKvOffset;
     // buffer backed keyonlyKV
-    private ByteBufferedKeyOnlyKeyValue currentKey = new ByteBufferedKeyOnlyKeyValue();
+    private ByteBufferKeyOnlyKeyValue currentKey = new ByteBufferKeyOnlyKeyValue();
 
     protected boolean isValid() {
       return valueOffset != -1;
@@ -323,7 +324,7 @@ public class RowIndexSeekerV1 extends AbstractEncodedSeeker {
 
     protected void invalidate() {
       valueOffset = -1;
-      currentKey = new ByteBufferedKeyOnlyKeyValue();
+      currentKey = new ByteBufferKeyOnlyKeyValue();
       currentBuffer = null;
     }
 
@@ -364,7 +365,7 @@ public class RowIndexSeekerV1 extends AbstractEncodedSeeker {
     public Cell toCell() {
       Cell ret;
       int cellBufSize = getCellBufSize();
-      long seqId = 0l;
+      long seqId = 0L;
       if (includesMvcc()) {
         seqId = memstoreTS;
       }
@@ -382,8 +383,7 @@ public class RowIndexSeekerV1 extends AbstractEncodedSeeker {
         currentBuffer.asSubByteBuffer(startOffset, cellBufSize, tmpPair);
         ByteBuffer buf = tmpPair.getFirst();
         if (buf.isDirect()) {
-          ret = new OffheapKeyValue(buf, tmpPair.getSecond(), cellBufSize,
-              tagsLength > 0, seqId);
+          ret = new ByteBufferKeyValue(buf, tmpPair.getSecond(), cellBufSize, seqId);
         } else {
           if (tagsLength > 0) {
             ret = new SizeCachedKeyValue(buf.array(), buf.arrayOffset()

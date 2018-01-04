@@ -19,19 +19,14 @@
 package org.apache.hadoop.hbase.procedure2;
 
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.HBaseCommonTestingUtility;
-import org.apache.hadoop.hbase.io.util.StreamUtils;
-import org.apache.hadoop.hbase.procedure2.ProcedureTestingUtility;
 import org.apache.hadoop.hbase.procedure2.ProcedureTestingUtility.NoopProcedure;
 import org.apache.hadoop.hbase.procedure2.store.ProcedureStore;
+import org.apache.hbase.thirdparty.com.google.protobuf.Int32Value;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ProcedureProtos.ProcedureState;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.apache.hadoop.hbase.testclassification.MasterTests;
@@ -40,14 +35,14 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertTrue;
 
 @Category({MasterTests.class, SmallTests.class})
 public class TestProcedureEvents {
-  private static final Log LOG = LogFactory.getLog(TestProcedureEvents.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestProcedureEvents.class);
 
   private TestProcEnv procEnv;
   private ProcedureStore procStore;
@@ -65,7 +60,7 @@ public class TestProcedureEvents {
     logDir = new Path(testDir, "proc-logs");
 
     procEnv = new TestProcEnv();
-    procStore = ProcedureTestingUtility.createWalStore(htu.getConfiguration(), fs, logDir);
+    procStore = ProcedureTestingUtility.createWalStore(htu.getConfiguration(), logDir);
     procExecutor = new ProcedureExecutor(htu.getConfiguration(), procEnv, procStore);
     procStore.start(1);
     procExecutor.start(1, true);
@@ -111,6 +106,25 @@ public class TestProcedureEvents {
     ProcedureTestingUtility.assertIsAbortException(procExecutor.getResult(proc.getProcId()));
   }
 
+  /**
+   * This Event+Procedure exhibits following behavior:
+   * <ul>
+   *   <li>On procedure execute()
+   *     <ul>
+   *       <li>If had enough timeouts, abort the procedure. Else....</li>
+   *       <li>Suspend the event and add self to its suspend queue</li>
+   *       <li>Go into waiting state</li>
+   *     </ul>
+   *   </li>
+   *   <li>
+   *     On waiting timeout
+   *     <ul>
+   *       <li>Wake the event (which adds this procedure back into scheduler queue), and set own's
+   *       state to RUNNABLE (so can be executed again).</li>
+   *     </ul>
+   *   </li>
+   * </ul>
+   */
   public static class TestTimeoutEventProcedure extends NoopProcedure<TestProcEnv> {
     private final ProcedureEvent event = new ProcedureEvent("timeout-event");
 
@@ -136,8 +150,8 @@ public class TestProcedureEvents {
         return null;
       }
 
-      env.getProcedureScheduler().suspendEvent(event);
-      if (env.getProcedureScheduler().waitEvent(event, this)) {
+      event.suspend();
+      if (event.suspendIfNotReady(this)) {
         setState(ProcedureState.WAITING_TIMEOUT);
         throw new ProcedureSuspendedException();
       }
@@ -150,28 +164,36 @@ public class TestProcedureEvents {
       int n = ntimeouts.incrementAndGet();
       LOG.info("HANDLE TIMEOUT " + this + " ntimeouts=" + n);
       setState(ProcedureState.RUNNABLE);
-      env.getProcedureScheduler().wakeEvent(event);
+      event.wake((AbstractProcedureScheduler) env.getProcedureScheduler());
       return false;
     }
 
     @Override
     protected void afterReplay(final TestProcEnv env) {
       if (getState() == ProcedureState.WAITING_TIMEOUT) {
-        env.getProcedureScheduler().suspendEvent(event);
-        env.getProcedureScheduler().waitEvent(event, this);
+        event.suspend();
+        event.suspendIfNotReady(this);
       }
     }
 
     @Override
-    protected void serializeStateData(final OutputStream stream) throws IOException {
-      StreamUtils.writeRawVInt32(stream, ntimeouts.get());
-      StreamUtils.writeRawVInt32(stream, maxTimeouts);
+    protected void serializeStateData(ProcedureStateSerializer serializer)
+        throws IOException {
+      Int32Value.Builder ntimeoutsBuilder = Int32Value.newBuilder().setValue(ntimeouts.get());
+      serializer.serialize(ntimeoutsBuilder.build());
+
+      Int32Value.Builder maxTimeoutsBuilder = Int32Value.newBuilder().setValue(maxTimeouts);
+      serializer.serialize(maxTimeoutsBuilder.build());
     }
 
     @Override
-    protected void deserializeStateData(final InputStream stream) throws IOException {
-      ntimeouts.set(StreamUtils.readRawVarint32(stream));
-      maxTimeouts = StreamUtils.readRawVarint32(stream);
+    protected void deserializeStateData(ProcedureStateSerializer serializer)
+        throws IOException {
+      Int32Value ntimeoutsValue = serializer.deserialize(Int32Value.class);
+      ntimeouts.set(ntimeoutsValue.getValue());
+
+      Int32Value maxTimeoutsValue = serializer.deserialize(Int32Value.class);
+      maxTimeouts = maxTimeoutsValue.getValue();
     }
   }
 

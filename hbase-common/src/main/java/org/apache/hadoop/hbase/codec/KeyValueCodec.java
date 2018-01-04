@@ -24,17 +24,16 @@ import java.nio.ByteBuffer;
 
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.HBaseInterfaceAudience;
-import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.KeyValueUtil;
+import org.apache.hadoop.hbase.NoTagsByteBufferKeyValue;
 import org.apache.hadoop.hbase.NoTagsKeyValue;
-import org.apache.hadoop.hbase.ShareableMemory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.hadoop.hbase.nio.ByteBuff;
 import org.apache.hadoop.hbase.util.ByteBufferUtils;
-import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * Codec that does KeyValue version 1 serialization.
- * 
+ *
  * <p>Encodes Cell as serialized in KeyValue with total length prefix.
  * This is how KVs were serialized in Puts, Deletes and Results pre-0.96.  Its what would
  * happen if you called the Writable#write KeyValue implementation.  This encoder will fail
@@ -70,30 +69,35 @@ public class KeyValueCodec implements Codec {
       super(in);
     }
 
+    @Override
     protected Cell parseCell() throws IOException {
       // No tags here
       return KeyValueUtil.iscreate(in, false);
     }
   }
 
-  public static class ByteBufferedKeyValueDecoder implements Codec.Decoder {
+  public static class ByteBuffKeyValueDecoder implements Codec.Decoder {
 
-    protected final ByteBuffer buf;
+    protected final ByteBuff buf;
     protected Cell current = null;
 
-    public ByteBufferedKeyValueDecoder(ByteBuffer buf) {
+    public ByteBuffKeyValueDecoder(ByteBuff buf) {
       this.buf = buf;
     }
 
     @Override
     public boolean advance() throws IOException {
-      if (this.buf.remaining() <= 0) {
+      if (!this.buf.hasRemaining()) {
         return false;
       }
-      int len = ByteBufferUtils.toInt(buf);
-      assert buf.hasArray();
-      this.current = createCell(buf.array(), buf.arrayOffset() + buf.position(), len);
-      buf.position(buf.position() + len);
+      int len = buf.getInt();
+      ByteBuffer bb = buf.asSubByteBuffer(len);
+      if (bb.isDirect()) {
+        this.current = createCell(bb, bb.position(), len);
+      } else {
+        this.current = createCell(bb.array(), bb.arrayOffset() + bb.position(), len);
+      }
+      buf.skip(len);
       return true;
     }
 
@@ -103,36 +107,14 @@ public class KeyValueCodec implements Codec {
     }
 
     protected Cell createCell(byte[] buf, int offset, int len) {
-      return new ShareableMemoryNoTagsKeyValue(buf, offset, len);
+      return new NoTagsKeyValue(buf, offset, len);
     }
 
-    static class ShareableMemoryKeyValue extends KeyValue implements ShareableMemory {
-      public ShareableMemoryKeyValue(byte[] bytes, int offset, int length) {
-        super(bytes, offset, length);
-      }
-
-      @Override
-      public Cell cloneToCell() {
-        byte[] copy = Bytes.copy(this.bytes, this.offset, this.length);
-        KeyValue kv = new KeyValue(copy, 0, copy.length);
-        kv.setSequenceId(this.getSequenceId());
-        return kv;
-      }
+    protected Cell createCell(ByteBuffer bb, int pos, int len) {
+      // We know there is not going to be any tags.
+      return new NoTagsByteBufferKeyValue(bb, pos, len);
     }
 
-    static class ShareableMemoryNoTagsKeyValue extends NoTagsKeyValue implements ShareableMemory {
-      public ShareableMemoryNoTagsKeyValue(byte[] bytes, int offset, int length) {
-        super(bytes, offset, length);
-      }
-
-      @Override
-      public Cell cloneToCell() {
-        byte[] copy = Bytes.copy(this.bytes, this.offset, this.length);
-        KeyValue kv = new NoTagsKeyValue(copy, 0, copy.length);
-        kv.setSequenceId(this.getSequenceId());
-        return kv;
-      }
-    }
   }
 
   /**
@@ -144,8 +126,8 @@ public class KeyValueCodec implements Codec {
   }
 
   @Override
-  public Decoder getDecoder(ByteBuffer buf) {
-    return new ByteBufferedKeyValueDecoder(buf);
+  public Decoder getDecoder(ByteBuff buf) {
+    return new ByteBuffKeyValueDecoder(buf);
   }
 
   @Override

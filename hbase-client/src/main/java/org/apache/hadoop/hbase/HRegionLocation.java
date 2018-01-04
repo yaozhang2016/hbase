@@ -18,12 +18,13 @@
  */
 package org.apache.hadoop.hbase;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.hadoop.hbase.client.ImmutableHRegionInfo;
+import org.apache.hadoop.hbase.client.RegionInfo;
 import org.apache.hadoop.hbase.util.Addressing;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
- * Data structure to hold HRegionInfo and the address for the hosting
+ * Data structure to hold RegionInfo and the address for the hosting
  * HRegionServer.  Immutable.  Comparable, but we compare the 'location' only:
  * i.e. the hostname and port, and *not* the regioninfo.  This means two
  * instances are the same if they refer to the same 'location' (the same
@@ -36,17 +37,16 @@ import org.apache.hadoop.hbase.util.Addressing;
  * <br>This interface has been marked InterfaceAudience.Public in 0.96 and 0.98.
  */
 @InterfaceAudience.Public
-@InterfaceStability.Evolving
 public class HRegionLocation implements Comparable<HRegionLocation> {
-  private final HRegionInfo regionInfo;
+  private final RegionInfo regionInfo;
   private final ServerName serverName;
   private final long seqNum;
 
-  public HRegionLocation(HRegionInfo regionInfo, ServerName serverName) {
+  public HRegionLocation(RegionInfo regionInfo, ServerName serverName) {
     this(regionInfo, serverName, HConstants.NO_SEQNUM);
   }
 
-  public HRegionLocation(HRegionInfo regionInfo, ServerName serverName, long seqNum) {
+  public HRegionLocation(RegionInfo regionInfo, ServerName serverName, long seqNum) {
     this.regionInfo = regionInfo;
     this.serverName = serverName;
     this.seqNum = seqNum;
@@ -86,8 +86,20 @@ public class HRegionLocation implements Comparable<HRegionLocation> {
     return this.serverName.hashCode();
   }
 
-  /** @return HRegionInfo */
+  /**
+   *
+   * @return Immutable HRegionInfo
+   * @deprecated Since 2.0.0. Will remove in 3.0.0. Use {@link #getRegion()}} instead.
+   */
+  @Deprecated
   public HRegionInfo getRegionInfo(){
+    return regionInfo == null ? null : new ImmutableHRegionInfo(regionInfo);
+  }
+
+  /**
+   * @return regionInfo
+   */
+  public RegionInfo getRegion(){
     return regionInfo;
   }
 

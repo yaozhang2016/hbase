@@ -28,17 +28,18 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.ReentrantLock;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.hbase.util.IdLock;
 
-import com.google.common.util.concurrent.ThreadFactoryBuilder;
+import org.apache.hbase.thirdparty.com.google.common.util.concurrent.ThreadFactoryBuilder;
 
 /**
  * The cache for mob files.
@@ -49,7 +50,7 @@ import com.google.common.util.concurrent.ThreadFactoryBuilder;
 @InterfaceAudience.Private
 public class MobFileCache {
 
-  private static final Log LOG = LogFactory.getLog(MobFileCache.class);
+  private static final Logger LOG = LoggerFactory.getLogger(MobFileCache.class);
 
   /*
    * Eviction and statistics thread. Periodically run to print the statistics and
@@ -76,9 +77,9 @@ public class MobFileCache {
   // caches access count
   private final AtomicLong count = new AtomicLong(0);
   private long lastAccess = 0;
-  private final AtomicLong miss = new AtomicLong(0);
+  private final LongAdder miss = new LongAdder();
   private long lastMiss = 0;
-  private final AtomicLong evictedFileCount = new AtomicLong(0);
+  private final LongAdder evictedFileCount = new LongAdder();
   private long lastEvictedFileCount = 0;
 
   // a lock to sync the evict to guarantee the eviction occurs in sequence.
@@ -102,7 +103,7 @@ public class MobFileCache {
     this.mobFileMaxCacheSize = conf.getInt(MobConstants.MOB_FILE_CACHE_SIZE_KEY,
         MobConstants.DEFAULT_MOB_FILE_CACHE_SIZE);
     isCacheEnabled = (mobFileMaxCacheSize > 0);
-    map = new ConcurrentHashMap<String, CachedMobFile>(mobFileMaxCacheSize);
+    map = new ConcurrentHashMap<>(mobFileMaxCacheSize);
     if (isCacheEnabled) {
       long period = conf.getLong(MobConstants.MOB_CACHE_EVICT_PERIOD,
           MobConstants.DEFAULT_MOB_CACHE_EVICT_PERIOD); // in seconds
@@ -118,8 +119,10 @@ public class MobFileCache {
       this.scheduleThreadPool.scheduleAtFixedRate(new EvictionThread(this), period, period,
           TimeUnit.SECONDS);
 
-      LOG.info("MobFileCache enabled with cacheSize=" + mobFileMaxCacheSize +
+      if (LOG.isDebugEnabled()) {
+        LOG.debug("MobFileCache enabled with cacheSize=" + mobFileMaxCacheSize +
           ", evictPeriods=" +  period + "sec, evictRemainRatio=" + evictRemainRatio);
+      }
     } else {
       LOG.info("MobFileCache disabled");
     }
@@ -136,12 +139,12 @@ public class MobFileCache {
         return;
       }
       printStatistics();
-      List<CachedMobFile> evictedFiles = new ArrayList<CachedMobFile>();
+      List<CachedMobFile> evictedFiles = new ArrayList<>();
       try {
         if (map.size() <= mobFileMaxCacheSize) {
           return;
         }
-        List<CachedMobFile> files = new ArrayList<CachedMobFile>(map.values());
+        List<CachedMobFile> files = new ArrayList<>(map.values());
         Collections.sort(files);
         int start = (int) (mobFileMaxCacheSize * evictRemainRatio);
         if (start >= 0) {
@@ -161,7 +164,7 @@ public class MobFileCache {
       for (CachedMobFile evictedFile : evictedFiles) {
         closeFile(evictedFile);
       }
-      evictedFileCount.addAndGet(evictedFiles.size());
+      evictedFileCount.add(evictedFiles.size());
     }
   }
 
@@ -178,7 +181,7 @@ public class MobFileCache {
         CachedMobFile evictedFile = map.remove(fileName);
         if (evictedFile != null) {
           evictedFile.close();
-          evictedFileCount.incrementAndGet();
+          evictedFileCount.increment();
         }
       } catch (IOException e) {
         LOG.error("Failed to evict the file " + fileName, e);
@@ -217,7 +220,7 @@ public class MobFileCache {
             cached = CachedMobFile.create(fs, path, conf, cacheConf);
             cached.open();
             map.put(fileName, cached);
-            miss.incrementAndGet();
+            miss.increment();
           }
         }
         cached.open();
@@ -292,7 +295,7 @@ public class MobFileCache {
    * @return The count of misses to the mob file cache.
    */
   public long getMissCount() {
-    return miss.get();
+    return miss.sum();
   }
 
   /**
@@ -300,7 +303,7 @@ public class MobFileCache {
    * @return The number of items evicted from the mob file cache.
    */
   public long getEvictedFileCount() {
-    return evictedFileCount.get();
+    return evictedFileCount.sum();
   }
 
   /**
@@ -308,7 +311,7 @@ public class MobFileCache {
    * @return The hit ratio to the mob file cache.
    */
   public double getHitRatio() {
-    return count.get() == 0 ? 0 : ((float) (count.get() - miss.get())) / (float) count.get();
+    return count.get() == 0 ? 0 : ((float) (count.get() - miss.sum())) / (float) count.get();
   }
 
   /**
@@ -316,8 +319,8 @@ public class MobFileCache {
    */
   public void printStatistics() {
     long access = count.get() - lastAccess;
-    long missed = miss.get() - lastMiss;
-    long evicted = evictedFileCount.get() - lastEvictedFileCount;
+    long missed = miss.sum() - lastMiss;
+    long evicted = evictedFileCount.sum() - lastEvictedFileCount;
     int hitRatio = access == 0 ? 0 : (int) (((float) (access - missed)) / (float) access * 100);
     LOG.info("MobFileCache Statistics, access: " + access + ", miss: " + missed + ", hit: "
         + (access - missed) + ", hit ratio: " + hitRatio + "%, evicted files: " + evicted);

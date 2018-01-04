@@ -25,10 +25,10 @@ import java.util.Collection;
 import java.util.List;
 
 import org.apache.hadoop.hbase.Cell;
-import org.apache.hadoop.hbase.CellComparator;
-import org.apache.hadoop.hbase.CellUtil;
-import org.apache.hadoop.hbase.HBaseTestingUtility;
+import org.apache.hadoop.hbase.CellComparatorImpl;
+import org.apache.hadoop.hbase.HBaseCommonTestingUtility;
 import org.apache.hadoop.hbase.HConstants;
+import org.apache.hadoop.hbase.PrivateCellUtil;
 import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.io.compress.Compression;
 import org.apache.hadoop.hbase.io.hfile.HFileContext;
@@ -51,7 +51,7 @@ public class TestSeekToBlockWithEncoders {
 
   @Parameters
   public static Collection<Object[]> parameters() {
-    return HBaseTestingUtility.BOOLEAN_PARAMETERIZED;
+    return HBaseCommonTestingUtility.BOOLEAN_PARAMETERIZED;
   }
 
   public TestSeekToBlockWithEncoders(boolean useOffheapData) {
@@ -63,7 +63,7 @@ public class TestSeekToBlockWithEncoders {
    */
   @Test
   public void testSeekToBlockWithNonMatchingSeekKey() throws IOException {
-    List<KeyValue> sampleKv = new ArrayList<KeyValue>();
+    List<KeyValue> sampleKv = new ArrayList<>();
     KeyValue kv1 = new KeyValue(Bytes.toBytes("aaa"), Bytes.toBytes("f1"), Bytes.toBytes("q1"),
         Bytes.toBytes("val"));
     sampleKv.add(kv1);
@@ -89,7 +89,7 @@ public class TestSeekToBlockWithEncoders {
    */
   @Test
   public void testSeekingToBlockWithBiggerNonLength1() throws IOException {
-    List<KeyValue> sampleKv = new ArrayList<KeyValue>();
+    List<KeyValue> sampleKv = new ArrayList<>();
     KeyValue kv1 = new KeyValue(Bytes.toBytes("aaa"), Bytes.toBytes("f1"), Bytes.toBytes("q1"),
         Bytes.toBytes("val"));
     sampleKv.add(kv1);
@@ -115,7 +115,7 @@ public class TestSeekToBlockWithEncoders {
    */
   @Test
   public void testSeekingToBlockToANotAvailableKey() throws IOException {
-    List<KeyValue> sampleKv = new ArrayList<KeyValue>();
+    List<KeyValue> sampleKv = new ArrayList<>();
     KeyValue kv1 = new KeyValue(Bytes.toBytes("aaa"), Bytes.toBytes("f1"), Bytes.toBytes("q1"),
         Bytes.toBytes("val"));
     sampleKv.add(kv1);
@@ -141,7 +141,7 @@ public class TestSeekToBlockWithEncoders {
    */
   @Test
   public void testSeekToBlockWithDecreasingCommonPrefix() throws IOException {
-    List<KeyValue> sampleKv = new ArrayList<KeyValue>();
+    List<KeyValue> sampleKv = new ArrayList<>();
     KeyValue kv1 = new KeyValue(Bytes.toBytes("row10aaa"), Bytes.toBytes("f1"),
         Bytes.toBytes("q1"), Bytes.toBytes("val"));
     sampleKv.add(kv1);
@@ -154,13 +154,13 @@ public class TestSeekToBlockWithEncoders {
     KeyValue kv4 = new KeyValue(Bytes.toBytes("row11baa"), Bytes.toBytes("f1"),
         Bytes.toBytes("q1"), Bytes.toBytes("val"));
     sampleKv.add(kv4);
-    Cell toSeek = CellUtil.createLastOnRow(kv3);
+    Cell toSeek = PrivateCellUtil.createLastOnRow(kv3);
     seekToTheKey(kv3, sampleKv, toSeek);
   }
 
   @Test
   public void testSeekToBlockWithDiffQualifer() throws IOException {
-    List<KeyValue> sampleKv = new ArrayList<KeyValue>();
+    List<KeyValue> sampleKv = new ArrayList<>();
     KeyValue kv1 = new KeyValue(Bytes.toBytes("aaa"), Bytes.toBytes("f1"), Bytes.toBytes("q1"),
         Bytes.toBytes("val"));
     sampleKv.add(kv1);
@@ -180,7 +180,7 @@ public class TestSeekToBlockWithEncoders {
 
   @Test
   public void testSeekToBlockWithDiffQualiferOnSameRow() throws IOException {
-    List<KeyValue> sampleKv = new ArrayList<KeyValue>();
+    List<KeyValue> sampleKv = new ArrayList<>();
     KeyValue kv1 = new KeyValue(Bytes.toBytes("aaa"), Bytes.toBytes("f1"), Bytes.toBytes("q1"),
         Bytes.toBytes("val"));
     sampleKv.add(kv1);
@@ -203,7 +203,7 @@ public class TestSeekToBlockWithEncoders {
 
   @Test
   public void testSeekToBlockWithDiffQualiferOnSameRow1() throws IOException {
-    List<KeyValue> sampleKv = new ArrayList<KeyValue>();
+    List<KeyValue> sampleKv = new ArrayList<>();
     KeyValue kv1 = new KeyValue(Bytes.toBytes("aaa"), Bytes.toBytes("f1"), Bytes.toBytes("q1"),
         Bytes.toBytes("val"));
     sampleKv.add(kv1);
@@ -226,7 +226,7 @@ public class TestSeekToBlockWithEncoders {
 
   @Test
   public void testSeekToBlockWithDiffQualiferOnSameRowButDescendingInSize() throws IOException {
-    List<KeyValue> sampleKv = new ArrayList<KeyValue>();
+    List<KeyValue> sampleKv = new ArrayList<>();
     KeyValue kv1 = new KeyValue(Bytes.toBytes("aaa"), Bytes.toBytes("f1"), Bytes.toBytes("qual1"),
         Bytes.toBytes("val"));
     sampleKv.add(kv1);
@@ -249,7 +249,7 @@ public class TestSeekToBlockWithEncoders {
 
   @Test
   public void testSeekToBlockWithDiffFamilyAndQualifer() throws IOException {
-    List<KeyValue> sampleKv = new ArrayList<KeyValue>();
+    List<KeyValue> sampleKv = new ArrayList<>();
     KeyValue kv1 = new KeyValue(Bytes.toBytes("aaa"), Bytes.toBytes("fam1"), Bytes.toBytes("q1"),
         Bytes.toBytes("val"));
     sampleKv.add(kv1);
@@ -270,12 +270,11 @@ public class TestSeekToBlockWithEncoders {
   private void seekToTheKey(KeyValue expected, List<KeyValue> kvs, Cell toSeek)
       throws IOException {
     // create all seekers
-    List<DataBlockEncoder.EncodedSeeker> encodedSeekers = new ArrayList<DataBlockEncoder.EncodedSeeker>();
+    List<DataBlockEncoder.EncodedSeeker> encodedSeekers = new ArrayList<>();
     for (DataBlockEncoding encoding : DataBlockEncoding.values()) {
-      if (encoding.getEncoder() == null || encoding == DataBlockEncoding.PREFIX_TREE) {
+      if (encoding.getEncoder() == null) {
         continue;
       }
-
       DataBlockEncoder encoder = encoding.getEncoder();
       HFileContext meta = new HFileContextBuilder().withHBaseCheckSum(false)
           .withIncludesMvcc(false).withIncludesTags(false)
@@ -284,7 +283,7 @@ public class TestSeekToBlockWithEncoders {
           HFILEBLOCK_DUMMY_HEADER, meta);
       ByteBuffer encodedBuffer = TestDataBlockEncoders.encodeKeyValues(encoding, kvs,
           encodingContext, this.useOffheapData);
-      DataBlockEncoder.EncodedSeeker seeker = encoder.createSeeker(CellComparator.COMPARATOR,
+      DataBlockEncoder.EncodedSeeker seeker = encoder.createSeeker(CellComparatorImpl.COMPARATOR,
           encoder.newDataBlockDecodingContext(meta));
       seeker.setCurrentBuffer(new SingleByteBuff(encodedBuffer));
       encodedSeekers.add(seeker);

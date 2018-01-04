@@ -18,20 +18,21 @@
 package org.apache.hadoop.hbase.io.hfile;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.util.NavigableMap;
 import java.util.NavigableSet;
 import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.ConcurrentSkipListSet;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.core.JsonGenerationException;
+import com.fasterxml.jackson.databind.JsonMappingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.hbase.util.FastLongHistogram;
-import org.codehaus.jackson.JsonGenerationException;
-import org.codehaus.jackson.annotate.JsonIgnoreProperties;
-import org.codehaus.jackson.map.JsonMappingException;
-import org.codehaus.jackson.map.ObjectMapper;
-import org.codehaus.jackson.map.SerializationConfig;
-
+import org.apache.hadoop.hbase.metrics.impl.FastLongHistogram;
+import org.apache.hadoop.hbase.util.Bytes;
 
 /**
  * Utilty for aggregating counts in CachedBlocks and toString/toJSON CachedBlocks and BlockCaches.
@@ -48,9 +49,9 @@ public class BlockCacheUtil {
    */
   private static final ObjectMapper MAPPER = new ObjectMapper();
   static {
-    MAPPER.configure(SerializationConfig.Feature.FAIL_ON_EMPTY_BEANS, false);
-    MAPPER.configure(SerializationConfig.Feature.FLUSH_AFTER_WRITE_VALUE, true);
-    MAPPER.configure(SerializationConfig.Feature.INDENT_OUTPUT, true);
+    MAPPER.configure(SerializationFeature.FAIL_ON_EMPTY_BEANS, false);
+    MAPPER.configure(SerializationFeature.FLUSH_AFTER_WRITE_VALUE, true);
+    MAPPER.configure(SerializationFeature.INDENT_OUTPUT, true);
   }
 
   /**
@@ -172,6 +173,15 @@ public class BlockCacheUtil {
     return cbsbf;
   }
 
+  public static int compareCacheBlock(Cacheable left, Cacheable right) {
+    ByteBuffer l = ByteBuffer.allocate(left.getSerializedLength());
+    left.serialize(l);
+    ByteBuffer r = ByteBuffer.allocate(right.getSerializedLength());
+    right.serialize(r);
+    return Bytes.compareTo(l.array(), l.arrayOffset(), l.limit(),
+	      r.array(), r.arrayOffset(), r.limit());
+  }
+
   /**
    * Use one of these to keep a running account of cached blocks by file.  Throw it away when done.
    * This is different than metrics in that it is stats on current state of a cache.
@@ -205,8 +215,7 @@ public class BlockCacheUtil {
     /**
      * Map by filename. use concurent utils because we want our Map and contained blocks sorted.
      */
-    private NavigableMap<String, NavigableSet<CachedBlock>> cachedBlockByFile =
-      new ConcurrentSkipListMap<String, NavigableSet<CachedBlock>>();
+    private NavigableMap<String, NavigableSet<CachedBlock>> cachedBlockByFile = new ConcurrentSkipListMap<>();
     FastLongHistogram hist = new FastLongHistogram();
 
     /**
@@ -217,7 +226,7 @@ public class BlockCacheUtil {
       if (isFull()) return true;
       NavigableSet<CachedBlock> set = this.cachedBlockByFile.get(cb.getFilename());
       if (set == null) {
-        set = new ConcurrentSkipListSet<CachedBlock>();
+        set = new ConcurrentSkipListSet<>();
         this.cachedBlockByFile.put(cb.getFilename(), set);
       }
       set.add(cb);

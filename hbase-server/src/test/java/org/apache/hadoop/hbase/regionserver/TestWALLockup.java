@@ -1,4 +1,4 @@
-/**
+/*
  *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -26,8 +26,6 @@ import java.util.TreeMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
@@ -41,22 +39,24 @@ import org.apache.hadoop.hbase.Server;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.ClusterConnection;
+import org.apache.hadoop.hbase.client.Connection;
 import org.apache.hadoop.hbase.client.Durability;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.regionserver.wal.DamagedWALException;
 import org.apache.hadoop.hbase.regionserver.wal.FSHLog;
 import org.apache.hadoop.hbase.regionserver.wal.FailedLogCloseException;
 import org.apache.hadoop.hbase.regionserver.wal.WALActionsListener;
-import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
+import org.apache.hadoop.hbase.wal.WALEdit;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManagerTestHelper;
 import org.apache.hadoop.hbase.util.Threads;
 import org.apache.hadoop.hbase.wal.WAL;
 import org.apache.hadoop.hbase.wal.WALKey;
+import org.apache.hadoop.hbase.wal.WALKeyImpl;
 import org.apache.hadoop.hbase.wal.WALProvider.Writer;
 import org.apache.hadoop.hbase.zookeeper.MetaTableLocator;
-import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher;
+import org.apache.hadoop.hbase.zookeeper.ZKWatcher;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Rule;
@@ -64,6 +64,8 @@ import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.junit.rules.TestName;
 import org.mockito.Mockito;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Testing for lock up of WAL subsystem.
@@ -71,7 +73,7 @@ import org.mockito.Mockito;
  */
 @Category({MediumTests.class})
 public class TestWALLockup {
-  private static final Log LOG = LogFactory.getLog(TestWALLockup.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestWALLockup.class);
   @Rule public TestName name = new TestName();
 
   private static final String COLUMN_FAMILY = "MyCF";
@@ -190,7 +192,7 @@ public class TestWALLockup {
           }
 
           @Override
-          public long getLength() throws IOException {
+          public long getLength() {
             return w.getLength();
           }
         };
@@ -218,17 +220,18 @@ public class TestWALLockup {
     HTableDescriptor htd = new HTableDescriptor(TableName.META_TABLE_NAME);
     final HRegion region = initHRegion(tableName, null, null, dodgyWAL);
     byte [] bytes = Bytes.toBytes(getName());
-    NavigableMap<byte[], Integer> scopes = new TreeMap<byte[], Integer>(
+    NavigableMap<byte[], Integer> scopes = new TreeMap<>(
         Bytes.BYTES_COMPARATOR);
     scopes.put(COLUMN_FAMILY_BYTES, 0);
+    MultiVersionConcurrencyControl mvcc = new MultiVersionConcurrencyControl();
     try {
       // First get something into memstore. Make a Put and then pull the Cell out of it. Will
       // manage append and sync carefully in below to manufacture hang. We keep adding same
       // edit. WAL subsystem doesn't care.
       Put put = new Put(bytes);
       put.addColumn(COLUMN_FAMILY_BYTES, Bytes.toBytes("1"), bytes);
-      WALKey key = new WALKey(region.getRegionInfo().getEncodedNameAsBytes(), htd.getTableName(),
-          scopes);
+      WALKeyImpl key = new WALKeyImpl(region.getRegionInfo().getEncodedNameAsBytes(),
+          htd.getTableName(), System.currentTimeMillis(), mvcc, scopes);
       WALEdit edit = new WALEdit();
       CellScanner CellScanner = put.cellScanner();
       assertTrue(CellScanner.advance());
@@ -257,8 +260,8 @@ public class TestWALLockup {
       Thread t = new Thread ("Flusher") {
         public void run() {
           try {
-            if (region.getMemstoreSize() <= 0) {
-              throw new IOException("memstore size=" + region.getMemstoreSize());
+            if (region.getMemStoreSize() <= 0) {
+              throw new IOException("memstore size=" + region.getMemStoreSize());
             }
             region.flush(false);
           } catch (IOException e) {
@@ -271,7 +274,7 @@ public class TestWALLockup {
       };
       t.setDaemon(true);
       t.start();
-      // Wait until 
+      // Wait until
       while (dodgyWAL.latch.getCount() > 0) Threads.sleep(1);
       // Now assert I got a new WAL file put in place even though loads of errors above.
       assertTrue(originalWAL != dodgyWAL.getCurrentFileName());
@@ -349,7 +352,7 @@ public class TestWALLockup {
           }
 
           @Override
-          public long getLength() throws IOException {
+          public long getLength() {
             return w.getLength();
           }
         };
@@ -397,14 +400,15 @@ public class TestWALLockup {
     HTableDescriptor htd = new HTableDescriptor(TableName.META_TABLE_NAME);
     final HRegion region = initHRegion(tableName, null, null, dodgyWAL1);
     byte[] bytes = Bytes.toBytes(getName());
-    NavigableMap<byte[], Integer> scopes = new TreeMap<byte[], Integer>(
+    NavigableMap<byte[], Integer> scopes = new TreeMap<>(
         Bytes.BYTES_COMPARATOR);
     scopes.put(COLUMN_FAMILY_BYTES, 0);
+    MultiVersionConcurrencyControl mvcc = new MultiVersionConcurrencyControl();
     try {
       Put put = new Put(bytes);
       put.addColumn(COLUMN_FAMILY_BYTES, Bytes.toBytes("1"), bytes);
-      WALKey key = new WALKey(region.getRegionInfo().getEncodedNameAsBytes(),
-          htd.getTableName(), scopes);
+      WALKeyImpl key = new WALKeyImpl(region.getRegionInfo().getEncodedNameAsBytes(),
+          htd.getTableName(), System.currentTimeMillis(), mvcc, scopes);
       WALEdit edit = new WALEdit();
       CellScanner CellScanner = put.cellScanner();
       assertTrue(CellScanner.advance());
@@ -435,8 +439,8 @@ public class TestWALLockup {
 
       // make RingBufferEventHandler sleep 1s, so the following sync
       // endOfBatch=false
-      key = new WALKey(region.getRegionInfo().getEncodedNameAsBytes(),
-          TableName.valueOf("sleep"), scopes);
+      key = new WALKeyImpl(region.getRegionInfo().getEncodedNameAsBytes(),
+          TableName.valueOf("sleep"), System.currentTimeMillis(), mvcc, scopes);
       dodgyWAL2.append(region.getRegionInfo(), key, edit, true);
 
       Thread t = new Thread("Sync") {
@@ -459,8 +463,8 @@ public class TestWALLockup {
         e1.printStackTrace();
       }
       // make append throw DamagedWALException
-      key = new WALKey(region.getRegionInfo().getEncodedNameAsBytes(),
-          TableName.valueOf("DamagedWALException"), scopes);
+      key = new WALKeyImpl(region.getRegionInfo().getEncodedNameAsBytes(),
+          TableName.valueOf("DamagedWALException"), System.currentTimeMillis(), mvcc, scopes);
       dodgyWAL2.append(region.getRegionInfo(), key, edit, true);
 
       while (latch.getCount() > 0) {
@@ -503,7 +507,7 @@ public class TestWALLockup {
     }
 
     @Override
-    public ZooKeeperWatcher getZooKeeper() {
+    public ZKWatcher getZooKeeper() {
       return null;
     }
 
@@ -558,9 +562,23 @@ public class TestWALLockup {
       return null;
     }
 
+    @Override
+    public FileSystem getFileSystem() {
+      return null;
+    }
+
+    @Override
+    public boolean isStopping() {
+      return false;
+    }
+
+    @Override
+    public Connection createConnection(Configuration conf) throws IOException {
+      return null;
+    }
   }
 
-  static class DummyWALActionsListener extends WALActionsListener.Base {
+  static class DummyWALActionsListener implements WALActionsListener {
 
     @Override
     public void visitLogEntryBeforeWrite(WALKey logKey, WALEdit logEdit)
@@ -586,6 +604,7 @@ public class TestWALLockup {
    */
   public static HRegion initHRegion(TableName tableName, byte[] startKey, byte[] stopKey, WAL wal)
   throws IOException {
+    ChunkCreator.initialize(MemStoreLABImpl.CHUNK_SIZE_DEFAULT, false, 0, 0, 0, null);
     return TEST_UTIL.createLocalHRegion(tableName, startKey, stopKey, false, Durability.SYNC_WAL,
       wal, COLUMN_FAMILY_BYTES);
   }

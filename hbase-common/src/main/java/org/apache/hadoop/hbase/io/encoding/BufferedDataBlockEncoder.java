@@ -21,8 +21,7 @@ import java.io.DataOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.ByteBuffer;
-
-import org.apache.hadoop.hbase.ByteBufferedCell;
+import org.apache.hadoop.hbase.ByteBufferExtendedCell;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellComparator;
 import org.apache.hadoop.hbase.CellUtil;
@@ -31,7 +30,7 @@ import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.KeyValue.Type;
 import org.apache.hadoop.hbase.KeyValueUtil;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.hadoop.hbase.PrivateCellUtil;
 import org.apache.hadoop.hbase.io.TagCompressionContext;
 import org.apache.hadoop.hbase.io.util.LRUDictionary;
 import org.apache.hadoop.hbase.io.util.StreamUtils;
@@ -41,6 +40,7 @@ import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.ClassSize;
 import org.apache.hadoop.hbase.util.ObjectIntPair;
 import org.apache.hadoop.io.WritableUtils;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * Base class for all data block encoders that use a buffer.
@@ -251,7 +251,7 @@ abstract class BufferedDataBlockEncoder extends AbstractDataBlockEncoder {
 
     private Cell toOffheapCell(ByteBuffer valAndTagsBuffer, int vOffset,
         int tagsLenSerializationSize) {
-      ByteBuffer tagsBuf =  HConstants.EMPTY_BYTE_BUFFER;
+      ByteBuffer tagsBuf = HConstants.EMPTY_BYTE_BUFFER;
       int tOffset = 0;
       if (this.includeTags) {
         if (this.tagCompressionContext == null) {
@@ -262,8 +262,9 @@ abstract class BufferedDataBlockEncoder extends AbstractDataBlockEncoder {
           tOffset = 0;
         }
       }
-      return new OffheapDecodedCell(ByteBuffer.wrap(Bytes.copy(keyBuffer, 0, this.keyLength)),
-          currentKey.getRowLength(), currentKey.getFamilyOffset(), currentKey.getFamilyLength(),
+      return new OffheapDecodedExtendedCell(
+          ByteBuffer.wrap(Bytes.copy(keyBuffer, 0, this.keyLength)), currentKey.getRowLength(),
+          currentKey.getFamilyOffset(), currentKey.getFamilyLength(),
           currentKey.getQualifierOffset(), currentKey.getQualifierLength(),
           currentKey.getTimestamp(), currentKey.getTypeByte(), valAndTagsBuffer, vOffset,
           this.valueLength, memstoreTS, tagsBuf, tOffset, this.tagsLength);
@@ -277,7 +278,7 @@ abstract class BufferedDataBlockEncoder extends AbstractDataBlockEncoder {
    * represented by the valueOffset and valueLength
    */
   // We return this as a Cell to the upper layers of read flow and might try setting a new SeqId
-  // there. So this has to be an instance of SettableSequenceId.
+  // there. So this has to be an instance of ExtendedCell.
   protected static class OnheapDecodedCell implements ExtendedCell {
     private static final long FIXED_OVERHEAD = ClassSize.align(ClassSize.OBJECT
         + (3 * ClassSize.REFERENCE) + (2 * Bytes.SIZEOF_LONG) + (7 * Bytes.SIZEOF_INT)
@@ -452,7 +453,7 @@ abstract class BufferedDataBlockEncoder extends AbstractDataBlockEncoder {
     }
 
     @Override
-    public void write(byte[] buf, int offset) {
+    public void write(ByteBuffer buf, int offset) {
       // This is not used in actual flow. Throwing UnsupportedOperationException
       throw new UnsupportedOperationException();
     }
@@ -464,18 +465,19 @@ abstract class BufferedDataBlockEncoder extends AbstractDataBlockEncoder {
     }
 
     @Override
-    public void setTimestamp(byte[] ts, int tsOffset) throws IOException {
+    public void setTimestamp(byte[] ts) throws IOException {
       // This is not used in actual flow. Throwing UnsupportedOperationException
       throw new UnsupportedOperationException();
     }
 
     @Override
-    public long heapOverhead() {
-      return FIXED_OVERHEAD;
+    public ExtendedCell deepClone() {
+      // This is not used in actual flow. Throwing UnsupportedOperationException
+      throw new UnsupportedOperationException();
     }
   }
 
-  protected static class OffheapDecodedCell extends ByteBufferedCell implements ExtendedCell {
+  protected static class OffheapDecodedExtendedCell extends ByteBufferExtendedCell {
     private static final long FIXED_OVERHEAD = ClassSize.align(ClassSize.OBJECT
         + (3 * ClassSize.REFERENCE) + (2 * Bytes.SIZEOF_LONG) + (7 * Bytes.SIZEOF_INT)
         + (Bytes.SIZEOF_SHORT) + (2 * Bytes.SIZEOF_BYTE) + (3 * ClassSize.BYTE_BUFFER));
@@ -495,7 +497,7 @@ abstract class BufferedDataBlockEncoder extends AbstractDataBlockEncoder {
     private int tagsLength;
     private long seqId;
 
-    protected OffheapDecodedCell(ByteBuffer keyBuffer, short rowLength, int familyOffset,
+    protected OffheapDecodedExtendedCell(ByteBuffer keyBuffer, short rowLength, int familyOffset,
         byte familyLength, int qualOffset, int qualLength, long timeStamp, byte typeByte,
         ByteBuffer valueBuffer, int valueOffset, int valueLen, long seqId, ByteBuffer tagsBuffer,
         int tagsOffset, int tagsLength) {
@@ -661,7 +663,7 @@ abstract class BufferedDataBlockEncoder extends AbstractDataBlockEncoder {
 
     @Override
     public long heapSize() {
-      return FIXED_OVERHEAD + rowLength + familyLength + qualifierLength + valueLength + tagsLength;
+      return FIXED_OVERHEAD;
     }
 
     @Override
@@ -702,20 +704,21 @@ abstract class BufferedDataBlockEncoder extends AbstractDataBlockEncoder {
     }
 
     @Override
-    public void setTimestamp(byte[] ts, int tsOffset) throws IOException {
+    public void setTimestamp(byte[] ts) throws IOException {
       // This is not used in actual flow. Throwing UnsupportedOperationException
       throw new UnsupportedOperationException();
     }
 
     @Override
-    public void write(byte[] buf, int offset) {
+    public void write(ByteBuffer buf, int offset) {
       // This is not used in actual flow. Throwing UnsupportedOperationException
       throw new UnsupportedOperationException();
     }
 
     @Override
-    public long heapOverhead() {
-      return FIXED_OVERHEAD;
+    public ExtendedCell deepClone() {
+      // This is not used in actual flow. Throwing UnsupportedOperationException
+      throw new UnsupportedOperationException();
     }
   }
 
@@ -726,7 +729,7 @@ abstract class BufferedDataBlockEncoder extends AbstractDataBlockEncoder {
     protected  KeyValue.KeyOnlyKeyValue keyOnlyKV = new KeyValue.KeyOnlyKeyValue();
     // A temp pair object which will be reused by ByteBuff#asSubByteBuffer calls. This avoids too
     // many object creations.
-    protected final ObjectIntPair<ByteBuffer> tmpPair = new ObjectIntPair<ByteBuffer>();
+    protected final ObjectIntPair<ByteBuffer> tmpPair = new ObjectIntPair<>();
     protected STATE current, previous;
 
     public BufferedEncodedSeeker(CellComparator comparator,
@@ -746,7 +749,7 @@ abstract class BufferedDataBlockEncoder extends AbstractDataBlockEncoder {
     @Override
     public int compareKey(CellComparator comparator, Cell key) {
       keyOnlyKV.setKey(current.keyBuffer, 0, current.keyLength);
-      return comparator.compareKeyIgnoresMvcc(key, keyOnlyKV);
+      return PrivateCellUtil.compareKeyIgnoresMvcc(comparator, key, keyOnlyKV);
     }
 
     @Override
@@ -878,7 +881,7 @@ abstract class BufferedDataBlockEncoder extends AbstractDataBlockEncoder {
                   qualCommonPrefix);
               comp = compareCommonQualifierPrefix(seekCell, keyOnlyKV, qualCommonPrefix);
               if (comp == 0) {
-                comp = CellComparator.compareTimestamps(seekCell, keyOnlyKV);
+                comp = CellComparator.getInstance().compareTimestamps(seekCell, keyOnlyKV);
                 if (comp == 0) {
                   // Compare types. Let the delete types sort ahead of puts;
                   // i.e. types
@@ -1024,9 +1027,9 @@ abstract class BufferedDataBlockEncoder extends AbstractDataBlockEncoder {
         // the tags using Dictionary compression in such a case
         if (tagCompressionContext != null) {
           // Not passing tagsLength considering that parsing of the tagsLength is not costly
-          CellUtil.compressTags(out, cell, tagCompressionContext);
+          PrivateCellUtil.compressTags(out, cell, tagCompressionContext);
         } else {
-          CellUtil.writeTags(out, cell, tagsLength);
+          PrivateCellUtil.writeTags(out, cell, tagsLength);
         }
       }
       size += tagsLength + KeyValue.TAGS_LENGTH_SIZE;

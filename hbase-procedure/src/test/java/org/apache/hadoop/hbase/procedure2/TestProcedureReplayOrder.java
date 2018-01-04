@@ -19,19 +19,15 @@
 package org.apache.hadoop.hbase.procedure2;
 
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.concurrent.atomic.AtomicLong;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.HBaseCommonTestingUtility;
-import org.apache.hadoop.hbase.io.util.StreamUtils;
 import org.apache.hadoop.hbase.procedure2.store.ProcedureStore;
 import org.apache.hadoop.hbase.procedure2.store.wal.WALProcedureStore;
+import org.apache.hbase.thirdparty.com.google.protobuf.Int64Value;
 import org.apache.hadoop.hbase.testclassification.LargeTests;
 import org.apache.hadoop.hbase.testclassification.MasterTests;
 
@@ -39,6 +35,8 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
@@ -46,7 +44,7 @@ import static org.junit.Assert.fail;
 
 @Category({MasterTests.class, LargeTests.class})
 public class TestProcedureReplayOrder {
-  private static final Log LOG = LogFactory.getLog(TestProcedureReplayOrder.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestProcedureReplayOrder.class);
 
   private static final int NUM_THREADS = 16;
 
@@ -70,7 +68,7 @@ public class TestProcedureReplayOrder {
 
     logDir = new Path(testDir, "proc-logs");
     procEnv = new TestProcedureEnv();
-    procStore = ProcedureTestingUtility.createWalStore(htu.getConfiguration(), fs, logDir);
+    procStore = ProcedureTestingUtility.createWalStore(htu.getConfiguration(), logDir);
     procExecutor = new ProcedureExecutor(htu.getConfiguration(), procEnv, procStore);
     procStore.start(NUM_THREADS);
     procExecutor.start(1, true);
@@ -154,7 +152,7 @@ public class TestProcedureReplayOrder {
   }
 
   private static class TestProcedureEnv {
-    private ArrayList<TestProcedure> execList = new ArrayList<TestProcedure>();
+    private ArrayList<TestProcedure> execList = new ArrayList<>();
     private AtomicLong execTimestamp = new AtomicLong(0);
 
     public long getExecId() {
@@ -195,13 +193,17 @@ public class TestProcedureReplayOrder {
     protected boolean abort(TestProcedureEnv env) { return true; }
 
     @Override
-    protected void serializeStateData(final OutputStream stream) throws IOException {
-      StreamUtils.writeLong(stream, execId);
+    protected void serializeStateData(ProcedureStateSerializer serializer)
+        throws IOException {
+      Int64Value.Builder builder = Int64Value.newBuilder().setValue(execId);
+      serializer.serialize(builder.build());
     }
 
     @Override
-    protected void deserializeStateData(final InputStream stream) throws IOException {
-      execId = StreamUtils.readLong(stream);
+    protected void deserializeStateData(ProcedureStateSerializer serializer)
+        throws IOException {
+      Int64Value value = serializer.deserialize(Int64Value.class);
+      execId = value.getValue();
       step = 2;
     }
   }

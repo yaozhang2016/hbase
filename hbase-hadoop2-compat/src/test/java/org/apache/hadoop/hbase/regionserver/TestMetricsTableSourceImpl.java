@@ -34,6 +34,7 @@ import org.junit.experimental.categories.Category;
 @Category({MetricsTests.class, SmallTests.class})
 public class TestMetricsTableSourceImpl {
 
+  @SuppressWarnings("SelfComparison")
   @Test
   public void testCompareToHashCode() throws Exception {
     MetricsRegionServerSourceFactory metricsFact =
@@ -92,7 +93,7 @@ public class TestMetricsTableSourceImpl {
     }
 
     @Override
-    public long getMemstoresSize(String table) {
+    public long getMemStoresSize(String table) {
       return 1000;
     }
 

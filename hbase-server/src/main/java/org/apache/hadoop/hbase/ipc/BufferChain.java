@@ -21,7 +21,7 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.GatheringByteChannel;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * Chain of ByteBuffers.
@@ -32,11 +32,13 @@ class BufferChain {
   private final ByteBuffer[] buffers;
   private int remaining = 0;
   private int bufferOffset = 0;
+  private int size;
 
-  BufferChain(ByteBuffer[] buffers) {
+  BufferChain(ByteBuffer... buffers) {
     for (ByteBuffer b : buffers) {
       this.remaining += b.remaining();
     }
+    this.size = remaining;
     this.buffers = buffers;
   }
 
@@ -107,5 +109,13 @@ class BufferChain {
         lastBuffer.limit(restoreLimit);
       }
     }
+  }
+
+  int size() {
+    return size;
+  }
+
+  ByteBuffer[] getBuffers() {
+    return this.buffers;
   }
 }

@@ -31,9 +31,9 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
@@ -60,20 +60,20 @@ import org.apache.hadoop.hbase.util.HBaseFsck.ErrorReporter;
  */
 @InterfaceAudience.Private
 public class HFileCorruptionChecker {
-  private static final Log LOG = LogFactory.getLog(HFileCorruptionChecker.class);
+  private static final Logger LOG = LoggerFactory.getLogger(HFileCorruptionChecker.class);
 
   final Configuration conf;
   final FileSystem fs;
   final CacheConfig cacheConf;
   final ExecutorService executor;
-  final Set<Path> corrupted = new ConcurrentSkipListSet<Path>();
-  final Set<Path> failures = new ConcurrentSkipListSet<Path>();
-  final Set<Path> quarantined = new ConcurrentSkipListSet<Path>();
-  final Set<Path> missing = new ConcurrentSkipListSet<Path>();
-  final Set<Path> corruptedMobFiles = new ConcurrentSkipListSet<Path>();
-  final Set<Path> failureMobFiles = new ConcurrentSkipListSet<Path>();
-  final Set<Path> missedMobFiles = new ConcurrentSkipListSet<Path>();
-  final Set<Path> quarantinedMobFiles = new ConcurrentSkipListSet<Path>();
+  final Set<Path> corrupted = new ConcurrentSkipListSet<>();
+  final Set<Path> failures = new ConcurrentSkipListSet<>();
+  final Set<Path> quarantined = new ConcurrentSkipListSet<>();
+  final Set<Path> missing = new ConcurrentSkipListSet<>();
+  final Set<Path> corruptedMobFiles = new ConcurrentSkipListSet<>();
+  final Set<Path> failureMobFiles = new ConcurrentSkipListSet<>();
+  final Set<Path> missedMobFiles = new ConcurrentSkipListSet<>();
+  final Set<Path> quarantinedMobFiles = new ConcurrentSkipListSet<>();
   final boolean inQuarantineMode;
   final AtomicInteger hfilesChecked = new AtomicInteger();
   final AtomicInteger mobFilesChecked = new AtomicInteger();
@@ -98,7 +98,7 @@ public class HFileCorruptionChecker {
   protected void checkHFile(Path p) throws IOException {
     HFile.Reader r = null;
     try {
-      r = HFile.createReader(fs, p, cacheConf, conf);
+      r = HFile.createReader(fs, p, cacheConf, true, conf);
     } catch (CorruptHFileException che) {
       LOG.warn("Found corrupt HFile " + p, che);
       corrupted.add(p);
@@ -174,7 +174,7 @@ public class HFileCorruptionChecker {
 
     List<FileStatus> hfs = FSUtils.filterFileStatuses(statuses, new HFileFilter(fs));
     // Hadoop 1.0 listStatus does not throw an exception if the path does not exist.
-    if (hfs.size() == 0 && !fs.exists(cfDir)) {
+    if (hfs.isEmpty() && !fs.exists(cfDir)) {
       LOG.warn("Colfam Directory " + cfDir +
           " does not exist.  Likely due to concurrent split/compaction. Skipping.");
       missing.add(cfDir);
@@ -207,7 +207,7 @@ public class HFileCorruptionChecker {
 
     List<FileStatus> hfs = FSUtils.filterFileStatuses(statuses, new HFileFilter(fs));
     // Hadoop 1.0 listStatus does not throw an exception if the path does not exist.
-    if (hfs.size() == 0 && !fs.exists(cfDir)) {
+    if (hfs.isEmpty() && !fs.exists(cfDir)) {
       LOG.warn("Mob colfam Directory " + cfDir +
           " does not exist.  Likely the table is deleted. Skipping.");
       missedMobFiles.add(cfDir);
@@ -230,7 +230,7 @@ public class HFileCorruptionChecker {
   protected void checkMobFile(Path p) throws IOException {
     HFile.Reader r = null;
     try {
-      r = HFile.createReader(fs, p, cacheConf, conf);
+      r = HFile.createReader(fs, p, cacheConf, true, conf);
     } catch (CorruptHFileException che) {
       LOG.warn("Found corrupt mob file " + p, che);
       corruptedMobFiles.add(p);
@@ -311,7 +311,7 @@ public class HFileCorruptionChecker {
 
     List<FileStatus> cfs = FSUtils.filterFileStatuses(statuses, new FamilyDirFilter(fs));
     // Hadoop 1.0 listStatus does not throw an exception if the path does not exist.
-    if (cfs.size() == 0 && !fs.exists(regionDir)) {
+    if (cfs.isEmpty() && !fs.exists(regionDir)) {
       LOG.warn("Region Directory " + regionDir +
           " does not exist.  Likely due to concurrent split/compaction. Skipping.");
       missing.add(regionDir);
@@ -343,7 +343,7 @@ public class HFileCorruptionChecker {
     }
 
     // Parallelize check at the region dir level
-    List<RegionDirChecker> rdcs = new ArrayList<RegionDirChecker>();
+    List<RegionDirChecker> rdcs = new ArrayList<>(rds.size() + 1);
     List<Future<Void>> rdFutures;
 
     for (FileStatus rdFs : rds) {
@@ -368,7 +368,7 @@ public class HFileCorruptionChecker {
       try {
         f.get();
       } catch (ExecutionException e) {
-        LOG.warn("Failed to quaratine an HFile in regiondir "
+        LOG.warn("Failed to quarantine an HFile in regiondir "
             + rdcs.get(i).regionDir, e.getCause());
         // rethrow IOExceptions
         if (e.getCause() instanceof IOException) {
@@ -451,14 +451,14 @@ public class HFileCorruptionChecker {
    * @return the set of check failure file paths after checkTables is called.
    */
   public Collection<Path> getFailures() {
-    return new HashSet<Path>(failures);
+    return new HashSet<>(failures);
   }
 
   /**
    * @return the set of corrupted file paths after checkTables is called.
    */
   public Collection<Path> getCorrupted() {
-    return new HashSet<Path>(corrupted);
+    return new HashSet<>(corrupted);
   }
 
   /**
@@ -472,7 +472,7 @@ public class HFileCorruptionChecker {
    * @return the set of successfully quarantined paths after checkTables is called.
    */
   public Collection<Path> getQuarantined() {
-    return new HashSet<Path>(quarantined);
+    return new HashSet<>(quarantined);
   }
 
   /**
@@ -480,21 +480,21 @@ public class HFileCorruptionChecker {
    *  compaction or flushes.
    */
   public Collection<Path> getMissing() {
-    return new HashSet<Path>(missing);
+    return new HashSet<>(missing);
   }
 
   /**
    * @return the set of check failure mob file paths after checkTables is called.
    */
   public Collection<Path> getFailureMobFiles() {
-    return new HashSet<Path>(failureMobFiles);
+    return new HashSet<>(failureMobFiles);
   }
 
   /**
    * @return the set of corrupted mob file paths after checkTables is called.
    */
   public Collection<Path> getCorruptedMobFiles() {
-    return new HashSet<Path>(corruptedMobFiles);
+    return new HashSet<>(corruptedMobFiles);
   }
 
   /**
@@ -508,7 +508,7 @@ public class HFileCorruptionChecker {
    * @return the set of successfully quarantined paths after checkTables is called.
    */
   public Collection<Path> getQuarantinedMobFiles() {
-    return new HashSet<Path>(quarantinedMobFiles);
+    return new HashSet<>(quarantinedMobFiles);
   }
 
   /**
@@ -516,7 +516,7 @@ public class HFileCorruptionChecker {
    *  deletion/moves from compaction.
    */
   public Collection<Path> getMissedMobFiles() {
-    return new HashSet<Path>(missedMobFiles);
+    return new HashSet<>(missedMobFiles);
   }
 
   /**
@@ -541,7 +541,7 @@ public class HFileCorruptionChecker {
       out.print("      " + mq);
     }
 
-    String initialState = (corrupted.size() == 0) ? "OK" : "CORRUPTED";
+    String initialState = (corrupted.isEmpty()) ? "OK" : "CORRUPTED";
     String fixedState = (corrupted.size() == quarantined.size()) ? "OK"
         : "CORRUPTED";
 
@@ -560,7 +560,7 @@ public class HFileCorruptionChecker {
     for (Path mq : missedMobFiles) {
       out.print("      " + mq);
     }
-    String initialMobState = (corruptedMobFiles.size() == 0) ? "OK" : "CORRUPTED";
+    String initialMobState = (corruptedMobFiles.isEmpty()) ? "OK" : "CORRUPTED";
     String fixedMobState = (corruptedMobFiles.size() == quarantinedMobFiles.size()) ? "OK"
         : "CORRUPTED";
 

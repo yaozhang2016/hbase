@@ -19,15 +19,14 @@
 package org.apache.hadoop.hbase.master.procedure;
 
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.NamespaceDescriptor;
 import org.apache.hadoop.hbase.NamespaceNotFoundException;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.hbase.master.TableNamespaceManager;
+import org.apache.hadoop.hbase.procedure2.ProcedureStateSerializer;
 import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProcedureProtos;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProcedureProtos.ModifyNamespaceState;
@@ -38,7 +37,7 @@ import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProcedureProtos.M
 @InterfaceAudience.Private
 public class ModifyNamespaceProcedure
     extends AbstractStateMachineNamespaceProcedure<ModifyNamespaceState> {
-  private static final Log LOG = LogFactory.getLog(ModifyNamespaceProcedure.class);
+  private static final Logger LOG = LoggerFactory.getLogger(ModifyNamespaceProcedure.class);
 
   private NamespaceDescriptor oldNsDescriptor;
   private NamespaceDescriptor newNsDescriptor;
@@ -130,8 +129,9 @@ public class ModifyNamespaceProcedure
   }
 
   @Override
-  public void serializeStateData(final OutputStream stream) throws IOException {
-    super.serializeStateData(stream);
+  protected void serializeStateData(ProcedureStateSerializer serializer)
+      throws IOException {
+    super.serializeStateData(serializer);
 
     MasterProcedureProtos.ModifyNamespaceStateData.Builder modifyNamespaceMsg =
         MasterProcedureProtos.ModifyNamespaceStateData.newBuilder().setNamespaceDescriptor(
@@ -140,15 +140,16 @@ public class ModifyNamespaceProcedure
       modifyNamespaceMsg.setUnmodifiedNamespaceDescriptor(
         ProtobufUtil.toProtoNamespaceDescriptor(this.oldNsDescriptor));
     }
-    modifyNamespaceMsg.build().writeDelimitedTo(stream);
+    serializer.serialize(modifyNamespaceMsg.build());
   }
 
   @Override
-  public void deserializeStateData(final InputStream stream) throws IOException {
-    super.deserializeStateData(stream);
+  protected void deserializeStateData(ProcedureStateSerializer serializer)
+      throws IOException {
+    super.deserializeStateData(serializer);
 
     MasterProcedureProtos.ModifyNamespaceStateData modifyNamespaceMsg =
-        MasterProcedureProtos.ModifyNamespaceStateData.parseDelimitedFrom(stream);
+        serializer.deserialize(MasterProcedureProtos.ModifyNamespaceStateData.class);
     newNsDescriptor =
         ProtobufUtil.toNamespaceDescriptor(modifyNamespaceMsg.getNamespaceDescriptor());
     if (modifyNamespaceMsg.hasUnmodifiedNamespaceDescriptor()) {

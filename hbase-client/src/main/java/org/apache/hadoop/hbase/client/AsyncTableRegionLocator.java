@@ -21,17 +21,16 @@ import java.util.concurrent.CompletableFuture;
 
 import org.apache.hadoop.hbase.HRegionLocation;
 import org.apache.hadoop.hbase.TableName;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * The asynchronous version of RegionLocator.
  * <p>
  * Usually the implementations will not throw any exception directly, you need to get the exception
  * from the returned {@link CompletableFuture}.
+ * @since 2.0.0
  */
 @InterfaceAudience.Public
-@InterfaceStability.Unstable
 public interface AsyncTableRegionLocator {
 
   /**

@@ -27,9 +27,9 @@ import javax.ws.rs.core.MultivaluedMap;
 import javax.ws.rs.core.Response;
 import javax.ws.rs.core.UriInfo;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.rest.model.CellModel;
@@ -38,7 +38,7 @@ import org.apache.hadoop.hbase.rest.model.RowModel;
 
 @InterfaceAudience.Private
 public class MultiRowResource extends ResourceBase implements Constants {
-  private static final Log LOG = LogFactory.getLog(MultiRowResource.class);
+  private static final Logger LOG = LoggerFactory.getLogger(MultiRowResource.class);
 
   TableResource tableResource;
   Integer versions = null;
@@ -105,7 +105,7 @@ public class MultiRowResource extends ResourceBase implements Constants {
         }
       }
 
-      if (model.getRows().size() == 0) {
+      if (model.getRows().isEmpty()) {
       //If no rows found.
         servlet.getMetrics().incrementFailedGetRequests(1);
         return Response.status(Response.Status.NOT_FOUND)

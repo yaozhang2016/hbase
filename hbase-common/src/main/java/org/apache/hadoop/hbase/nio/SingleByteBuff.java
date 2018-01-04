@@ -17,15 +17,18 @@
  */
 package org.apache.hadoop.hbase.nio;
 
+import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.channels.ReadableByteChannel;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.util.ByteBufferUtils;
 import org.apache.hadoop.hbase.util.ObjectIntPair;
 import org.apache.hadoop.hbase.util.UnsafeAccess;
 import org.apache.hadoop.hbase.util.UnsafeAvailChecker;
-
+import org.apache.yetus.audience.InterfaceAudience;
 import sun.nio.ch.DirectBuffer;
+
+import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
 
 /**
  * An implementation of ByteBuff where a single BB backs the BBI. This just acts
@@ -198,7 +201,7 @@ public class SingleByteBuff extends ByteBuff {
     } else {
       // TODO we can do some optimization here? Call to asSubByteBuffer might
       // create a copy.
-      ObjectIntPair<ByteBuffer> pair = new ObjectIntPair<ByteBuffer>();
+      ObjectIntPair<ByteBuffer> pair = new ObjectIntPair<>();
       src.asSubByteBuffer(srcOffset, length, pair);
       if (pair.getFirst() != null) {
         ByteBufferUtils.copyFromBufferToBuffer(pair.getFirst(), this.buf, pair.getSecond(), offset,
@@ -313,6 +316,11 @@ public class SingleByteBuff extends ByteBuff {
   }
 
   @Override
+  public int read(ReadableByteChannel channel) throws IOException {
+    return channelRead(channel, buf);
+  }
+
+  @Override
   public boolean equals(Object obj) {
     if(!(obj instanceof SingleByteBuff)) return false;
     return this.buf.equals(((SingleByteBuff)obj).buf);
@@ -326,7 +334,8 @@ public class SingleByteBuff extends ByteBuff {
   /**
    * @return the ByteBuffer which this wraps.
    */
-  ByteBuffer getEnclosingByteBuffer() {
+  @VisibleForTesting
+  public ByteBuffer getEnclosingByteBuffer() {
     return this.buf;
   }
 }

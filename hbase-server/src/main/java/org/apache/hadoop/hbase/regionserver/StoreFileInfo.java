@@ -21,17 +21,18 @@ package org.apache.hadoop.hbase.regionserver;
 
 import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.HDFSBlocksDistribution;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.hbase.io.FSDataInputStreamWrapper;
 import org.apache.hadoop.hbase.io.HFileLink;
 import org.apache.hadoop.hbase.io.HalfStoreFileReader;
@@ -44,7 +45,7 @@ import org.apache.hadoop.hbase.util.FSUtils;
  */
 @InterfaceAudience.Private
 public class StoreFileInfo {
-  private static final Log LOG = LogFactory.getLog(StoreFileInfo.class);
+  private static final Logger LOG = LoggerFactory.getLogger(StoreFileInfo.class);
 
   /**
    * A non-capture group, for hfiles, so that this can be embedded.
@@ -233,25 +234,24 @@ public class StoreFileInfo {
    * @param cacheConf The cache configuration and block cache reference.
    * @return The StoreFile.Reader for the file
    */
-  public StoreFileReader open(final FileSystem fs,
-      final CacheConfig cacheConf, final boolean canUseDropBehind) throws IOException {
+  public StoreFileReader open(FileSystem fs, CacheConfig cacheConf, boolean canUseDropBehind,
+      long readahead, boolean isPrimaryReplicaStoreFile, AtomicInteger refCount, boolean shared)
+      throws IOException {
     FSDataInputStreamWrapper in;
     FileStatus status;
 
     final boolean doDropBehind = canUseDropBehind && cacheConf.shouldDropBehindCompaction();
     if (this.link != null) {
       // HFileLink
-      in = new FSDataInputStreamWrapper(fs, this.link, doDropBehind);
+      in = new FSDataInputStreamWrapper(fs, this.link, doDropBehind, readahead);
       status = this.link.getFileStatus(fs);
     } else if (this.reference != null) {
       // HFile Reference
       Path referencePath = getReferredToFile(this.getPath());
-      in = new FSDataInputStreamWrapper(fs, referencePath,
-          doDropBehind);
+      in = new FSDataInputStreamWrapper(fs, referencePath, doDropBehind, readahead);
       status = fs.getFileStatus(referencePath);
     } else {
-      in = new FSDataInputStreamWrapper(fs, this.getPath(),
-          doDropBehind);
+      in = new FSDataInputStreamWrapper(fs, this.getPath(), doDropBehind, readahead);
       status = fs.getFileStatus(initialPath);
     }
     long length = status.getLen();
@@ -265,9 +265,10 @@ public class StoreFileInfo {
     if (reader == null) {
       if (this.reference != null) {
         reader = new HalfStoreFileReader(fs, this.getPath(), in, length, cacheConf, reference,
-          conf);
+            isPrimaryReplicaStoreFile, refCount, shared, conf);
       } else {
-        reader = new StoreFileReader(fs, status.getPath(), in, length, cacheConf, conf);
+        reader = new StoreFileReader(fs, status.getPath(), in, length, cacheConf,
+            isPrimaryReplicaStoreFile, refCount, shared, conf);
       }
     }
     if (this.coprocessorHost != null) {
@@ -282,7 +283,6 @@ public class StoreFileInfo {
    */
   public HDFSBlocksDistribution computeHDFSBlocksDistribution(final FileSystem fs)
       throws IOException {
-
     // guard against the case where we get the FileStatus from link, but by the time we
     // call compute the file is moved again
     if (this.link != null) {
@@ -451,8 +451,8 @@ public class StoreFileInfo {
     // Tabledir is up two directories from where Reference was written.
     Path tableDir = p.getParent().getParent().getParent();
     String nameStrippedOfSuffix = m.group(1);
-    if (LOG.isDebugEnabled()) {
-      LOG.debug("reference '" + p + "' to region=" + otherRegion
+    if (LOG.isTraceEnabled()) {
+      LOG.trace("reference '" + p + "' to region=" + otherRegion
         + " hfile=" + nameStrippedOfSuffix);
     }
 
@@ -562,5 +562,20 @@ public class StoreFileInfo {
     hash = hash * 31 + ((initialPath ==  null) ? 0 : initialPath.hashCode());
     hash = hash * 31 + ((link == null) ? 0 : link.hashCode());
     return  hash;
+  }
+
+  /**
+   * Return the active file name that contains the real data.
+   * <p>
+   * For referenced hfile, we will return the name of the reference file as it will be used to
+   * construct the StoreFileReader. And for linked hfile, we will return the name of the file being
+   * linked.
+   */
+  public String getActiveFileName() {
+    if (reference != null || link == null) {
+      return initialPath.getName();
+    } else {
+      return HFileLink.getReferencedHFileName(initialPath.getName());
+    }
   }
 }

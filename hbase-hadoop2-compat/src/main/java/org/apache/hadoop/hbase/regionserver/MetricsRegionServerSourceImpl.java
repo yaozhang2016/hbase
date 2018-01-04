@@ -18,7 +18,7 @@
 
 package org.apache.hadoop.hbase.regionserver;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.hbase.metrics.BaseSourceImpl;
 import org.apache.hadoop.hbase.metrics.Interns;
 import org.apache.hadoop.metrics2.MetricHistogram;
@@ -37,7 +37,11 @@ public class MetricsRegionServerSourceImpl
 
   final MetricsRegionServerWrapper rsWrap;
   private final MetricHistogram putHisto;
+  private final MetricHistogram putBatchHisto;
   private final MetricHistogram deleteHisto;
+  private final MetricHistogram deleteBatchHisto;
+  private final MetricHistogram checkAndDeleteHisto;
+  private final MetricHistogram checkAndPutHisto;
   private final MetricHistogram getHisto;
   private final MetricHistogram incrementHisto;
   private final MetricHistogram appendHisto;
@@ -97,11 +101,16 @@ public class MetricsRegionServerSourceImpl
     super(metricsName, metricsDescription, metricsContext, metricsJmxContext);
     this.rsWrap = rsWrap;
 
-    putHisto = getMetricsRegistry().newTimeHistogram(MUTATE_KEY);
-    slowPut = getMetricsRegistry().newCounter(SLOW_MUTATE_KEY, SLOW_MUTATE_DESC, 0L);
+    putHisto = getMetricsRegistry().newTimeHistogram(PUT_KEY);
+    putBatchHisto = getMetricsRegistry().newTimeHistogram(PUT_BATCH_KEY);
+    slowPut = getMetricsRegistry().newCounter(SLOW_PUT_KEY, SLOW_PUT_DESC, 0L);
 
     deleteHisto = getMetricsRegistry().newTimeHistogram(DELETE_KEY);
     slowDelete = getMetricsRegistry().newCounter(SLOW_DELETE_KEY, SLOW_DELETE_DESC, 0L);
+
+    deleteBatchHisto = getMetricsRegistry().newTimeHistogram(DELETE_BATCH_KEY);
+    checkAndDeleteHisto = getMetricsRegistry().newTimeHistogram(CHECK_AND_DELETE_KEY);
+    checkAndPutHisto = getMetricsRegistry().newTimeHistogram(CHECK_AND_PUT_KEY);
 
     getHisto = getMetricsRegistry().newTimeHistogram(GET_KEY);
     slowGet = getMetricsRegistry().newCounter(SLOW_GET_KEY, SLOW_GET_DESC, 0L);
@@ -255,7 +264,7 @@ public class MetricsRegionServerSourceImpl
   }
 
   @Override
-  public void updateFlushMemstoreSize(long bytes) {
+  public void updateFlushMemStoreSize(long bytes) {
     flushMemstoreSizeHisto.add(bytes);
     flushedMemstoreBytes.incr(bytes);
   }
@@ -330,7 +339,7 @@ public class MetricsRegionServerSourceImpl
           .addGauge(Interns.info(WALFILE_COUNT, WALFILE_COUNT_DESC), rsWrap.getNumWALFiles())
           .addGauge(Interns.info(WALFILE_SIZE, WALFILE_SIZE_DESC), rsWrap.getWALFileSize())
           .addGauge(Interns.info(STOREFILE_COUNT, STOREFILE_COUNT_DESC), rsWrap.getNumStoreFiles())
-          .addGauge(Interns.info(MEMSTORE_SIZE, MEMSTORE_SIZE_DESC), rsWrap.getMemstoreSize())
+          .addGauge(Interns.info(MEMSTORE_SIZE, MEMSTORE_SIZE_DESC), rsWrap.getMemStoreSize())
           .addGauge(Interns.info(STOREFILE_SIZE, STOREFILE_SIZE_DESC), rsWrap.getStoreFileSize())
           .addGauge(Interns.info(MAX_STORE_FILE_AGE, MAX_STORE_FILE_AGE_DESC),
               rsWrap.getMaxStoreFileAge())
@@ -345,6 +354,8 @@ public class MetricsRegionServerSourceImpl
           .addGauge(Interns.info(AVERAGE_REGION_SIZE, AVERAGE_REGION_SIZE_DESC), rsWrap.getAverageRegionSize())
           .addCounter(Interns.info(TOTAL_REQUEST_COUNT, TOTAL_REQUEST_COUNT_DESC),
               rsWrap.getTotalRequestCount())
+          .addCounter(Interns.info(TOTAL_ROW_ACTION_REQUEST_COUNT, TOTAL_ROW_ACTION_REQUEST_COUNT_DESC),
+              rsWrap.getTotalRowActionRequestCount())
           .addCounter(Interns.info(READ_REQUEST_COUNT, READ_REQUEST_COUNT_DESC),
               rsWrap.getReadRequestsCount())
           .addCounter(Interns.info(FILTERED_READ_REQUEST_COUNT, FILTERED_READ_REQUEST_COUNT_DESC),
@@ -387,8 +398,6 @@ public class MetricsRegionServerSourceImpl
             rsWrap.getSmallCompactionQueueSize())
           .addGauge(Interns.info(LARGE_COMPACTION_QUEUE_LENGTH, LARGE_COMPACTION_QUEUE_LENGTH_DESC),
             rsWrap.getLargeCompactionQueueSize())
-          .addGauge(Interns.info(COMPACTION_QUEUE_LENGTH, COMPACTION_QUEUE_LENGTH_DESC),
-            rsWrap.getCompactionQueueSize())
           .addGauge(Interns.info(FLUSH_QUEUE_LENGTH, FLUSH_QUEUE_LENGTH_DESC),
               rsWrap.getFlushQueueSize())
 
@@ -451,6 +460,22 @@ public class MetricsRegionServerSourceImpl
           .addCounter(Interns.info(BLOCK_CACHE_DELETE_FAMILY_BLOOM_HIT_COUNT, ""),
               rsWrap.getDeleteFamilyBloomHitCount())
           .addCounter(Interns.info(BLOCK_CACHE_TRAILER_HIT_COUNT, ""), rsWrap.getTrailerHitCount())
+          .addGauge(Interns.info(L1_CACHE_HIT_COUNT, L1_CACHE_HIT_COUNT_DESC),
+                  rsWrap.getL1CacheHitCount())
+          .addGauge(Interns.info(L1_CACHE_MISS_COUNT, L1_CACHE_MISS_COUNT_DESC),
+                  rsWrap.getL1CacheMissCount())
+          .addGauge(Interns.info(L1_CACHE_HIT_RATIO, L1_CACHE_HIT_RATIO_DESC),
+                  rsWrap.getL1CacheHitRatio())
+          .addGauge(Interns.info(L1_CACHE_MISS_RATIO, L1_CACHE_MISS_RATIO_DESC),
+                  rsWrap.getL1CacheMissRatio())
+          .addGauge(Interns.info(L2_CACHE_HIT_COUNT, L2_CACHE_HIT_COUNT_DESC),
+                  rsWrap.getL2CacheHitCount())
+          .addGauge(Interns.info(L2_CACHE_MISS_COUNT, L2_CACHE_MISS_COUNT_DESC),
+                  rsWrap.getL2CacheMissCount())
+          .addGauge(Interns.info(L2_CACHE_HIT_RATIO, L2_CACHE_HIT_RATIO_DESC),
+                  rsWrap.getL2CacheHitRatio())
+          .addGauge(Interns.info(L2_CACHE_MISS_RATIO, L2_CACHE_MISS_RATIO_DESC),
+                  rsWrap.getL2CacheMissRatio())
           .addCounter(Interns.info(UPDATES_BLOCKED_TIME, UPDATES_BLOCKED_DESC),
               rsWrap.getUpdatesBlockedTime())
           .addCounter(Interns.info(FLUSHED_CELLS, FLUSHED_CELLS_DESC),
@@ -510,6 +535,12 @@ public class MetricsRegionServerSourceImpl
     }
 
     metricsRegistry.snapshot(mrb, all);
+
+    // source is registered in supers constructor, sometimes called before the whole initialization.
+    if (metricsAdapter != null) {
+      // snapshot MetricRegistry as well
+      metricsAdapter.snapshotAllMetrics(registry, mrb);
+    }
   }
 
   @Override
@@ -530,5 +561,25 @@ public class MetricsRegionServerSourceImpl
   @Override
   public void updatePauseTimeWithoutGc(long t) {
     pausesWithoutGc.add(t);
+  }
+
+  @Override
+  public void updateDeleteBatch(long t) {
+    deleteBatchHisto.add(t);
+  }
+
+  @Override
+  public void updateCheckAndDelete(long t) {
+    checkAndDeleteHisto.add(t);
+  }
+
+  @Override
+  public void updateCheckAndPut(long t) {
+    checkAndPutHisto.add(t);
+  }
+
+  @Override
+  public void updatePutBatch(long t) {
+    putBatchHisto.add(t);
   }
 }

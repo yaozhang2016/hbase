@@ -26,11 +26,13 @@ import java.lang.management.ThreadInfo;
 import java.lang.management.ThreadMXBean;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.nio.charset.Charset;
 
-import org.apache.commons.logging.Log;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import edu.umd.cs.findbugs.annotations.NonNull;
 
 @InterfaceAudience.Private
 public class ReflectionUtils {
@@ -110,7 +112,7 @@ public class ReflectionUtils {
    * @param title a descriptive title for the call stacks
    * @param minInterval the minimum time from the last
    */
-  public static void logThreadInfo(Log log,
+  public static void logThreadInfo(Logger log,
                                    String title,
                                    long minInterval) {
     boolean dumpStack = false;
@@ -186,6 +188,40 @@ public class ReflectionUtils {
       return Long.toString(id);
     }
     return id + " (" + name + ")";
+  }
+
+  /**
+   * Get and invoke the target method from the given object with given parameters
+   * @param obj the object to get and invoke method from
+   * @param methodName the name of the method to invoke
+   * @param params the parameters for the method to invoke
+   * @return the return value of the method invocation
+   */
+  @NonNull
+  public static Object invokeMethod(Object obj, String methodName, Object... params) {
+    Method m;
+    try {
+      m = obj.getClass().getMethod(methodName, getParameterTypes(params));
+      m.setAccessible(true);
+      return m.invoke(obj, params);
+    } catch (NoSuchMethodException e) {
+      throw new UnsupportedOperationException("Cannot find specified method " + methodName, e);
+    } catch (IllegalAccessException e) {
+      throw new UnsupportedOperationException("Unable to access specified method " + methodName, e);
+    } catch (IllegalArgumentException e) {
+      throw new UnsupportedOperationException("Illegal arguments supplied for method " + methodName,
+          e);
+    } catch (InvocationTargetException e) {
+      throw new UnsupportedOperationException("Method threw an exception for " + methodName, e);
+    }
+  }
+
+  private static Class<?>[] getParameterTypes(Object[] params) {
+    Class<?>[] parameterTypes = new Class<?>[params.length];
+    for (int i = 0; i < params.length; i++) {
+      parameterTypes[i] = params[i].getClass();
+    }
+    return parameterTypes;
   }
 
 }

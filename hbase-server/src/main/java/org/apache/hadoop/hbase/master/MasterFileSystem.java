@@ -20,31 +20,34 @@ package org.apache.hadoop.hbase.master;
 
 import java.io.IOException;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.permission.FsAction;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.hbase.ClusterId;
-import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.HRegionInfo;
-import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.backup.HFileArchiver;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.hadoop.hbase.client.ColumnFamilyDescriptor;
+import org.apache.hadoop.hbase.client.ColumnFamilyDescriptorBuilder;
+import org.apache.hadoop.hbase.client.RegionInfo;
+import org.apache.hadoop.hbase.client.RegionInfoBuilder;
+import org.apache.hadoop.hbase.client.TableDescriptor;
+import org.apache.hadoop.hbase.client.TableDescriptorBuilder;
 import org.apache.hadoop.hbase.exceptions.DeserializationException;
 import org.apache.hadoop.hbase.fs.HFileSystem;
-import org.apache.hadoop.hbase.master.procedure.MasterProcedureConstants;
+import org.apache.hadoop.hbase.log.HBaseMarkers;
 import org.apache.hadoop.hbase.mob.MobConstants;
-import org.apache.hadoop.hbase.mob.MobUtils;
+import org.apache.hadoop.hbase.procedure2.store.wal.WALProcedureStore;
 import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.FSTableDescriptors;
 import org.apache.hadoop.hbase.util.FSUtils;
 import org.apache.hadoop.ipc.RemoteException;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * This class abstracts a bunch of operations the HMaster needs to interact with
@@ -53,7 +56,13 @@ import org.apache.hadoop.ipc.RemoteException;
  */
 @InterfaceAudience.Private
 public class MasterFileSystem {
-  private static final Log LOG = LogFactory.getLog(MasterFileSystem.class);
+  private static final Logger LOG = LoggerFactory.getLogger(MasterFileSystem.class);
+
+  /** Parameter name for HBase instance root directory permission*/
+  public static final String HBASE_DIR_PERMS = "hbase.rootdir.perms";
+
+  /** Parameter name for HBase WAL directory permission*/
+  public static final String HBASE_WAL_DIR_PERMS = "hbase.wal.dir.perms";
 
   // HBase configuration
   private final Configuration conf;
@@ -61,10 +70,14 @@ public class MasterFileSystem {
   private ClusterId clusterId;
   // Keep around for convenience.
   private final FileSystem fs;
-  // root hbase directory on the FS
+  // Keep around for convenience.
+  private final FileSystem walFs;
+  // root log directory on the FS
   private final Path rootdir;
   // hbase temp directory used for table construction and deletion
   private final Path tempdir;
+  // root hbase directory on the FS
+  private final Path walRootDir;
 
 
   /*
@@ -99,6 +112,10 @@ public class MasterFileSystem {
     // Cover both bases, the old way of setting default fs and the new.
     // We're supposed to run on 0.20 and 0.21 anyways.
     this.fs = this.rootdir.getFileSystem(conf);
+    this.walRootDir = FSUtils.getWALRootDir(conf);
+    this.walFs = FSUtils.getWALFileSystem(conf);
+    FSUtils.setFsDefault(conf, new Path(this.walFs.getUri()));
+    walFs.setConf(conf);
     FSUtils.setFsDefault(conf, new Path(this.fs.getUri()));
     // make sure the fs has the same conf
     fs.setConf(conf);
@@ -123,12 +140,15 @@ public class MasterFileSystem {
     final String[] protectedSubDirs = new String[] {
         HConstants.BASE_NAMESPACE_DIR,
         HConstants.HFILE_ARCHIVE_DIRECTORY,
-        HConstants.HREGION_LOGDIR_NAME,
-        HConstants.HREGION_OLDLOGDIR_NAME,
-        MasterProcedureConstants.MASTER_PROCEDURE_LOGDIR,
-        HConstants.CORRUPT_DIR_NAME,
         HConstants.HBCK_SIDELINEDIR_NAME,
         MobConstants.MOB_DIR_NAME
+    };
+
+    final String[] protectedSubLogDirs = new String[] {
+      HConstants.HREGION_LOGDIR_NAME,
+      HConstants.HREGION_OLDLOGDIR_NAME,
+      HConstants.CORRUPT_DIR_NAME,
+      WALProcedureStore.MASTER_PROCEDURE_LOGDIR
     };
     // check if the root directory exists
     checkRootDir(this.rootdir, conf, this.fs);
@@ -136,7 +156,17 @@ public class MasterFileSystem {
     // Check the directories under rootdir.
     checkTempDir(this.tempdir, conf, this.fs);
     for (String subDir : protectedSubDirs) {
-      checkSubDir(new Path(this.rootdir, subDir));
+      checkSubDir(new Path(this.rootdir, subDir), HBASE_DIR_PERMS);
+    }
+
+    final String perms;
+    if (!this.walRootDir.equals(this.rootdir)) {
+      perms = HBASE_WAL_DIR_PERMS;
+    } else {
+      perms = HBASE_DIR_PERMS;
+    }
+    for (String subDir : protectedSubLogDirs) {
+      checkSubDir(new Path(this.walRootDir, subDir), perms);
     }
 
     checkStagingDir();
@@ -165,6 +195,8 @@ public class MasterFileSystem {
     return this.fs;
   }
 
+  protected FileSystem getWALFileSystem() { return this.walFs; }
+
   public Configuration getConfiguration() {
     return this.conf;
   }
@@ -175,6 +207,11 @@ public class MasterFileSystem {
   public Path getRootDir() {
     return this.rootdir;
   }
+
+  /**
+   * @return HBase root log dir.
+   */
+  public Path getWALRootDir() { return this.walRootDir; }
 
   /**
    * @return HBase temp dir.
@@ -228,12 +265,13 @@ public class MasterFileSystem {
             HConstants.DEFAULT_VERSION_FILE_WRITE_ATTEMPTS));
       }
     } catch (DeserializationException de) {
-      LOG.fatal("Please fix invalid configuration for " + HConstants.HBASE_DIR, de);
+      LOG.error(HBaseMarkers.FATAL, "Please fix invalid configuration for "
+        + HConstants.HBASE_DIR, de);
       IOException ioe = new IOException();
       ioe.initCause(de);
       throw ioe;
     } catch (IllegalArgumentException iae) {
-      LOG.fatal("Please fix invalid configuration for "
+      LOG.error(HBaseMarkers.FATAL, "Please fix invalid configuration for "
         + HConstants.HBASE_DIR + " " + rd.toString(), iae);
       throw iae;
     }
@@ -296,7 +334,9 @@ public class MasterFileSystem {
    * @param p
    * @throws IOException
    */
-  private void checkSubDir(final Path p) throws IOException {
+  private void checkSubDir(final Path p, final String dirPermsConfName) throws IOException {
+    FileSystem fs = p.getFileSystem(conf);
+    FsPermission dirPerms = new FsPermission(conf.get(dirPermsConfName, "700"));
     if (!fs.exists(p)) {
       if (isSecurityEnabled) {
         if (!fs.mkdirs(p, secureRootSubDirPerms)) {
@@ -309,14 +349,14 @@ public class MasterFileSystem {
       }
     }
     else {
-      if (isSecurityEnabled && !secureRootSubDirPerms.equals(fs.getFileStatus(p).getPermission())) {
+      if (isSecurityEnabled && !dirPerms.equals(fs.getFileStatus(p).getPermission())) {
         // check whether the permission match
         LOG.warn("Found HBase directory permissions NOT matching expected permissions for "
             + p.toString() + " permissions=" + fs.getFileStatus(p).getPermission()
-            + ", expecting " + secureRootSubDirPerms + ". Automatically setting the permissions. "
-            + "You can change the permissions by setting \"hbase.rootdir.perms\" in hbase-site.xml "
+            + ", expecting " + dirPerms + ". Automatically setting the permissions. "
+            + "You can change the permissions by setting \"" + dirPermsConfName + "\" in hbase-site.xml "
             + "and restarting the master");
-        fs.setPermission(p, secureRootSubDirPerms);
+        fs.setPermission(p, dirPerms);
       }
     }
   }
@@ -351,11 +391,9 @@ public class MasterFileSystem {
       // created here in bootstrap and it'll need to be cleaned up.  Better to
       // not make it in first place.  Turn off block caching for bootstrap.
       // Enable after.
-      HRegionInfo metaHRI = new HRegionInfo(HRegionInfo.FIRST_META_REGIONINFO);
-      HTableDescriptor metaDescriptor = new FSTableDescriptors(c).get(TableName.META_TABLE_NAME);
-      setInfoFamilyCachingForMeta(metaDescriptor, false);
-      HRegion meta = HRegion.createHRegion(metaHRI, rd, c, metaDescriptor, null);
-      setInfoFamilyCachingForMeta(metaDescriptor, true);
+      TableDescriptor metaDescriptor = new FSTableDescriptors(c).get(TableName.META_TABLE_NAME);
+      HRegion meta = HRegion.createHRegion(RegionInfoBuilder.FIRST_META_REGIONINFO, rd,
+          c, setInfoFamilyCachingForMeta(metaDescriptor, false), null);
       meta.close();
     } catch (IOException e) {
         e = e instanceof RemoteException ?
@@ -368,19 +406,28 @@ public class MasterFileSystem {
   /**
    * Enable in memory caching for hbase:meta
    */
-  public static void setInfoFamilyCachingForMeta(HTableDescriptor metaDescriptor, final boolean b) {
-    for (HColumnDescriptor hcd: metaDescriptor.getColumnFamilies()) {
+  public static TableDescriptor setInfoFamilyCachingForMeta(TableDescriptor metaDescriptor, final boolean b) {
+    TableDescriptorBuilder builder = TableDescriptorBuilder.newBuilder(metaDescriptor);
+    for (ColumnFamilyDescriptor hcd: metaDescriptor.getColumnFamilies()) {
       if (Bytes.equals(hcd.getName(), HConstants.CATALOG_FAMILY)) {
-        hcd.setBlockCacheEnabled(b);
-        hcd.setInMemory(b);
+        builder.modifyColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(hcd)
+                .setBlockCacheEnabled(b)
+                .setInMemory(b)
+                .build());
       }
     }
+    return builder.build();
   }
 
-  public void deleteFamilyFromFS(HRegionInfo region, byte[] familyName, boolean hasMob)
+  public void deleteFamilyFromFS(RegionInfo region, byte[] familyName)
+      throws IOException {
+    deleteFamilyFromFS(rootdir, region, familyName);
+  }
+
+  public void deleteFamilyFromFS(Path rootDir, RegionInfo region, byte[] familyName)
       throws IOException {
     // archive family store files
-    Path tableDir = FSUtils.getTableDir(rootdir, region.getTable());
+    Path tableDir = FSUtils.getTableDir(rootDir, region.getTable());
     HFileArchiver.archiveFamily(fs, conf, region, tableDir, familyName);
 
     // delete the family folder
@@ -394,30 +441,12 @@ public class MasterFileSystem {
             + ")");
       }
     }
-
-    // archive and delete mob files
-    if (hasMob) {
-      Path mobTableDir =
-          FSUtils.getTableDir(new Path(getRootDir(), MobConstants.MOB_DIR_NAME), region.getTable());
-      HRegionInfo mobRegionInfo = MobUtils.getMobRegionInfo(region.getTable());
-      Path mobFamilyDir =
-          new Path(mobTableDir,
-              new Path(mobRegionInfo.getEncodedName(), Bytes.toString(familyName)));
-      // archive mob family store files
-      MobUtils.archiveMobStoreFiles(conf, fs, mobRegionInfo, mobFamilyDir, familyName);
-
-      if (!fs.delete(mobFamilyDir, true)) {
-        throw new IOException("Could not delete mob store files for family "
-            + Bytes.toString(familyName) + " from FileSystem region "
-            + mobRegionInfo.getRegionNameAsString() + "(" + mobRegionInfo.getEncodedName() + ")");
-      }
-    }
   }
 
   public void stop() {
   }
 
-  public void logFileSystemState(Log log) throws IOException {
+  public void logFileSystemState(Logger log) throws IOException {
     FSUtils.logFileSystemState(fs, rootdir, log);
   }
 }

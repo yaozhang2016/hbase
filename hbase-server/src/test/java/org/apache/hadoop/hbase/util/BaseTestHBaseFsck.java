@@ -24,48 +24,47 @@ import static org.junit.Assert.fail;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
-
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.hbase.ClusterStatus;
+import org.apache.hadoop.hbase.ClusterMetrics;
+import org.apache.hadoop.hbase.ClusterMetrics.Option;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.HRegionLocation;
 import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
-import org.apache.hadoop.hbase.MetaTableAccessor;
 import org.apache.hadoop.hbase.client.Admin;
 import org.apache.hadoop.hbase.client.ClusterConnection;
 import org.apache.hadoop.hbase.client.Connection;
 import org.apache.hadoop.hbase.client.ConnectionFactory;
 import org.apache.hadoop.hbase.client.Delete;
 import org.apache.hadoop.hbase.client.Put;
+import org.apache.hadoop.hbase.client.RegionInfo;
 import org.apache.hadoop.hbase.client.RegionLocator;
-import org.apache.hadoop.hbase.client.ResultScanner;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.client.Table;
-import org.apache.hadoop.hbase.coprocessor.BaseMasterObserver;
+import org.apache.hadoop.hbase.client.TableDescriptor;
+import org.apache.hadoop.hbase.coprocessor.MasterCoprocessor;
 import org.apache.hadoop.hbase.coprocessor.MasterCoprocessorEnvironment;
+import org.apache.hadoop.hbase.coprocessor.MasterObserver;
 import org.apache.hadoop.hbase.coprocessor.ObserverContext;
-import org.apache.hadoop.hbase.master.RegionStates;
+import org.apache.hadoop.hbase.master.assignment.AssignmentManager;
+import org.apache.hadoop.hbase.master.assignment.RegionStates;
 import org.apache.hadoop.hbase.mob.MobFileName;
 import org.apache.hadoop.hbase.mob.MobUtils;
-import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos;
 import org.apache.hadoop.hbase.regionserver.HRegionFileSystem;
 import org.apache.hadoop.hbase.util.HBaseFsck.ErrorReporter;
 import org.apache.hadoop.hbase.util.HBaseFsck.HbckInfo;
@@ -73,6 +72,11 @@ import org.apache.hadoop.hbase.util.HBaseFsck.TableInfo;
 import org.apache.hadoop.hbase.util.hbck.HFileCorruptionChecker;
 import org.apache.zookeeper.KeeperException;
 import org.junit.rules.TestName;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos;
 
 /**
  * This is the base class for  HBaseFsck's ability to detect reasons for inconsistent tables.
@@ -85,12 +89,13 @@ import org.junit.rules.TestName;
  */
 public class BaseTestHBaseFsck {
   static final int POOL_SIZE = 7;
-  protected static final Log LOG = LogFactory.getLog(BaseTestHBaseFsck.class);
+  protected static final Logger LOG = LoggerFactory.getLogger(BaseTestHBaseFsck.class);
   protected final static HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
   protected final static Configuration conf = TEST_UTIL.getConfiguration();
   protected final static String FAM_STR = "fam";
   protected final static byte[] FAM = Bytes.toBytes(FAM_STR);
   protected final static int REGION_ONLINE_TIMEOUT = 800;
+  protected static AssignmentManager assignmentManager;
   protected static RegionStates regionStates;
   protected static ExecutorService tableExecutorService;
   protected static ScheduledThreadPoolExecutor hbfsckExecutorService;
@@ -105,20 +110,6 @@ public class BaseTestHBaseFsck {
   protected final static byte[][] ROWKEYS= new byte[][] {
     Bytes.toBytes("00"), Bytes.toBytes("50"), Bytes.toBytes("A0"), Bytes.toBytes("A5"),
     Bytes.toBytes("B0"), Bytes.toBytes("B5"), Bytes.toBytes("C0"), Bytes.toBytes("C5") };
-
-
-  /**
-   * Create a new region in META.
-   */
-  protected HRegionInfo createRegion(final HTableDescriptor
-      htd, byte[] startKey, byte[] endKey)
-      throws IOException {
-    Table meta = connection.getTable(TableName.META_TABLE_NAME, tableExecutorService);
-    HRegionInfo hri = new HRegionInfo(htd.getTableName(), startKey, endKey);
-    MetaTableAccessor.addRegionToMeta(meta, hri);
-    meta.close();
-    return hri;
-  }
 
   /**
    * Debugging method to dump the contents of meta.
@@ -135,10 +126,10 @@ public class BaseTestHBaseFsck {
    * remove its state from the Master.
    */
   protected void undeployRegion(Connection conn, ServerName sn,
-      HRegionInfo hri) throws IOException, InterruptedException {
+      RegionInfo hri) throws IOException, InterruptedException {
     try {
       HBaseFsckRepair.closeRegionSilentlyAndWait(conn, sn, hri);
-      if (!hri.isMetaTable()) {
+      if (!hri.isMetaRegion()) {
         admin.offline(hri.getRegionName());
       }
     } catch (IOException ioe) {
@@ -156,7 +147,7 @@ public class BaseTestHBaseFsck {
       byte[] startKey, byte[] endKey, boolean unassign, boolean metaRow,
       boolean hdfs) throws IOException, InterruptedException {
     deleteRegion(conf, htd, startKey, endKey, unassign, metaRow, hdfs, false,
-        HRegionInfo.DEFAULT_REPLICA_ID);
+        RegionInfo.DEFAULT_REPLICA_ID);
   }
 
   /**
@@ -180,7 +171,7 @@ public class BaseTestHBaseFsck {
     }
 
     for (HRegionLocation location : locations) {
-      HRegionInfo hri = location.getRegionInfo();
+      RegionInfo hri = location.getRegionInfo();
       ServerName hsa = location.getServerName();
       if (Bytes.compareTo(hri.getStartKey(), startKey) == 0
           && Bytes.compareTo(hri.getEndKey(), endKey) == 0
@@ -259,7 +250,7 @@ public class BaseTestHBaseFsck {
     createTable(TEST_UTIL, desc, SPLITS);
 
     tbl = connection.getTable(tablename, tableExecutorService);
-    List<Put> puts = new ArrayList<Put>();
+    List<Put> puts = new ArrayList<>(ROWKEYS.length);
     for (byte[] row : ROWKEYS) {
       Put p = new Put(row);
       p.addColumn(FAM, Bytes.toBytes("val"), row);
@@ -283,7 +274,7 @@ public class BaseTestHBaseFsck {
     createTable(TEST_UTIL, desc, SPLITS);
 
     tbl = connection.getTable(tablename, tableExecutorService);
-    List<Put> puts = new ArrayList<Put>();
+    List<Put> puts = new ArrayList<>(ROWKEYS.length);
     for (byte[] row : ROWKEYS) {
       Put p = new Put(row);
       p.addColumn(FAM, Bytes.toBytes("val"), row);
@@ -326,17 +317,16 @@ public class BaseTestHBaseFsck {
    * Get region info from local cluster.
    */
   Map<ServerName, List<String>> getDeployedHRIs(final Admin admin) throws IOException {
-    ClusterStatus status = admin.getClusterStatus();
-    Collection<ServerName> regionServers = status.getServers();
-    Map<ServerName, List<String>> mm =
-        new HashMap<ServerName, List<String>>();
+    ClusterMetrics status = admin.getClusterMetrics(EnumSet.of(Option.LIVE_SERVERS));
+    Collection<ServerName> regionServers = status.getLiveServerMetrics().keySet();
+    Map<ServerName, List<String>> mm = new HashMap<>();
     for (ServerName hsi : regionServers) {
       AdminProtos.AdminService.BlockingInterface server = connection.getAdmin(hsi);
 
       // list all online regions from this region server
-      List<HRegionInfo> regions = ProtobufUtil.getOnlineRegions(server);
-      List<String> regionNames = new ArrayList<>();
-      for (HRegionInfo hri : regions) {
+      List<RegionInfo> regions = ProtobufUtil.getOnlineRegions(server);
+      List<String> regionNames = new ArrayList<>(regions.size());
+      for (RegionInfo hri : regions) {
         regionNames.add(hri.getRegionNameAsString());
       }
       mm.put(hsi, regionNames);
@@ -347,7 +337,7 @@ public class BaseTestHBaseFsck {
   /**
    * Returns the HSI a region info is on.
    */
-  ServerName findDeployedHSI(Map<ServerName, List<String>> mm, HRegionInfo hri) {
+  ServerName findDeployedHSI(Map<ServerName, List<String>> mm, RegionInfo hri) {
     for (Map.Entry<ServerName,List <String>> e : mm.entrySet()) {
       if (e.getValue().contains(hri.getRegionNameAsString())) {
         return e.getKey();
@@ -525,7 +515,7 @@ public class BaseTestHBaseFsck {
     @Override
     public ArrayList<ERROR_CODE> getErrorList() {
       calledCount++;
-      return new ArrayList<ERROR_CODE>();
+      return new ArrayList<>();
     }
 
     @Override
@@ -556,7 +546,7 @@ public class BaseTestHBaseFsck {
     HRegionLocation metaLocation = connection.getRegionLocator(TableName.META_TABLE_NAME)
         .getRegionLocation(HConstants.EMPTY_START_ROW);
     ServerName hsa = metaLocation.getServerName();
-    HRegionInfo hri = metaLocation.getRegionInfo();
+    RegionInfo hri = metaLocation.getRegionInfo();
     if (unassign) {
       LOG.info("Undeploying meta region " + hri + " from server " + hsa);
       try (Connection unmanagedConnection = ConnectionFactory.createConnection(conf)) {
@@ -590,15 +580,20 @@ public class BaseTestHBaseFsck {
   @org.junit.Rule
   public TestName name = new TestName();
 
-  public static class MasterSyncObserver extends BaseMasterObserver {
+  public static class MasterSyncCoprocessor implements MasterCoprocessor, MasterObserver {
     volatile CountDownLatch tableCreationLatch = null;
     volatile CountDownLatch tableDeletionLatch = null;
 
     @Override
+    public Optional<MasterObserver> getMasterObserver() {
+      return Optional.of(this);
+    }
+
+    @Override
     public void postCompletedCreateTableAction(
         final ObserverContext<MasterCoprocessorEnvironment> ctx,
-        final HTableDescriptor desc,
-        final HRegionInfo[] regions) throws IOException {
+        final TableDescriptor desc,
+        final RegionInfo[] regions) throws IOException {
       // the AccessController test, some times calls only and directly the
       // postCompletedCreateTableAction()
       if (tableCreationLatch != null) {
@@ -622,16 +617,16 @@ public class BaseTestHBaseFsck {
     byte [][] splitKeys) throws Exception {
     // NOTE: We need a latch because admin is not sync,
     // so the postOp coprocessor method may be called after the admin operation returned.
-    MasterSyncObserver observer = (MasterSyncObserver)testUtil.getHBaseCluster().getMaster()
-      .getMasterCoprocessorHost().findCoprocessor(MasterSyncObserver.class.getName());
-    observer.tableCreationLatch = new CountDownLatch(1);
+    MasterSyncCoprocessor coproc = testUtil.getHBaseCluster().getMaster()
+        .getMasterCoprocessorHost().findCoprocessor(MasterSyncCoprocessor.class);
+    coproc.tableCreationLatch = new CountDownLatch(1);
     if (splitKeys != null) {
       admin.createTable(htd, splitKeys);
     } else {
       admin.createTable(htd);
     }
-    observer.tableCreationLatch.await();
-    observer.tableCreationLatch = null;
+    coproc.tableCreationLatch.await();
+    coproc.tableCreationLatch = null;
     testUtil.waitUntilAllRegionsAssigned(htd.getTableName());
   }
 
@@ -639,16 +634,16 @@ public class BaseTestHBaseFsck {
     throws Exception {
     // NOTE: We need a latch because admin is not sync,
     // so the postOp coprocessor method may be called after the admin operation returned.
-    MasterSyncObserver observer = (MasterSyncObserver)testUtil.getHBaseCluster().getMaster()
-      .getMasterCoprocessorHost().findCoprocessor(MasterSyncObserver.class.getName());
-    observer.tableDeletionLatch = new CountDownLatch(1);
+    MasterSyncCoprocessor coproc = testUtil.getHBaseCluster().getMaster()
+      .getMasterCoprocessorHost().findCoprocessor(MasterSyncCoprocessor.class);
+    coproc.tableDeletionLatch = new CountDownLatch(1);
     try {
       admin.disableTable(tableName);
     } catch (Exception e) {
       LOG.debug("Table: " + tableName + " already disabled, so just deleting it.");
     }
     admin.deleteTable(tableName);
-    observer.tableDeletionLatch.await();
-    observer.tableDeletionLatch = null;
+    coproc.tableDeletionLatch.await();
+    coproc.tableDeletionLatch = null;
   }
 }

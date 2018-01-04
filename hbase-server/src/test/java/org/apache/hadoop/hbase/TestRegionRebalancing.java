@@ -1,5 +1,4 @@
-/**
- *
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -21,15 +20,19 @@ package org.apache.hadoop.hbase;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.fail;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import java.io.IOException;
+import java.io.InterruptedIOException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.List;
+
 import org.apache.hadoop.hbase.client.Admin;
 import org.apache.hadoop.hbase.client.Connection;
 import org.apache.hadoop.hbase.client.ConnectionFactory;
+import org.apache.hadoop.hbase.client.RegionInfo;
 import org.apache.hadoop.hbase.client.RegionLocator;
-import org.apache.hadoop.hbase.master.RegionStates;
 import org.apache.hadoop.hbase.regionserver.HRegionServer;
-import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.testclassification.FlakeyTests;
 import org.apache.hadoop.hbase.testclassification.LargeTests;
 import org.apache.hadoop.hbase.util.Bytes;
@@ -42,15 +45,14 @@ import org.junit.experimental.categories.Category;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 import org.junit.runners.Parameterized.Parameters;
-
-import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.List;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
 
 /**
  * Test whether region re-balancing works. (HBASE-71)
+ * The test only works for cluster wide balancing, not per table wide.
+ * Increase the margin a little to make StochasticLoadBalancer result acceptable.
  */
 @Category({FlakeyTests.class, LargeTests.class})
 @RunWith(value = Parameterized.class)
@@ -65,7 +67,7 @@ public class TestRegionRebalancing {
   }
 
   private static final byte[] FAMILY_NAME = Bytes.toBytes("col");
-  private static final Log LOG = LogFactory.getLog(TestRegionRebalancing.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestRegionRebalancing.class);
   private final HBaseTestingUtility UTIL = new HBaseTestingUtility();
   private RegionLocator regionLocator;
   private HTableDescriptor desc;
@@ -85,7 +87,6 @@ public class TestRegionRebalancing {
   public void before() throws Exception {
     UTIL.getConfiguration().set("hbase.master.loadbalancer.class", this.balancerName);
     // set minCostNeedBalance to 0, make sure balancer run
-    UTIL.getConfiguration().setFloat("hbase.master.balancer.stochastic.minCostNeedBalance", 0.0f);
     UTIL.startMiniCluster(1);
     this.desc = new HTableDescriptor(TableName.valueOf("test"));
     this.desc.addFamily(new HColumnDescriptor(FAMILY_NAME));
@@ -128,6 +129,7 @@ public class TestRegionRebalancing {
       // add a region server - total of 3
       LOG.info("Started third server=" +
           UTIL.getHBaseCluster().startRegionServer().getRegionServer().getServerName());
+      waitForAllRegionsAssigned();
       assert(UTIL.getHBaseCluster().getMaster().balance() == true);
       assertRegionsAreBalanced();
 
@@ -144,12 +146,14 @@ public class TestRegionRebalancing {
       LOG.info("Added fourth server=" +
           UTIL.getHBaseCluster().startRegionServer().getRegionServer().getServerName());
       waitOnCrashProcessing();
+      waitForAllRegionsAssigned();
       assert(UTIL.getHBaseCluster().getMaster().balance() == true);
       assertRegionsAreBalanced();
       for (int i = 0; i < 6; i++){
         LOG.info("Adding " + (i + 5) + "th region server");
         UTIL.getHBaseCluster().startRegionServer();
       }
+      waitForAllRegionsAssigned();
       assert(UTIL.getHBaseCluster().getMaster().balance() == true);
       assertRegionsAreBalanced();
       regionLocator.close();
@@ -185,9 +189,14 @@ public class TestRegionRebalancing {
 
       long regionCount = UTIL.getMiniHBaseCluster().countServedRegions();
       List<HRegionServer> servers = getOnlineRegionServers();
-      double avg = UTIL.getHBaseCluster().getMaster().getAverageLoad();
+      double avg = (double)regionCount / (double)servers.size();
       int avgLoadPlusSlop = (int)Math.ceil(avg * (1 + slop));
       int avgLoadMinusSlop = (int)Math.floor(avg * (1 - slop)) - 1;
+      // Increase the margin a little to accommodate StochasticLoadBalancer
+      if (this.balancerName.contains("StochasticLoadBalancer")) {
+        avgLoadPlusSlop++;
+        avgLoadMinusSlop--;
+      }
       LOG.debug("There are " + servers.size() + " servers and " + regionCount
         + " regions. Load Average: " + avg + " low border: " + avgLoadMinusSlop
         + ", up border: " + avgLoadPlusSlop + "; attempt: " + i);
@@ -198,7 +207,7 @@ public class TestRegionRebalancing {
         LOG.debug(server.getServerName() + " Avg: " + avg + " actual: " + serverLoad);
         if (!(avg > 2.0 && serverLoad <= avgLoadPlusSlop
             && serverLoad >= avgLoadMinusSlop)) {
-          for (HRegionInfo hri :
+          for (RegionInfo hri :
               ProtobufUtil.getOnlineRegions(server.getRSRpcServices())) {
             if (hri.isMetaRegion()) serverLoad--;
             // LOG.debug(hri.getRegionNameAsString());
@@ -232,7 +241,7 @@ public class TestRegionRebalancing {
   }
 
   private List<HRegionServer> getOnlineRegionServers() {
-    List<HRegionServer> list = new ArrayList<HRegionServer>();
+    List<HRegionServer> list = new ArrayList<>();
     for (JVMClusterUtil.RegionServerThread rst :
         UTIL.getHBaseCluster().getRegionServerThreads()) {
       if (rst.getRegionServer().isOnline()) {
@@ -247,13 +256,20 @@ public class TestRegionRebalancing {
    */
   private void waitForAllRegionsAssigned() throws IOException {
     int totalRegions = HBaseTestingUtility.KEYS.length;
+    try {
+        Thread.sleep(200);
+    } catch (InterruptedException e) {
+      throw new InterruptedIOException();
+    }
     while (UTIL.getMiniHBaseCluster().countServedRegions() < totalRegions) {
     // while (!cluster.getMaster().allRegionsAssigned()) {
       LOG.debug("Waiting for there to be "+ totalRegions +" regions, but there are "
         + UTIL.getMiniHBaseCluster().countServedRegions() + " right now.");
       try {
         Thread.sleep(200);
-      } catch (InterruptedException e) {}
+      } catch (InterruptedException e) {
+        throw new InterruptedIOException();
+      }
     }
     UTIL.waitUntilNoRegionsInTransition();
   }

@@ -18,11 +18,9 @@
 package org.apache.hadoop.hbase.security.visibility;
 
 import org.apache.hadoop.hbase.DoNotRetryIOException;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
 
 @InterfaceAudience.Public
-@InterfaceStability.Evolving
 public class InvalidLabelException extends DoNotRetryIOException {
   private static final long serialVersionUID = 1L;
 

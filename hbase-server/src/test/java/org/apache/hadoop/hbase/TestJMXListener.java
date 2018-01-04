@@ -24,27 +24,29 @@ import javax.management.MBeanServerConnection;
 import javax.management.remote.JMXConnector;
 import javax.management.remote.JMXConnectorFactory;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.coprocessor.CoprocessorHost;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.testclassification.MiscTests;
+import org.apache.hadoop.hbase.util.JVMClusterUtil;
 import org.junit.AfterClass;
 import org.junit.Assert;
+import static org.junit.Assert.fail;
 import org.junit.BeforeClass;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.junit.rules.ExpectedException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 
 
 @Category({MiscTests.class, MediumTests.class})
 public class TestJMXListener {
-  private static final Log LOG = LogFactory.getLog(TestJMXListener.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestJMXListener.class);
   private static HBaseTestingUtility UTIL = new HBaseTestingUtility();
-  private static int connectorPort = 61120;
+  private static int connectorPort = UTIL.randomFreePort();
 
   @BeforeClass
   public static void setupBeforeClass() throws Exception {
@@ -93,5 +95,19 @@ public class TestJMXListener {
 
   }
 
-
+  @Test
+  public void testGetRegionServerCoprocessors() throws Exception {
+    for (JVMClusterUtil.RegionServerThread rs : UTIL.getHBaseCluster().getRegionServerThreads()) {
+      boolean find = false;
+      for (String s : rs.getRegionServer().getRegionServerCoprocessors()) {
+        if (s.equals(JMXListener.class.getSimpleName())) {
+          find = true;
+          break;
+        }
+      }
+      if (!find) {
+        fail("where is the JMXListener?");
+      }
+    }
+  }
 }

@@ -43,8 +43,10 @@ import org.apache.hadoop.hbase.regionserver.InternalScanner;
 import org.apache.hadoop.hbase.testclassification.FilterTests;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.junit.rules.TestName;
 
 @Category({FilterTests.class, SmallTests.class})
 public class TestColumnPrefixFilter {
@@ -52,10 +54,13 @@ public class TestColumnPrefixFilter {
   private final static HBaseTestingUtility TEST_UTIL = new
       HBaseTestingUtility();
 
+  @Rule
+  public TestName name = new TestName();
+
   @Test
   public void testColumnPrefixFilter() throws IOException {
     String family = "Family";
-    HTableDescriptor htd = new HTableDescriptor(TableName.valueOf("TestColumnPrefixFilter"));
+    HTableDescriptor htd = new HTableDescriptor(TableName.valueOf(name.getMethodName()));
     htd.addFamily((new HColumnDescriptor(family)).setMaxVersions(3));
     HRegionInfo info = new HRegionInfo(htd.getTableName(), null, null, false);
     HRegion region = HBaseTestingUtility.createRegionAndWAL(info, TEST_UTIL.getDataTestDir(),
@@ -65,13 +70,12 @@ public class TestColumnPrefixFilter {
       List<String> columns = generateRandomWords(10000, "column");
       long maxTimestamp = 2;
 
-      List<Cell> kvList = new ArrayList<Cell>();
+      List<Cell> kvList = new ArrayList<>();
 
-      Map<String, List<Cell>> prefixMap = new HashMap<String,
-          List<Cell>>();
+      Map<String, List<Cell>> prefixMap = new HashMap<>();
 
-      prefixMap.put("p", new ArrayList<Cell>());
-      prefixMap.put("s", new ArrayList<Cell>());
+      prefixMap.put("p", new ArrayList<>());
+      prefixMap.put("s", new ArrayList<>());
 
       String valueString = "ValueString";
 
@@ -103,7 +107,7 @@ public class TestColumnPrefixFilter {
         scan.setFilter(filter);
 
         InternalScanner scanner = region.getScanner(scan);
-        List<Cell> results = new ArrayList<Cell>();
+        List<Cell> results = new ArrayList<>();
         while (scanner.next(results))
           ;
         assertEquals(prefixMap.get(s).size(), results.size());
@@ -118,7 +122,7 @@ public class TestColumnPrefixFilter {
   @Test
   public void testColumnPrefixFilterWithFilterList() throws IOException {
     String family = "Family";
-    HTableDescriptor htd = new HTableDescriptor(TableName.valueOf("TestColumnPrefixFilter"));
+    HTableDescriptor htd = new HTableDescriptor(TableName.valueOf(name.getMethodName()));
     htd.addFamily((new HColumnDescriptor(family)).setMaxVersions(3));
     HRegionInfo info = new HRegionInfo(htd.getTableName(), null, null, false);
     HRegion region = HBaseTestingUtility.createRegionAndWAL(info, TEST_UTIL.getDataTestDir(),
@@ -128,13 +132,12 @@ public class TestColumnPrefixFilter {
       List<String> columns = generateRandomWords(10000, "column");
       long maxTimestamp = 2;
 
-      List<Cell> kvList = new ArrayList<Cell>();
+      List<Cell> kvList = new ArrayList<>();
 
-      Map<String, List<Cell>> prefixMap = new HashMap<String,
-          List<Cell>>();
+      Map<String, List<Cell>> prefixMap = new HashMap<>();
 
-      prefixMap.put("p", new ArrayList<Cell>());
-      prefixMap.put("s", new ArrayList<Cell>());
+      prefixMap.put("p", new ArrayList<>());
+      prefixMap.put("s", new ArrayList<>());
 
       String valueString = "ValueString";
 
@@ -169,7 +172,7 @@ public class TestColumnPrefixFilter {
         scan.setFilter(filterList);
 
         InternalScanner scanner = region.getScanner(scan);
-        List<Cell> results = new ArrayList<Cell>();
+        List<Cell> results = new ArrayList<>();
         while (scanner.next(results))
           ;
         assertEquals(prefixMap.get(s).size(), results.size());
@@ -182,7 +185,7 @@ public class TestColumnPrefixFilter {
   }
 
   List<String> generateRandomWords(int numberOfWords, String suffix) {
-    Set<String> wordSet = new HashSet<String>();
+    Set<String> wordSet = new HashSet<>();
     for (int i = 0; i < numberOfWords; i++) {
       int lengthOfWords = (int) (Math.random()*2) + 1;
       char[] wordChar = new char[lengthOfWords];
@@ -197,7 +200,7 @@ public class TestColumnPrefixFilter {
       }
       wordSet.add(word);
     }
-    List<String> wordList = new ArrayList<String>(wordSet);
+    List<String> wordList = new ArrayList<>(wordSet);
     return wordList;
   }
 

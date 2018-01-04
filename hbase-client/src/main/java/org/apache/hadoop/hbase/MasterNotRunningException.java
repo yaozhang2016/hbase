@@ -20,16 +20,14 @@ package org.apache.hadoop.hbase;
 
 import java.io.IOException;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * Thrown if the master is not running
  */
 @InterfaceAudience.Public
-@InterfaceStability.Stable
 public class MasterNotRunningException extends IOException {
-  private static final long serialVersionUID = 1L << 23 - 1L;
+  private static final long serialVersionUID = (1L << 23) - 1L;
   /** default constructor */
   public MasterNotRunningException() {
     super();

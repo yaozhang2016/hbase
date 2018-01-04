@@ -35,16 +35,16 @@ import java.util.List;
 import java.util.Random;
 import java.util.Set;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.hbase.CellComparator;
+import org.apache.hadoop.hbase.CellComparatorImpl;
 import org.apache.hadoop.hbase.CellUtil;
+import org.apache.hadoop.hbase.HBaseCommonTestingUtility;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
+import org.apache.hadoop.hbase.PrivateCellUtil;
 import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.KeyValueUtil;
 import org.apache.hadoop.hbase.fs.HFileSystem;
@@ -66,6 +66,8 @@ import org.junit.experimental.categories.Category;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 import org.junit.runners.Parameterized.Parameters;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @RunWith(Parameterized.class)
 @Category({IOTests.class, MediumTests.class})
@@ -73,14 +75,14 @@ public class TestHFileBlockIndex {
 
   @Parameters
   public static Collection<Object[]> compressionAlgorithms() {
-    return HBaseTestingUtility.COMPRESSION_ALGORITHMS_PARAMETERIZED;
+    return HBaseCommonTestingUtility.COMPRESSION_ALGORITHMS_PARAMETERIZED;
   }
 
   public TestHFileBlockIndex(Compression.Algorithm compr) {
     this.compr = compr;
   }
 
-  private static final Log LOG = LogFactory.getLog(TestHFileBlockIndex.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestHFileBlockIndex.class);
 
   private static final int NUM_DATA_BLOCKS = 1000;
   private static final HBaseTestingUtility TEST_UTIL =
@@ -95,7 +97,7 @@ public class TestHFileBlockIndex {
   private long rootIndexOffset;
   private int numRootEntries;
   private int numLevels;
-  private static final List<byte[]> keys = new ArrayList<byte[]>();
+  private static final List<byte[]> keys = new ArrayList<>();
   private final Compression.Algorithm compr;
   private byte[] firstKeyInFile;
   private Configuration conf;
@@ -186,7 +188,7 @@ public class TestHFileBlockIndex {
       }
 
       missCount += 1;
-      prevBlock = realReader.readBlockData(offset, onDiskSize, pread);
+      prevBlock = realReader.readBlockData(offset, onDiskSize, pread, false);
       prevOffset = offset;
       prevOnDiskSize = onDiskSize;
       prevPread = pread;
@@ -212,7 +214,7 @@ public class TestHFileBlockIndex {
     BlockReaderWrapper brw = new BlockReaderWrapper(blockReader);
     HFileBlockIndex.BlockIndexReader indexReader =
         new HFileBlockIndex.CellBasedKeyBlockIndexReader(
-            CellComparator.COMPARATOR, numLevels, brw);
+            CellComparatorImpl.COMPARATOR, numLevels, brw);
 
     indexReader.readRootIndex(blockReader.blockRange(rootIndexOffset,
         fileSize).nextBlockWithBlockType(BlockType.ROOT_INDEX), numRootEntries);
@@ -229,8 +231,8 @@ public class TestHFileBlockIndex {
       HFileBlock b =
           indexReader.seekToDataBlock(keyOnlyKey, null, true,
             true, false, null);
-      if (CellComparator.COMPARATOR.compare(keyOnlyKey, firstKeyInFile,
-          0, firstKeyInFile.length) < 0) {
+      if (PrivateCellUtil.compare(CellComparatorImpl.COMPARATOR, keyOnlyKey, firstKeyInFile, 0,
+        firstKeyInFile.length) < 0) {
         assertTrue(b == null);
         ++i;
         continue;
@@ -374,7 +376,7 @@ public class TestHFileBlockIndex {
 
     // Make sure the keys are increasing.
     for (int i = 0; i < keys.size() - 1; ++i)
-      assertTrue(CellComparator.COMPARATOR.compare(
+      assertTrue(CellComparatorImpl.COMPARATOR.compare(
           new KeyValue.KeyOnlyKeyValue(keys.get(i), 0, keys.get(i).length),
           new KeyValue.KeyOnlyKeyValue(keys.get(i + 1), 0, keys.get(i + 1).length)) < 0);
 
@@ -413,7 +415,7 @@ public class TestHFileBlockIndex {
       KeyValue.KeyOnlyKeyValue cell = new KeyValue.KeyOnlyKeyValue(
           arrayHoldingKey, searchKey.length / 2, searchKey.length);
       int searchResult = BlockIndexReader.binarySearchNonRootIndex(cell,
-          new MultiByteBuff(nonRootIndex), CellComparator.COMPARATOR);
+          new MultiByteBuff(nonRootIndex), CellComparatorImpl.COMPARATOR);
       String lookupFailureMsg = "Failed to look up key #" + i + " ("
           + Bytes.toStringBinary(searchKey) + ")";
 
@@ -439,7 +441,7 @@ public class TestHFileBlockIndex {
       // higher-level API function.s
       boolean locateBlockResult =
           (BlockIndexReader.locateNonRootIndexEntry(new MultiByteBuff(nonRootIndex), cell,
-          CellComparator.COMPARATOR) != -1);
+          CellComparatorImpl.COMPARATOR) != -1);
 
       if (i == 0) {
         assertFalse(locateBlockResult);
@@ -565,19 +567,19 @@ public class TestHFileBlockIndex {
    conf.setBoolean(CacheConfig.CACHE_INDEX_BLOCKS_ON_WRITE_KEY, false);
 
    // Read the HFile
-   HFile.Reader reader = HFile.createReader(fs, hfilePath, cacheConf, conf);
+   HFile.Reader reader = HFile.createReader(fs, hfilePath, cacheConf, true, conf);
 
    boolean hasArrayIndexOutOfBoundsException = false;
    try {
      // get the mid-key.
-     reader.midkey();
+     reader.midKey();
    } catch (ArrayIndexOutOfBoundsException e) {
      hasArrayIndexOutOfBoundsException = true;
    } finally {
      reader.close();
    }
 
-   // to check if ArrayIndexOutOfBoundsException occured
+   // to check if ArrayIndexOutOfBoundsException occurred
    assertFalse(hasArrayIndexOutOfBoundsException);
  }
 
@@ -604,7 +606,7 @@ public class TestHFileBlockIndex {
       blockCache.evictBlocksByHfileName(hfilePath.getName());
 
       conf.setInt(HFileBlockIndex.MAX_CHUNK_SIZE_KEY, indexBlockSize);
-      Set<String> keyStrSet = new HashSet<String>();
+      Set<String> keyStrSet = new HashSet<>();
       byte[][] keys = new byte[NUM_KV][];
       byte[][] values = new byte[NUM_KV][];
 
@@ -635,7 +637,7 @@ public class TestHFileBlockIndex {
           values[i] = CellUtil.cloneValue(kv);
           keyStrSet.add(Bytes.toStringBinary(k));
           if (i > 0) {
-            assertTrue((CellComparator.COMPARATOR.compare(kv, keys[i - 1],
+            assertTrue((PrivateCellUtil.compare(CellComparatorImpl.COMPARATOR, kv, keys[i - 1],
                 0, keys[i - 1].length)) > 0);
           }
         }
@@ -644,12 +646,12 @@ public class TestHFileBlockIndex {
       }
 
       // Read the HFile
-      HFile.Reader reader = HFile.createReader(fs, hfilePath, cacheConf, conf);
+      HFile.Reader reader = HFile.createReader(fs, hfilePath, cacheConf, true, conf);
       assertEquals(expectedNumLevels,
           reader.getTrailer().getNumDataIndexLevels());
 
-      assertTrue(Bytes.equals(keys[0], ((KeyValue)reader.getFirstKey()).getKey()));
-      assertTrue(Bytes.equals(keys[NUM_KV - 1], ((KeyValue)reader.getLastKey()).getKey()));
+      assertTrue(Bytes.equals(keys[0], ((KeyValue)reader.getFirstKey().get()).getKey()));
+      assertTrue(Bytes.equals(keys[NUM_KV - 1], ((KeyValue)reader.getLastKey().get()).getKey()));
       LOG.info("Last key: " + Bytes.toStringBinary(keys[NUM_KV - 1]));
 
       for (boolean pread : new boolean[] { false, true }) {
@@ -674,7 +676,7 @@ public class TestHFileBlockIndex {
       HFileBlock.BlockIterator iter = fsReader.blockRange(0,
           reader.getTrailer().getLoadOnOpenDataOffset());
       HFileBlock block;
-      List<byte[]> blockKeys = new ArrayList<byte[]>();
+      List<byte[]> blockKeys = new ArrayList<>();
       while ((block = iter.nextBlock()) != null) {
         if (block.getBlockType() != BlockType.LEAF_INDEX)
           return;
@@ -705,7 +707,7 @@ public class TestHFileBlockIndex {
       // Validate the mid-key.
       assertEquals(
           Bytes.toStringBinary(blockKeys.get((blockKeys.size() - 1) / 2)),
-          reader.midkey());
+          reader.midKey());
 
       assertEquals(UNCOMPRESSED_INDEX_SIZES[testI],
           reader.getTrailer().getUncompressedDataIndexSize());
@@ -762,7 +764,7 @@ public class TestHFileBlockIndex {
     HFile.Writer hfw = new HFile.WriterFactory(conf, cacheConf)
             .withFileContext(context)
             .withPath(fs, hfPath).create();
-    List<byte[]> keys = new ArrayList<byte[]>();
+    List<byte[]> keys = new ArrayList<>();
 
     // This should result in leaf-level indices and a root level index
     for (int i=0; i < 100; i++) {
@@ -774,7 +776,7 @@ public class TestHFileBlockIndex {
     }
     hfw.close();
 
-    HFile.Reader reader = HFile.createReader(fs, hfPath, cacheConf, conf);
+    HFile.Reader reader = HFile.createReader(fs, hfPath, cacheConf, true, conf);
     // Scanner doesn't do Cells yet.  Fix.
     HFileScanner scanner = reader.getScanner(true, true);
     for (int i = 0; i < keys.size(); ++i) {

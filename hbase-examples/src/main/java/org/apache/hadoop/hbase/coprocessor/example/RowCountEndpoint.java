@@ -20,15 +20,15 @@ package org.apache.hadoop.hbase.coprocessor.example;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellUtil;
-import org.apache.hadoop.hbase.Coprocessor;
 import org.apache.hadoop.hbase.CoprocessorEnvironment;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.coprocessor.CoprocessorException;
-import org.apache.hadoop.hbase.coprocessor.CoprocessorService;
+import org.apache.hadoop.hbase.coprocessor.RegionCoprocessor;
 import org.apache.hadoop.hbase.coprocessor.RegionCoprocessorEnvironment;
 import org.apache.hadoop.hbase.coprocessor.example.generated.ExampleProtos;
 import org.apache.hadoop.hbase.filter.FirstKeyOnlyFilter;
@@ -45,11 +45,10 @@ import com.google.protobuf.Service;
  *
  * <p>
  * For the protocol buffer definition of the RowCountService, see the source file located under
- * hbase-server/src/main/protobuf/Examples.proto.
+ * hbase-examples/src/main/protobuf/Examples.proto.
  * </p>
  */
-public class RowCountEndpoint extends ExampleProtos.RowCountService
-    implements Coprocessor, CoprocessorService {
+public class RowCountEndpoint extends ExampleProtos.RowCountService implements RegionCoprocessor {
   private RegionCoprocessorEnvironment env;
 
   public RowCountEndpoint() {
@@ -59,8 +58,8 @@ public class RowCountEndpoint extends ExampleProtos.RowCountService
    * Just returns a reference to this object, which implements the RowCounterService interface.
    */
   @Override
-  public Service getService() {
-    return this;
+  public Iterable<Service> getServices() {
+    return Collections.singleton(this);
   }
 
   /**
@@ -75,7 +74,7 @@ public class RowCountEndpoint extends ExampleProtos.RowCountService
     InternalScanner scanner = null;
     try {
       scanner = env.getRegion().getScanner(scan);
-      List<Cell> results = new ArrayList<Cell>();
+      List<Cell> results = new ArrayList<>();
       boolean hasMore = false;
       byte[] lastRow = null;
       long count = 0;
@@ -115,7 +114,7 @@ public class RowCountEndpoint extends ExampleProtos.RowCountService
     InternalScanner scanner = null;
     try {
       scanner = env.getRegion().getScanner(new Scan());
-      List<Cell> results = new ArrayList<Cell>();
+      List<Cell> results = new ArrayList<>();
       boolean hasMore = false;
       long count = 0;
       do {

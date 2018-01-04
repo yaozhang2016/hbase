@@ -31,8 +31,6 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.CategoryBasedTimeout;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellUtil;
@@ -63,6 +61,8 @@ import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.junit.rules.TestName;
 import org.junit.rules.TestRule;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Test of a long-lived scanner validating as we go.
@@ -73,7 +73,7 @@ public class TestScanner {
   @Rule public final TestRule timeout = CategoryBasedTimeout.builder().
       withTimeout(this.getClass()).withLookingForStuckThread(true).build();
 
-  private static final Log LOG = LogFactory.getLog(TestScanner.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestScanner.class);
   private final static HBaseTestingUtility TEST_UTIL = HBaseTestingUtility.createLocalHTU();
 
   private static final byte [] FIRST_ROW = HConstants.EMPTY_START_ROW;
@@ -132,7 +132,7 @@ public class TestScanner {
     try {
       this.region = TEST_UTIL.createLocalHRegion(TESTTABLEDESC, null, null);
       HBaseTestCase.addContent(this.region, HConstants.CATALOG_FAMILY);
-      List<Cell> results = new ArrayList<Cell>();
+      List<Cell> results = new ArrayList<>();
       // Do simple test of getting one row only first.
       Scan scan = new Scan(Bytes.toBytes("abc"), Bytes.toBytes("abd"));
       scan.addFamily(HConstants.CATALOG_FAMILY);
@@ -151,11 +151,11 @@ public class TestScanner {
       s = region.getScanner(scan);
       count = 0;
       Cell kv = null;
-      results = new ArrayList<Cell>();
+      results = new ArrayList<>();
       for (boolean first = true; s.next(results);) {
         kv = results.get(0);
         if (first) {
-          assertTrue(CellUtil.matchingRow(kv,  startrow));
+          assertTrue(CellUtil.matchingRows(kv,  startrow));
           first = false;
         }
         count++;
@@ -170,7 +170,7 @@ public class TestScanner {
   }
 
   void rowPrefixFilter(Scan scan) throws IOException {
-    List<Cell> results = new ArrayList<Cell>();
+    List<Cell> results = new ArrayList<>();
     scan.addFamily(HConstants.CATALOG_FAMILY);
     InternalScanner s = region.getScanner(scan);
     boolean hasMore = true;
@@ -186,7 +186,7 @@ public class TestScanner {
   }
 
   void rowInclusiveStopFilter(Scan scan, byte[] stopRow) throws IOException {
-    List<Cell> results = new ArrayList<Cell>();
+    List<Cell> results = new ArrayList<>();
     scan.addFamily(HConstants.CATALOG_FAMILY);
     InternalScanner s = region.getScanner(scan);
     boolean hasMore = true;
@@ -234,7 +234,7 @@ public class TestScanner {
       HBaseTestCase.addContent(this.region, HConstants.CATALOG_FAMILY);
       Scan scan = new Scan();
       InternalScanner s = region.getScanner(scan);
-      List<Cell> results = new ArrayList<Cell>();
+      List<Cell> results = new ArrayList<>();
       try {
         s.next(results);
         s.close();
@@ -376,7 +376,7 @@ public class TestScanner {
   throws IOException {
     InternalScanner scanner = null;
     Scan scan = null;
-    List<Cell> results = new ArrayList<Cell>();
+    List<Cell> results = new ArrayList<>();
     byte [][][] scanColumns = {
         COLS,
         EXPLICIT_COLS
@@ -540,21 +540,21 @@ public class TestScanner {
       // run a major compact, column1 of firstRow will be cleaned.
       region.compact(true);
 
-      List<Cell> results = new ArrayList<Cell>();
+      List<Cell> results = new ArrayList<>();
       s.next(results);
 
       // make sure returns column2 of firstRow
       assertTrue("result is not correct, keyValues : " + results,
           results.size() == 1);
-      assertTrue(CellUtil.matchingRow(results.get(0), firstRowBytes)); 
+      assertTrue(CellUtil.matchingRows(results.get(0), firstRowBytes));
       assertTrue(CellUtil.matchingFamily(results.get(0), fam2));
 
-      results = new ArrayList<Cell>();
+      results = new ArrayList<>();
       s.next(results);
 
       // get secondRow
       assertTrue(results.size() == 2);
-      assertTrue(CellUtil.matchingRow(results.get(0), secondRowBytes));
+      assertTrue(CellUtil.matchingRows(results.get(0), secondRowBytes));
       assertTrue(CellUtil.matchingFamily(results.get(0), fam1));
       assertTrue(CellUtil.matchingFamily(results.get(1), fam2));
     } finally {

@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -18,6 +18,8 @@
 
 package org.apache.hadoop.hbase.wal;
 
+import static com.codahale.metrics.MetricRegistry.name;
+
 import java.io.IOException;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -29,9 +31,6 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.TimeUnit;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.conf.Configured;
 import org.apache.hadoop.fs.FileStatus;
@@ -42,41 +41,43 @@ import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.MockRegionServerServices;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Put;
+import org.apache.hadoop.hbase.client.RegionInfo;
+import org.apache.hadoop.hbase.client.RegionInfoBuilder;
 import org.apache.hadoop.hbase.io.crypto.KeyProviderForTesting;
 import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.LogRoller;
 import org.apache.hadoop.hbase.regionserver.MultiVersionConcurrencyControl;
+import org.apache.hadoop.hbase.regionserver.wal.SecureProtobufLogReader;
+import org.apache.hadoop.hbase.regionserver.wal.SecureProtobufLogWriter;
+import org.apache.hadoop.hbase.regionserver.wal.WALActionsListener;
 import org.apache.hadoop.hbase.trace.HBaseHTraceConfiguration;
 import org.apache.hadoop.hbase.trace.SpanReceiverHost;
-import org.apache.hadoop.hbase.wal.WALProvider.Writer;
+import org.apache.hadoop.hbase.trace.TraceUtil;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.FSUtils;
 import org.apache.hadoop.hbase.util.Threads;
+import org.apache.hadoop.hbase.wal.WALProvider.Writer;
 import org.apache.hadoop.util.Tool;
 import org.apache.hadoop.util.ToolRunner;
-import org.apache.htrace.Sampler;
-import org.apache.htrace.Trace;
-import org.apache.htrace.TraceScope;
-import org.apache.htrace.impl.ProbabilitySampler;
+import org.apache.htrace.core.ProbabilitySampler;
+import org.apache.htrace.core.Sampler;
+import org.apache.htrace.core.TraceScope;
+import org.apache.htrace.core.Tracer;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import com.codahale.metrics.ConsoleReporter;
 import com.codahale.metrics.Histogram;
 import com.codahale.metrics.Meter;
-import com.codahale.metrics.MetricRegistry;
 import com.codahale.metrics.MetricFilter;
+import com.codahale.metrics.MetricRegistry;
 
 // imports for things that haven't moved from regionserver.wal yet.
-import org.apache.hadoop.hbase.regionserver.wal.SecureProtobufLogReader;
-import org.apache.hadoop.hbase.regionserver.wal.SecureProtobufLogWriter;
-import org.apache.hadoop.hbase.regionserver.wal.WALActionsListener;
-import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
-
-import static com.codahale.metrics.MetricRegistry.name;
 
 /**
  * This class runs performance benchmarks for {@link WAL}.
@@ -85,7 +86,9 @@ import static com.codahale.metrics.MetricRegistry.name;
  */
 @InterfaceAudience.Private
 public final class WALPerformanceEvaluation extends Configured implements Tool {
-  private static final Log LOG = LogFactory.getLog(WALPerformanceEvaluation.class.getName());
+  private static final Logger LOG =
+      LoggerFactory.getLogger(WALPerformanceEvaluation.class);
+
   private final MetricRegistry metrics = new MetricRegistry();
   private final Meter syncMeter =
     metrics.meter(name(WALPerformanceEvaluation.class, "syncMeter", "syncs"));
@@ -138,11 +141,10 @@ public final class WALPerformanceEvaluation extends Configured implements Tool {
       this.numIterations = numIterations;
       this.noSync = noSync;
       this.syncInterval = syncInterval;
-      this.numFamilies = htd.getColumnFamilies().length;
+      this.numFamilies = htd.getColumnFamilyCount();
       this.region = region;
       this.htd = htd;
-      scopes = new TreeMap<byte[], Integer>(
-          Bytes.BYTES_COMPARATOR);
+      scopes = new TreeMap<>(Bytes.BYTES_COMPARATOR);
       for(byte[] fam : htd.getFamiliesKeys()) {
         scopes.put(fam, 0);
       }
@@ -157,7 +159,7 @@ public final class WALPerformanceEvaluation extends Configured implements Tool {
           loopSampler = Sampler.ALWAYS;
           if (numIterations > 1000) {
             LOG.warn("Full tracing of all iterations will produce a lot of data. Be sure your"
-              + " SpanReciever can keep up.");
+              + " SpanReceiver can keep up.");
           }
         } else {
           getConf().setDouble("hbase.sampler.fraction", traceFreq);
@@ -173,22 +175,20 @@ public final class WALPerformanceEvaluation extends Configured implements Tool {
       Random rand = new Random(Thread.currentThread().getId());
       WAL wal = region.getWAL();
 
-      TraceScope threadScope =
-        Trace.startSpan("WALPerfEval." + Thread.currentThread().getName());
-      try {
+      try (TraceScope threadScope = TraceUtil.createTrace("WALPerfEval." + Thread.currentThread().getName())) {
         long startTime = System.currentTimeMillis();
         int lastSync = 0;
+        TraceUtil.addSampler(loopSampler);
         for (int i = 0; i < numIterations; ++i) {
-          assert Trace.currentSpan() == threadScope.getSpan() : "Span leak detected.";
-          TraceScope loopScope = Trace.startSpan("runLoopIter" + i, loopSampler);
-          try {
+          assert Tracer.getCurrentSpan() == threadScope.getSpan() : "Span leak detected.";
+          try (TraceScope loopScope = TraceUtil.createTrace("runLoopIter" + i)) {
             long now = System.nanoTime();
             Put put = setupPut(rand, key, value, numFamilies);
             WALEdit walEdit = new WALEdit();
             addFamilyMapToWALEdit(put.getFamilyCellMap(), walEdit);
-            HRegionInfo hri = region.getRegionInfo();
-            final WALKey logkey =
-                new WALKey(hri.getEncodedNameAsBytes(), hri.getTable(), now, mvcc, scopes);
+            RegionInfo hri = region.getRegionInfo();
+            final WALKeyImpl logkey =
+                new WALKeyImpl(hri.getEncodedNameAsBytes(), hri.getTable(), now, mvcc, scopes);
             wal.append(hri, logkey, walEdit, true);
             if (!this.noSync) {
               if (++lastSync >= this.syncInterval) {
@@ -197,16 +197,12 @@ public final class WALPerformanceEvaluation extends Configured implements Tool {
               }
             }
             latencyHistogram.update(System.nanoTime() - now);
-          } finally {
-            loopScope.close();
           }
         }
         long totalTime = (System.currentTimeMillis() - startTime);
         logBenchmarkResult(Thread.currentThread().getName(), numIterations, totalTime);
       } catch (Exception e) {
         LOG.error(getClass().getSimpleName() + " Thread failed", e);
-      } finally {
-        threadScope.close();
       }
     }
   }
@@ -316,8 +312,9 @@ public final class WALPerformanceEvaluation extends Configured implements Tool {
     LOG.info("FileSystem: " + fs);
 
     SpanReceiverHost receiverHost = trace ? SpanReceiverHost.getInstance(getConf()) : null;
-    final Sampler<?> sampler = trace ? Sampler.ALWAYS : Sampler.NEVER;
-    TraceScope scope = Trace.startSpan("WALPerfEval", sampler);
+    final Sampler sampler = trace ? Sampler.ALWAYS : Sampler.NEVER;
+    TraceUtil.addSampler(sampler);
+    TraceScope scope = TraceUtil.createTrace("WALPerfEval");
 
     try {
       if (rootRegionDir == null) {
@@ -339,8 +336,8 @@ public final class WALPerformanceEvaluation extends Configured implements Tool {
           // a table per desired region means we can avoid carving up the key space
           final HTableDescriptor htd = createHTableDescriptor(i, numFamilies);
           regions[i] = openRegion(fs, rootRegionDir, htd, wals, roll, roller);
-          benchmarks[i] = Trace.wrap(new WALPutBenchmark(regions[i], htd, numIterations, noSync,
-              syncInterval, traceFreq));
+          benchmarks[i] = TraceUtil.wrap(new WALPutBenchmark(regions[i], htd, numIterations, noSync,
+              syncInterval, traceFreq), "");
         }
         ConsoleReporter reporter = ConsoleReporter.forRegistry(metrics).
           outputTo(System.out).convertRatesTo(TimeUnit.SECONDS).filter(MetricFilter.ALL).build();
@@ -349,7 +346,7 @@ public final class WALPerformanceEvaluation extends Configured implements Tool {
         long putTime = runBenchmark(benchmarks, numThreads);
         logBenchmarkResult("Summary: threads=" + numThreads + ", iterations=" + numIterations +
           ", syncInterval=" + syncInterval, numIterations * numThreads, putTime);
-        
+
         for (int i = 0; i < numRegions; i++) {
           if (regions[i] != null) {
             closeRegion(regions[i]);
@@ -390,9 +387,15 @@ public final class WALPerformanceEvaluation extends Configured implements Tool {
       }
     } finally {
       // We may be called inside a test that wants to keep on using the fs.
-      if (!noclosefs) fs.close();
-      scope.close();
-      if (receiverHost != null) receiverHost.closeReceivers();
+      if (!noclosefs) {
+        fs.close();
+      }
+      if (scope != null) {
+        scope.close();
+      }
+      if (receiverHost != null) {
+        receiverHost.closeReceivers();
+      }
     }
 
     return(0);
@@ -420,7 +423,7 @@ public final class WALPerformanceEvaluation extends Configured implements Tool {
       throws IOException {
     WAL.Reader reader = wals.createReader(wal.getFileSystem(getConf()), wal);
     long count = 0;
-    Map<String, Long> sequenceIds = new HashMap<String, Long>();
+    Map<String, Long> sequenceIds = new HashMap<>();
     try {
       while (true) {
         WAL.Entry e = reader.next();
@@ -429,7 +432,7 @@ public final class WALPerformanceEvaluation extends Configured implements Tool {
           break;
         }
         count++;
-        long seqid = e.getKey().getLogSeqNum();
+        long seqid = e.getKey().getSequenceId();
         if (sequenceIds.containsKey(Bytes.toString(e.getKey().getEncodedRegionName()))) {
           // sequenceIds should be increasing for every regions
           if (sequenceIds.get(Bytes.toString(e.getKey().getEncodedRegionName())) >= seqid) {
@@ -451,11 +454,11 @@ public final class WALPerformanceEvaluation extends Configured implements Tool {
   private static void logBenchmarkResult(String testName, long numTests, long totalTime) {
     float tsec = totalTime / 1000.0f;
     LOG.info(String.format("%s took %.3fs %.3fops/s", testName, tsec, numTests / tsec));
-    
+
   }
 
   private void printUsageAndExit() {
-    System.err.printf("Usage: bin/hbase %s [options]\n", getClass().getName());
+    System.err.printf("Usage: hbase %s [options]\n", getClass().getName());
     System.err.println(" where [options] are:");
     System.err.println("  -h|-help         Show this help and exit.");
     System.err.println("  -threads <N>     Number of threads writing on the WAL.");
@@ -483,26 +486,26 @@ public final class WALPerformanceEvaluation extends Configured implements Tool {
     System.err.println("");
     System.err.println(" To run 100 threads on hdfs with log rolling every 10k edits and " +
       "verification afterward do:");
-    System.err.println(" $ ./bin/hbase org.apache.hadoop.hbase.wal." +
+    System.err.println(" $ hbase org.apache.hadoop.hbase.wal." +
       "WALPerformanceEvaluation \\");
     System.err.println("    -conf ./core-site.xml -path hdfs://example.org:7000/tmp " +
       "-threads 100 -roll 10000 -verify");
     System.exit(1);
   }
 
-  private final Set<WAL> walsListenedTo = new HashSet<WAL>();
+  private final Set<WAL> walsListenedTo = new HashSet<>();
 
   private HRegion openRegion(final FileSystem fs, final Path dir, final HTableDescriptor htd,
       final WALFactory wals, final long whenToRoll, final LogRoller roller) throws IOException {
     // Initialize HRegion
-    HRegionInfo regionInfo = new HRegionInfo(htd.getTableName());
+    RegionInfo regionInfo = RegionInfoBuilder.newBuilder(htd.getTableName()).build();
     // Initialize WAL
     final WAL wal =
         wals.getWAL(regionInfo.getEncodedNameAsBytes(), regionInfo.getTable().getNamespace());
     // If we haven't already, attach a listener to this wal to handle rolls and metrics.
     if (walsListenedTo.add(wal)) {
       roller.addWAL(wal);
-      wal.registerWALActionsListener(new WALActionsListener.Base() {
+      wal.registerWALActionsListener(new WALActionsListener() {
         private int appends = 0;
 
         @Override
@@ -531,7 +534,7 @@ public final class WALPerformanceEvaluation extends Configured implements Tool {
         }
       });
     }
-     
+
     return HRegion.createHRegion(regionInfo, dir, getConf(), htd, wal);
   }
 

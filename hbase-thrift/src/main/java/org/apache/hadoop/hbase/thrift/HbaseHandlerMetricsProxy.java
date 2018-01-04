@@ -23,12 +23,11 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.thrift.generated.Hbase;
-
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Converts a Hbase.Iface using InvocationHandler so that it reports process
@@ -37,7 +36,7 @@ import org.apache.hadoop.hbase.thrift.generated.Hbase;
 @InterfaceAudience.Private
 public class HbaseHandlerMetricsProxy implements InvocationHandler {
 
-  private static final Log LOG = LogFactory.getLog(
+  private static final Logger LOG = LoggerFactory.getLogger(
       HbaseHandlerMetricsProxy.class);
 
   private final Hbase.Iface handler;
@@ -62,16 +61,19 @@ public class HbaseHandlerMetricsProxy implements InvocationHandler {
   public Object invoke(Object proxy, Method m, Object[] args)
       throws Throwable {
     Object result;
+    long start = now();
     try {
-      long start = now();
       result = m.invoke(handler, args);
-      long processTime = now() - start;
-      metrics.incMethodTime(m.getName(), processTime);
     } catch (InvocationTargetException e) {
+      metrics.exception(e.getCause());
       throw e.getTargetException();
     } catch (Exception e) {
+      metrics.exception(e);
       throw new RuntimeException(
           "unexpected invocation exception: " + e.getMessage());
+    } finally {
+      long processTime = now() - start;
+      metrics.incMethodTime(m.getName(), processTime);
     }
     return result;
   }

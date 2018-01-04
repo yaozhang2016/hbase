@@ -24,11 +24,9 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.Cell;
-import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.HConstants;
+import org.apache.hadoop.hbase.PrivateCellUtil;
 import org.apache.hadoop.hbase.KeepDeletedCells;
 import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.regionserver.ScanInfo;
@@ -38,11 +36,13 @@ import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Category({ RegionServerTests.class, SmallTests.class })
 public class TestUserScanQueryMatcher extends AbstractTestScanQueryMatcher {
 
-  private static final Log LOG = LogFactory.getLog(TestUserScanQueryMatcher.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestUserScanQueryMatcher.class);
 
   /**
    * This is a cryptic test. It is checking that we don't include a fake cell, one that has a
@@ -54,10 +54,11 @@ public class TestUserScanQueryMatcher extends AbstractTestScanQueryMatcher {
     long now = EnvironmentEdgeManager.currentTime();
     // Do with fam2 which has a col2 qualifier.
     UserScanQueryMatcher qm = UserScanQueryMatcher.create(scan,
-      new ScanInfo(this.conf, fam2, 10, 1, ttl, KeepDeletedCells.FALSE, 0, rowComparator),
+      new ScanInfo(this.conf, fam2, 10, 1, ttl, KeepDeletedCells.FALSE,
+          HConstants.DEFAULT_BLOCKSIZE, 0, rowComparator, false),
       get.getFamilyMap().get(fam2), now - ttl, now, null);
     Cell kv = new KeyValue(row1, fam2, col2, 1, data);
-    Cell cell = CellUtil.createLastOnRowCol(kv);
+    Cell cell = PrivateCellUtil.createLastOnRowCol(kv);
     qm.setToNewRow(kv);
     MatchCode code = qm.match(cell);
     assertFalse(code.compareTo(MatchCode.SEEK_NEXT_COL) != 0);
@@ -69,7 +70,7 @@ public class TestUserScanQueryMatcher extends AbstractTestScanQueryMatcher {
     // of just byte []
 
     // Expected result
-    List<MatchCode> expected = new ArrayList<ScanQueryMatcher.MatchCode>();
+    List<MatchCode> expected = new ArrayList<>(6);
     expected.add(ScanQueryMatcher.MatchCode.SEEK_NEXT_COL);
     expected.add(ScanQueryMatcher.MatchCode.INCLUDE_AND_SEEK_NEXT_COL);
     expected.add(ScanQueryMatcher.MatchCode.SEEK_NEXT_COL);
@@ -79,11 +80,12 @@ public class TestUserScanQueryMatcher extends AbstractTestScanQueryMatcher {
 
     long now = EnvironmentEdgeManager.currentTime();
     // 2,4,5
-    UserScanQueryMatcher qm = UserScanQueryMatcher.create(scan,
-      new ScanInfo(this.conf, fam2, 0, 1, ttl, KeepDeletedCells.FALSE, 0, rowComparator),
+    UserScanQueryMatcher qm = UserScanQueryMatcher.create(
+      scan, new ScanInfo(this.conf, fam2, 0, 1, ttl, KeepDeletedCells.FALSE,
+          HConstants.DEFAULT_BLOCKSIZE, 0, rowComparator, false),
       get.getFamilyMap().get(fam2), now - ttl, now, null);
 
-    List<KeyValue> memstore = new ArrayList<KeyValue>();
+    List<KeyValue> memstore = new ArrayList<>(6);
     memstore.add(new KeyValue(row1, fam2, col1, 1, data));
     memstore.add(new KeyValue(row1, fam2, col2, 1, data));
     memstore.add(new KeyValue(row1, fam2, col3, 1, data));
@@ -92,7 +94,7 @@ public class TestUserScanQueryMatcher extends AbstractTestScanQueryMatcher {
 
     memstore.add(new KeyValue(row2, fam1, col1, data));
 
-    List<ScanQueryMatcher.MatchCode> actual = new ArrayList<ScanQueryMatcher.MatchCode>();
+    List<ScanQueryMatcher.MatchCode> actual = new ArrayList<>(memstore.size());
     KeyValue k = memstore.get(0);
     qm.setToNewRow(k);
 
@@ -113,7 +115,7 @@ public class TestUserScanQueryMatcher extends AbstractTestScanQueryMatcher {
     // of just byte []
 
     // Expected result
-    List<MatchCode> expected = new ArrayList<ScanQueryMatcher.MatchCode>();
+    List<MatchCode> expected = new ArrayList<>(6);
     expected.add(ScanQueryMatcher.MatchCode.INCLUDE);
     expected.add(ScanQueryMatcher.MatchCode.INCLUDE);
     expected.add(ScanQueryMatcher.MatchCode.INCLUDE);
@@ -122,11 +124,11 @@ public class TestUserScanQueryMatcher extends AbstractTestScanQueryMatcher {
     expected.add(ScanQueryMatcher.MatchCode.DONE);
 
     long now = EnvironmentEdgeManager.currentTime();
-    UserScanQueryMatcher qm = UserScanQueryMatcher.create(scan,
-      new ScanInfo(this.conf, fam2, 0, 1, ttl, KeepDeletedCells.FALSE, 0, rowComparator), null,
-      now - ttl, now, null);
+    UserScanQueryMatcher qm = UserScanQueryMatcher.create(scan, new ScanInfo(this.conf, fam2, 0, 1,
+        ttl, KeepDeletedCells.FALSE, HConstants.DEFAULT_BLOCKSIZE, 0, rowComparator, false),
+      null, now - ttl, now, null);
 
-    List<KeyValue> memstore = new ArrayList<KeyValue>();
+    List<KeyValue> memstore = new ArrayList<>(6);
     memstore.add(new KeyValue(row1, fam2, col1, 1, data));
     memstore.add(new KeyValue(row1, fam2, col2, 1, data));
     memstore.add(new KeyValue(row1, fam2, col3, 1, data));
@@ -134,7 +136,7 @@ public class TestUserScanQueryMatcher extends AbstractTestScanQueryMatcher {
     memstore.add(new KeyValue(row1, fam2, col5, 1, data));
     memstore.add(new KeyValue(row2, fam1, col1, 1, data));
 
-    List<ScanQueryMatcher.MatchCode> actual = new ArrayList<ScanQueryMatcher.MatchCode>();
+    List<ScanQueryMatcher.MatchCode> actual = new ArrayList<>(memstore.size());
 
     KeyValue k = memstore.get(0);
     qm.setToNewRow(k);
@@ -168,7 +170,8 @@ public class TestUserScanQueryMatcher extends AbstractTestScanQueryMatcher {
 
     long now = EnvironmentEdgeManager.currentTime();
     UserScanQueryMatcher qm = UserScanQueryMatcher.create(scan,
-      new ScanInfo(this.conf, fam2, 0, 1, testTTL, KeepDeletedCells.FALSE, 0, rowComparator),
+      new ScanInfo(this.conf, fam2, 0, 1, testTTL, KeepDeletedCells.FALSE,
+          HConstants.DEFAULT_BLOCKSIZE, 0, rowComparator, false),
       get.getFamilyMap().get(fam2), now - testTTL, now, null);
 
     KeyValue[] kvs = new KeyValue[] { new KeyValue(row1, fam2, col1, now - 100, data),
@@ -181,7 +184,7 @@ public class TestUserScanQueryMatcher extends AbstractTestScanQueryMatcher {
     KeyValue k = kvs[0];
     qm.setToNewRow(k);
 
-    List<MatchCode> actual = new ArrayList<MatchCode>(kvs.length);
+    List<MatchCode> actual = new ArrayList<>(kvs.length);
     for (KeyValue kv : kvs) {
       actual.add(qm.match(kv));
     }
@@ -209,9 +212,9 @@ public class TestUserScanQueryMatcher extends AbstractTestScanQueryMatcher {
         ScanQueryMatcher.MatchCode.DONE };
 
     long now = EnvironmentEdgeManager.currentTime();
-    UserScanQueryMatcher qm = UserScanQueryMatcher.create(scan,
-      new ScanInfo(this.conf, fam2, 0, 1, testTTL, KeepDeletedCells.FALSE, 0, rowComparator), null,
-      now - testTTL, now, null);
+    UserScanQueryMatcher qm = UserScanQueryMatcher.create(scan, new ScanInfo(this.conf, fam2, 0, 1,
+        testTTL, KeepDeletedCells.FALSE, HConstants.DEFAULT_BLOCKSIZE, 0, rowComparator, false),
+      null, now - testTTL, now, null);
 
     KeyValue[] kvs = new KeyValue[] { new KeyValue(row1, fam2, col1, now - 100, data),
         new KeyValue(row1, fam2, col2, now - 50, data),
@@ -222,7 +225,7 @@ public class TestUserScanQueryMatcher extends AbstractTestScanQueryMatcher {
     KeyValue k = kvs[0];
     qm.setToNewRow(k);
 
-    List<ScanQueryMatcher.MatchCode> actual = new ArrayList<ScanQueryMatcher.MatchCode>(kvs.length);
+    List<ScanQueryMatcher.MatchCode> actual = new ArrayList<>(kvs.length);
     for (KeyValue kv : kvs) {
       actual.add(qm.match(kv));
     }

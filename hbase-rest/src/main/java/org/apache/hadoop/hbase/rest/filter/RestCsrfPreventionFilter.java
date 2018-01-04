@@ -34,10 +34,10 @@ import javax.servlet.ServletResponse;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.classification.InterfaceAudience;
-import org.apache.hadoop.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceStability;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.conf.Configuration;
 
 /**
@@ -48,11 +48,10 @@ import org.apache.hadoop.conf.Configuration;
  * attempt as a bad request.
  */
 @InterfaceAudience.Public
-@InterfaceStability.Evolving
 public class RestCsrfPreventionFilter implements Filter {
 
-  private static final Log LOG =
-      LogFactory.getLog(RestCsrfPreventionFilter.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(RestCsrfPreventionFilter.class);
 
   public static final String HEADER_USER_AGENT = "User-Agent";
   public static final String BROWSER_USER_AGENT_PARAM =
@@ -93,7 +92,7 @@ public class RestCsrfPreventionFilter implements Filter {
 
   void parseBrowserUserAgents(String userAgents) {
     String[] agentsArray =  userAgents.split(",");
-    browserUserAgents = new HashSet<Pattern>();
+    browserUserAgents = new HashSet<>();
     for (String patternString : agentsArray) {
       browserUserAgents.add(Pattern.compile(patternString));
     }
@@ -101,7 +100,7 @@ public class RestCsrfPreventionFilter implements Filter {
 
   void parseMethodsToIgnore(String mti) {
     String[] methods = mti.split(",");
-    methodsToIgnore = new HashSet<String>();
+    methodsToIgnore = new HashSet<>();
     for (int i = 0; i < methods.length; i++) {
       methodsToIgnore.add(methods[i]);
     }

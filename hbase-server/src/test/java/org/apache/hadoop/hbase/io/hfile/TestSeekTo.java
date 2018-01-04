@@ -18,44 +18,42 @@
  */
 package org.apache.hadoop.hbase.io.hfile;
 
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
+
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Iterator;
 import java.util.List;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertTrue;
-
-import org.junit.Before;
-import org.junit.Test;
-
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hbase.ArrayBackedTag;
+import org.apache.hadoop.hbase.ByteBufferKeyValue;
 import org.apache.hadoop.hbase.Cell;
-import org.apache.hadoop.hbase.CellComparator;
-import org.apache.hadoop.hbase.CellUtil;
+import org.apache.hadoop.hbase.CellComparatorImpl;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.KeyValue;
-import org.apache.hadoop.hbase.OffheapKeyValue;
+import org.apache.hadoop.hbase.PrivateCellUtil;
 import org.apache.hadoop.hbase.Tag;
-import org.apache.hadoop.hbase.TagUtil;
-import org.apache.hadoop.hbase.ArrayBackedTag;
 import org.apache.hadoop.hbase.io.encoding.DataBlockEncoding;
 import org.apache.hadoop.hbase.testclassification.IOTests;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.junit.Before;
+import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 import org.junit.runners.Parameterized.Parameters;
 
 /**
- * Test {@link HFileScanner#seekTo(byte[])} and its variants.
+ * Test {@link HFileScanner#seekTo(Cell)} and its variants.
  */
 @Category({IOTests.class, SmallTests.class})
 @RunWith(Parameterized.class)
@@ -65,7 +63,7 @@ public class TestSeekTo {
   private final DataBlockEncoding encoding;
   @Parameters
   public static Collection<Object[]> parameters() {
-    List<Object[]> paramList = new ArrayList<Object[]>();
+    List<Object[]> paramList = new ArrayList<>();
     for (DataBlockEncoding encoding : DataBlockEncoding.values()) {
       paramList.add(new Object[] { encoding });
     }
@@ -122,7 +120,7 @@ public class TestSeekTo {
     Configuration conf = TEST_UTIL.getConfiguration();
     HFile.Writer writer = HFile.getWriterFactoryNoCache(conf).withOutputStream(fout)
         .withFileContext(context)
-        .withComparator(CellComparator.COMPARATOR).create();
+        .withComparator(CellComparatorImpl.COMPARATOR).create();
     // 4 bytes * 3 * 2 for each key/value +
     // 3 for keys, 15 for values = 42 (woot)
     writer.append(toKV("c", tagUsage));
@@ -147,7 +145,7 @@ public class TestSeekTo {
     Path p = makeNewFile(tagUsage);
     FileSystem fs = TEST_UTIL.getTestFileSystem();
     Configuration conf = TEST_UTIL.getConfiguration();
-    HFile.Reader reader = HFile.createReader(fs, p, new CacheConfig(conf), conf);
+    HFile.Reader reader = HFile.createReader(fs, p, new CacheConfig(conf), true, conf);
     reader.loadFileInfo();
     HFileScanner scanner = reader.getScanner(false, true);
     assertFalse(scanner.seekBefore(toKV("a", tagUsage)));
@@ -173,10 +171,10 @@ public class TestSeekTo {
     assertEquals("i", toRowStr(scanner.getCell()));
     Cell cell = scanner.getCell();
     if (tagUsage != TagUsage.NO_TAG && cell.getTagsLength() > 0) {
-      Iterator<Tag> tagsIterator = CellUtil.tagsIterator(cell);
+      Iterator<Tag> tagsIterator = PrivateCellUtil.tagsIterator(cell);
       while (tagsIterator.hasNext()) {
         Tag next = tagsIterator.next();
-        assertEquals("myTag1", Bytes.toString(TagUtil.cloneValue(next)));
+        assertEquals("myTag1", Bytes.toString(Tag.cloneValue(next)));
       }
     }
     assertTrue(scanner.seekBefore(toKV("k", tagUsage)));
@@ -206,7 +204,7 @@ public class TestSeekTo {
     Path p = makeNewFile(tagUsage);
     FileSystem fs = TEST_UTIL.getTestFileSystem();
     Configuration conf = TEST_UTIL.getConfiguration();
-    HFile.Reader reader = HFile.createReader(fs, p, new CacheConfig(conf), conf);
+    HFile.Reader reader = HFile.createReader(fs, p, new CacheConfig(conf), true, conf);
     reader.loadFileInfo();
     HFileScanner scanner = reader.getScanner(false, true);
     assertFalse(scanner.seekBefore(toKV("a", tagUsage)));
@@ -215,7 +213,7 @@ public class TestSeekTo {
 
     // seekBefore d, so the scanner points to c
     assertTrue(scanner.seekBefore(toKV("d", tagUsage)));
-    assertFalse(scanner.getCell() instanceof OffheapKeyValue);
+    assertFalse(scanner.getCell() instanceof ByteBufferKeyValue);
     assertEquals("c", toRowStr(scanner.getCell()));
     // reseekTo e and g
     assertEquals(0, scanner.reseekTo(toKV("c", tagUsage)));
@@ -300,7 +298,7 @@ public class TestSeekTo {
     Path p = makeNewFile(tagUsage);
     FileSystem fs = TEST_UTIL.getTestFileSystem();
     Configuration conf = TEST_UTIL.getConfiguration();
-    HFile.Reader reader = HFile.createReader(fs, p, new CacheConfig(conf), conf);
+    HFile.Reader reader = HFile.createReader(fs, p, new CacheConfig(conf), true, conf);
     reader.loadFileInfo();
     assertEquals(2, reader.getDataBlockIndexReader().getRootBlockCount());
     HFileScanner scanner = reader.getScanner(false, true);
@@ -316,12 +314,7 @@ public class TestSeekTo {
     assertEquals("i", toRowStr(scanner.getCell()));
 
     assertEquals(1, scanner.seekTo(toKV("l", tagUsage)));
-    if (encoding == DataBlockEncoding.PREFIX_TREE) {
-      // TODO : Fix this
-      assertEquals(null, scanner.getCell());
-    } else {
-      assertEquals("k", toRowStr(scanner.getCell()));
-    }
+    assertEquals("k", toRowStr(scanner.getCell()));
 
     reader.close();
     deleteTestDir(fs);
@@ -338,7 +331,7 @@ public class TestSeekTo {
     Path p = makeNewFile(tagUsage);
     FileSystem fs = TEST_UTIL.getTestFileSystem();
     Configuration conf = TEST_UTIL.getConfiguration();
-    HFile.Reader reader = HFile.createReader(fs, p, new CacheConfig(conf), conf);
+    HFile.Reader reader = HFile.createReader(fs, p, new CacheConfig(conf), true, conf);
     reader.loadFileInfo();
     HFileBlockIndex.BlockIndexReader blockIndexReader =
       reader.getDataBlockIndexReader();

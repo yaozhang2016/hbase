@@ -21,13 +21,12 @@ package org.apache.hadoop.hbase.rest;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.StringWriter;
-import java.util.ArrayList;
 import java.util.Collection;
-import java.util.List;
 
 import javax.xml.bind.JAXBContext;
 import javax.xml.bind.JAXBException;
 
+import org.apache.hadoop.hbase.HBaseCommonTestingUtility;
 import org.apache.http.Header;
 import org.apache.http.message.BasicHeader;
 
@@ -47,16 +46,21 @@ import org.apache.hadoop.hbase.util.Bytes;
 
 import static org.junit.Assert.*;
 
+import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Category({RestTests.class, MediumTests.class})
 @RunWith(Parameterized.class)
 public class TestSchemaResource {
+  private static final Logger LOG = LoggerFactory.getLogger(TestSchemaResource.class);
+
   private static String TABLE1 = "TestSchemaResource1";
   private static String TABLE2 = "TestSchemaResource2";
 
@@ -72,11 +76,8 @@ public class TestSchemaResource {
   private static boolean csrfEnabled = true;
 
   @Parameterized.Parameters
-  public static Collection<Object[]> data() {
-    List<Object[]> params = new ArrayList<Object[]>();
-    params.add(new Object[] {Boolean.TRUE});
-    params.add(new Object[] {Boolean.FALSE});
-    return params;
+  public static Collection<Object[]> parameters() {
+    return HBaseCommonTestingUtility.BOOLEAN_PARAMETERIZED;
   }
 
   public TestSchemaResource(Boolean csrf) {
@@ -104,6 +105,21 @@ public class TestSchemaResource {
     TEST_UTIL.shutdownMiniCluster();
   }
 
+  @After
+  public void tearDown() throws Exception {
+    Admin admin = TEST_UTIL.getAdmin();
+
+    for (String table : new String[] {TABLE1, TABLE2}) {
+      TableName t = TableName.valueOf(table);
+      if (admin.tableExists(t)) {
+        admin.disableTable(t);
+        admin.deleteTable(t);
+      }
+    }
+
+    conf.set("hbase.rest.readonly", "false");
+  }
+
   private static byte[] toXML(TableSchemaModel model) throws JAXBException {
     StringWriter writer = new StringWriter();
     context.createMarshaller().marshal(model, writer);
@@ -122,8 +138,8 @@ public class TestSchemaResource {
     TableSchemaModel model;
     Response response;
 
-    Admin admin = TEST_UTIL.getHBaseAdmin();
-    assertFalse(admin.tableExists(TableName.valueOf(TABLE1)));
+    Admin admin = TEST_UTIL.getAdmin();
+    assertFalse("Table " + TABLE1 + " should not exist", admin.tableExists(TableName.valueOf(TABLE1)));
 
     // create the table
     model = testTableSchemaModel.buildTestModel(TABLE1);
@@ -131,27 +147,28 @@ public class TestSchemaResource {
     if (csrfEnabled) {
       // test put operation is forbidden without custom header
       response = client.put(schemaPath, Constants.MIMETYPE_XML, toXML(model));
-      assertEquals(response.getCode(), 400);
+      assertEquals(400, response.getCode());
     }
 
     response = client.put(schemaPath, Constants.MIMETYPE_XML, toXML(model), extraHdr);
-    assertEquals(response.getCode(), 201);
+    assertEquals("put failed with csrf " + (csrfEnabled ? "enabled" : "disabled"),
+       201, response.getCode());
 
     // recall the same put operation but in read-only mode
     conf.set("hbase.rest.readonly", "true");
     response = client.put(schemaPath, Constants.MIMETYPE_XML, toXML(model), extraHdr);
-    assertEquals(response.getCode(), 403);
+    assertEquals(403, response.getCode());
 
     // retrieve the schema and validate it
     response = client.get(schemaPath, Constants.MIMETYPE_XML);
-    assertEquals(response.getCode(), 200);
+    assertEquals(200, response.getCode());
     assertEquals(Constants.MIMETYPE_XML, response.getHeader("content-type"));
     model = fromXML(response.getBody());
     testTableSchemaModel.checkModel(model, TABLE1);
 
     // with json retrieve the schema and validate it
     response = client.get(schemaPath, Constants.MIMETYPE_JSON);
-    assertEquals(response.getCode(), 200);
+    assertEquals(200, response.getCode());
     assertEquals(Constants.MIMETYPE_JSON, response.getHeader("content-type"));
     model = testTableSchemaModel.fromJSON(Bytes.toString(response.getBody()));
     testTableSchemaModel.checkModel(model, TABLE1);
@@ -164,14 +181,14 @@ public class TestSchemaResource {
 
     // test delete schema operation is forbidden in read-only mode
     response = client.delete(schemaPath, extraHdr);
-    assertEquals(response.getCode(), 403);
+    assertEquals(403, response.getCode());
 
     // return read-only setting back to default
     conf.set("hbase.rest.readonly", "false");
 
     // delete the table and make sure HBase concurs
     response = client.delete(schemaPath, extraHdr);
-    assertEquals(response.getCode(), 200);
+    assertEquals(200, response.getCode());
     assertFalse(admin.tableExists(TableName.valueOf(TABLE1)));
   }
 
@@ -181,7 +198,7 @@ public class TestSchemaResource {
     TableSchemaModel model;
     Response response;
 
-    Admin admin = TEST_UTIL.getHBaseAdmin();
+    Admin admin = TEST_UTIL.getAdmin();
     assertFalse(admin.tableExists(TableName.valueOf(TABLE2)));
 
     // create the table
@@ -191,11 +208,12 @@ public class TestSchemaResource {
     if (csrfEnabled) {
       // test put operation is forbidden without custom header
       response = client.put(schemaPath, Constants.MIMETYPE_PROTOBUF, model.createProtobufOutput());
-      assertEquals(response.getCode(), 400);
+      assertEquals(400, response.getCode());
     }
     response = client.put(schemaPath, Constants.MIMETYPE_PROTOBUF,
       model.createProtobufOutput(), extraHdr);
-    assertEquals(response.getCode(), 201);
+    assertEquals("put failed with csrf " + (csrfEnabled ? "enabled" : "disabled"),
+        201, response.getCode());
 
     // recall the same put operation but in read-only mode
     conf.set("hbase.rest.readonly", "true");

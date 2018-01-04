@@ -20,16 +20,16 @@ package org.apache.hadoop.hbase.metrics;
 
 
 
-import com.google.common.cache.CacheBuilder;
-import com.google.common.cache.CacheLoader;
-import com.google.common.cache.LoadingCache;
+import org.apache.hbase.thirdparty.com.google.common.cache.CacheBuilder;
+import org.apache.hbase.thirdparty.com.google.common.cache.CacheLoader;
+import org.apache.hbase.thirdparty.com.google.common.cache.LoadingCache;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
-import org.apache.hadoop.classification.InterfaceAudience;
-import org.apache.hadoop.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceStability;
 import org.apache.hadoop.metrics2.MetricsInfo;
 import org.apache.hadoop.metrics2.MetricsTag;
 
@@ -45,14 +45,14 @@ public final class Interns {
       CacheBuilder.newBuilder().expireAfterAccess(1, TimeUnit.DAYS)
           .build(new CacheLoader<String, ConcurrentHashMap<String, MetricsInfo>>() {
             public ConcurrentHashMap<String, MetricsInfo> load(String key) {
-              return new ConcurrentHashMap<String, MetricsInfo>();
+              return new ConcurrentHashMap<>();
             }
           });
   private static LoadingCache<MetricsInfo, ConcurrentHashMap<String, MetricsTag>> tagCache =
       CacheBuilder.newBuilder().expireAfterAccess(1, TimeUnit.DAYS)
           .build(new CacheLoader<MetricsInfo, ConcurrentHashMap<String, MetricsTag>>() {
             public ConcurrentHashMap<String, MetricsTag> load(MetricsInfo key) {
-              return new ConcurrentHashMap<String, MetricsTag>();
+              return new ConcurrentHashMap<>();
             }
           });
 

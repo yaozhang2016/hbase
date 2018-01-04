@@ -21,7 +21,7 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.hadoop.hbase.Cell;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * A MemStoreLAB implementation which wraps N MemStoreLABs. Its main duty is in proper managing the
@@ -43,6 +43,39 @@ public class ImmutableMemStoreLAB implements MemStoreLAB {
   @Override
   public Cell copyCellInto(Cell cell) {
     throw new IllegalStateException("This is an Immutable MemStoreLAB.");
+  }
+
+  @Override
+  public Cell forceCopyOfBigCellInto(Cell cell) {
+    throw new IllegalStateException("This is an Immutable MemStoreLAB.");
+  }
+
+  /* Creating chunk to be used as index chunk in CellChunkMap, part of the chunks array.
+  ** Returning a new chunk, without replacing current chunk,
+  ** meaning MSLABImpl does not make the returned chunk as CurChunk.
+  ** The space on this chunk will be allocated externally.
+  ** The interface is only for external callers
+  */
+  @Override
+  public Chunk getNewExternalChunk() {
+    MemStoreLAB mslab = this.mslabs.get(0);
+    return mslab.getNewExternalChunk();
+  }
+
+  /* Creating chunk to be used as data chunk in CellChunkMap.
+  ** This chunk is bigger the normal constant chunk size, and thus called JumboChunk it is used for
+  ** jumbo cells (which size is bigger than normal chunks).
+  ** Jumbo Chunks are needed only for CCM and thus are created only in
+  ** CompactingMemStore.IndexType.CHUNK_MAP type.
+  ** Returning a new chunk, without replacing current chunk,
+  ** meaning MSLABImpl does not make the returned chunk as CurChunk.
+  ** The space on this chunk will be allocated externally.
+  ** The interface is only for external callers
+  */
+  @Override
+  public Chunk getNewExternalJumboChunk(int size) {
+    MemStoreLAB mslab = this.mslabs.get(0);
+    return mslab.getNewExternalJumboChunk(size);
   }
 
   @Override

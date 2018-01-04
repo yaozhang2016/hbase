@@ -21,8 +21,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ErrorHandlingProtos.ForeignExceptionMessage;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ErrorHandlingProtos.GenericExceptionMessage;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ErrorHandlingProtos.StackTraceElementMessage;
@@ -41,7 +40,6 @@ import org.apache.hadoop.hbase.shaded.protobuf.generated.ErrorHandlingProtos.Sta
  * ProxyThrowables are generated are by this class's {@link #deserialize(byte[])} method.
  */
 @InterfaceAudience.Public
-@InterfaceStability.Evolving
 @SuppressWarnings("serial")
 public class ForeignException extends IOException {
 
@@ -107,8 +105,7 @@ public class ForeignException extends IOException {
     // if there is no stack trace, ignore it and just return the message
     if (trace == null) return null;
     // build the stack trace for the message
-    List<StackTraceElementMessage> pbTrace =
-        new ArrayList<StackTraceElementMessage>(trace.length);
+    List<StackTraceElementMessage> pbTrace = new ArrayList<>(trace.length);
     for (StackTraceElement elem : trace) {
       StackTraceElementMessage.Builder stackBuilder = StackTraceElementMessage.newBuilder();
       stackBuilder.setDeclaringClass(elem.getClassName());
@@ -160,7 +157,7 @@ public class ForeignException extends IOException {
    * @param bytes
    * @return the ForeignExcpetion instance
    * @throws InvalidProtocolBufferException if there was deserialization problem this is thrown.
-   * @throws org.apache.hadoop.hbase.shaded.com.google.protobuf.InvalidProtocolBufferException 
+   * @throws org.apache.hbase.thirdparty.com.google.protobuf.InvalidProtocolBufferException 
    */
   public static ForeignException deserialize(byte[] bytes)
   throws IOException {
@@ -181,7 +178,7 @@ public class ForeignException extends IOException {
    *         the sender).
    */
   private static StackTraceElement[] toStackTrace(List<StackTraceElementMessage> traceList) {
-    if (traceList == null || traceList.size() == 0) {
+    if (traceList == null || traceList.isEmpty()) {
       return new StackTraceElement[0]; // empty array
     }
     StackTraceElement[] trace = new StackTraceElement[traceList.size()];

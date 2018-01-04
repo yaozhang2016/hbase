@@ -29,11 +29,10 @@ import java.util.NavigableSet;
 import java.util.TreeMap;
 import java.util.TreeSet;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.hbase.client.metrics.ScanMetrics;
 import org.apache.hadoop.hbase.filter.Filter;
 import org.apache.hadoop.hbase.filter.IncompatibleFilterException;
@@ -46,48 +45,56 @@ import org.apache.hadoop.hbase.util.Bytes;
 /**
  * Used to perform Scan operations.
  * <p>
- * All operations are identical to {@link Get} with the exception of
- * instantiation.  Rather than specifying a single row, an optional startRow
- * and stopRow may be defined.  If rows are not specified, the Scanner will
- * iterate over all rows.
+ * All operations are identical to {@link Get} with the exception of instantiation. Rather than
+ * specifying a single row, an optional startRow and stopRow may be defined. If rows are not
+ * specified, the Scanner will iterate over all rows.
  * <p>
  * To get all columns from all rows of a Table, create an instance with no constraints; use the
- * {@link #Scan()} constructor. To constrain the scan to specific column families,
- * call {@link #addFamily(byte[]) addFamily} for each family to retrieve on your Scan instance.
+ * {@link #Scan()} constructor. To constrain the scan to specific column families, call
+ * {@link #addFamily(byte[]) addFamily} for each family to retrieve on your Scan instance.
  * <p>
- * To get specific columns, call {@link #addColumn(byte[], byte[]) addColumn}
- * for each column to retrieve.
+ * To get specific columns, call {@link #addColumn(byte[], byte[]) addColumn} for each column to
+ * retrieve.
  * <p>
- * To only retrieve columns within a specific range of version timestamps,
- * call {@link #setTimeRange(long, long) setTimeRange}.
+ * To only retrieve columns within a specific range of version timestamps, call
+ * {@link #setTimeRange(long, long) setTimeRange}.
  * <p>
- * To only retrieve columns with a specific timestamp, call
- * {@link #setTimeStamp(long) setTimestamp}.
+ * To only retrieve columns with a specific timestamp, call {@link #setTimeStamp(long) setTimestamp}
+ * .
  * <p>
- * To limit the number of versions of each column to be returned, call
- * {@link #setMaxVersions(int) setMaxVersions}.
+ * To limit the number of versions of each column to be returned, call {@link #setMaxVersions(int)
+ * setMaxVersions}.
  * <p>
- * To limit the maximum number of values returned for each call to next(),
- * call {@link #setBatch(int) setBatch}.
+ * To limit the maximum number of values returned for each call to next(), call
+ * {@link #setBatch(int) setBatch}.
  * <p>
  * To add a filter, call {@link #setFilter(org.apache.hadoop.hbase.filter.Filter) setFilter}.
  * <p>
- * Expert: To explicitly disable server-side block caching for this scan,
- * execute {@link #setCacheBlocks(boolean)}.
- * <p><em>Note:</em> Usage alters Scan instances. Internally, attributes are updated as the Scan
- * runs and if enabled, metrics accumulate in the Scan instance. Be aware this is the case when
- * you go to clone a Scan instance or if you go to reuse a created Scan instance; safer is create
- * a Scan instance per usage.
+ * For small scan, it is deprecated in 2.0.0. Now we have a {@link #setLimit(int)} method in Scan
+ * object which is used to tell RS how many rows we want. If the rows return reaches the limit, the
+ * RS will close the RegionScanner automatically. And we will also fetch data when openScanner in
+ * the new implementation, this means we can also finish a scan operation in one rpc call. And we
+ * have also introduced a {@link #setReadType(ReadType)} method. You can use this method to tell RS
+ * to use pread explicitly.
+ * <p>
+ * Expert: To explicitly disable server-side block caching for this scan, execute
+ * {@link #setCacheBlocks(boolean)}.
+ * <p>
+ * <em>Note:</em> Usage alters Scan instances. Internally, attributes are updated as the Scan runs
+ * and if enabled, metrics accumulate in the Scan instance. Be aware this is the case when you go to
+ * clone a Scan instance or if you go to reuse a created Scan instance; safer is create a Scan
+ * instance per usage.
  */
 @InterfaceAudience.Public
-@InterfaceStability.Stable
 public class Scan extends Query {
-  private static final Log LOG = LogFactory.getLog(Scan.class);
+  private static final Logger LOG = LoggerFactory.getLogger(Scan.class);
 
   private static final String RAW_ATTR = "_raw_";
 
-  private byte [] startRow = HConstants.EMPTY_START_ROW;
-  private byte [] stopRow  = HConstants.EMPTY_END_ROW;
+  private byte[] startRow = HConstants.EMPTY_START_ROW;
+  private boolean includeStartRow = true;
+  private byte[] stopRow  = HConstants.EMPTY_END_ROW;
+  private boolean includeStopRow = false;
   private int maxVersions = 1;
   private int batch = -1;
 
@@ -106,7 +113,6 @@ public class Scan extends Query {
 
   private int storeLimit = -1;
   private int storeOffset = 0;
-  private boolean getScan;
 
   /**
    * @deprecated since 1.0.0. Use {@link #setScanMetricsEnabled(boolean)}
@@ -154,32 +160,46 @@ public class Scan extends Query {
    */
   public static final boolean DEFAULT_HBASE_CLIENT_SCANNER_ASYNC_PREFETCH = false;
 
-   /**
-   * Set it true for small scan to get better performance
-   *
-   * Small scan should use pread and big scan can use seek + read
-   *
-   * seek + read is fast but can cause two problem (1) resource contention (2)
-   * cause too much network io
-   *
-   * [89-fb] Using pread for non-compaction read request
-   * https://issues.apache.org/jira/browse/HBASE-7266
-   *
-   * On the other hand, if setting it true, we would do
-   * openScanner,next,closeScanner in one RPC call. It means the better
-   * performance for small scan. [HBASE-9488].
-   *
-   * Generally, if the scan range is within one data block(64KB), it could be
-   * considered as a small scan.
+  /**
+   * Set it true for small scan to get better performance Small scan should use pread and big scan
+   * can use seek + read seek + read is fast but can cause two problem (1) resource contention (2)
+   * cause too much network io [89-fb] Using pread for non-compaction read request
+   * https://issues.apache.org/jira/browse/HBASE-7266 On the other hand, if setting it true, we
+   * would do openScanner,next,closeScanner in one RPC call. It means the better performance for
+   * small scan. [HBASE-9488]. Generally, if the scan range is within one data block(64KB), it could
+   * be considered as a small scan.
    */
   private boolean small = false;
+
+  /**
+   * The mvcc read point to use when open a scanner. Remember to clear it after switching regions as
+   * the mvcc is only valid within region scope.
+   */
+  private long mvccReadPoint = -1L;
+
+  /**
+   * The number of rows we want for this scan. We will terminate the scan if the number of return
+   * rows reaches this value.
+   */
+  private int limit = -1;
+
+  /**
+   * Control whether to use pread at server side.
+   */
+  private ReadType readType = ReadType.DEFAULT;
+
+  private boolean needCursorResult = false;
 
   /**
    * Create a Scan operation across all rows.
    */
   public Scan() {}
 
-  public Scan(byte [] startRow, Filter filter) {
+  /**
+   * @deprecated use {@code new Scan().withStartRow(startRow).setFilter(filter)} instead.
+   */
+  @Deprecated
+  public Scan(byte[] startRow, Filter filter) {
     this(startRow);
     this.filter = filter;
   }
@@ -187,24 +207,26 @@ public class Scan extends Query {
   /**
    * Create a Scan operation starting at the specified row.
    * <p>
-   * If the specified row does not exist, the Scanner will start from the
-   * next closest row after the specified row.
+   * If the specified row does not exist, the Scanner will start from the next closest row after the
+   * specified row.
    * @param startRow row to start scanner at or after
+   * @deprecated use {@code new Scan().withStartRow(startRow)} instead.
    */
-  public Scan(byte [] startRow) {
-    this.startRow = startRow;
+  @Deprecated
+  public Scan(byte[] startRow) {
+    setStartRow(startRow);
   }
 
   /**
    * Create a Scan operation for the range of rows specified.
    * @param startRow row to start scanner at or after (inclusive)
    * @param stopRow row to stop scanner before (exclusive)
+   * @deprecated use {@code new Scan().withStartRow(startRow).withStopRow(stopRow)} instead.
    */
-  public Scan(byte [] startRow, byte [] stopRow) {
-    this.startRow = startRow;
-    this.stopRow = stopRow;
-    //if the startRow and stopRow both are empty, it is not a Get
-    this.getScan = isStartRowAndEqualsStopRow();
+  @Deprecated
+  public Scan(byte[] startRow, byte[] stopRow) {
+    setStartRow(startRow);
+    setStopRow(stopRow);
   }
 
   /**
@@ -215,7 +237,9 @@ public class Scan extends Query {
    */
   public Scan(Scan scan) throws IOException {
     startRow = scan.getStartRow();
+    includeStartRow = scan.includeStartRow();
     stopRow  = scan.getStopRow();
+    includeStopRow = scan.includeStopRow();
     maxVersions = scan.getMaxVersions();
     batch = scan.getBatch();
     storeLimit = scan.getMaxResultsPerColumnFamily();
@@ -223,7 +247,6 @@ public class Scan extends Query {
     caching = scan.getCaching();
     maxResultSize = scan.getMaxResultSize();
     cacheBlocks = scan.getCacheBlocks();
-    getScan = scan.isGetScan();
     filter = scan.getFilter(); // clone?
     loadColumnFamiliesOnDemand = scan.getLoadColumnFamiliesOnDemandValue();
     consistency = scan.getConsistency();
@@ -232,8 +255,7 @@ public class Scan extends Query {
     asyncPrefetch = scan.isAsyncPrefetch();
     small = scan.isSmall();
     allowPartialResults = scan.getAllowPartialResults();
-    TimeRange ctr = scan.getTimeRange();
-    tr = new TimeRange(ctr.getMin(), ctr.getMax());
+    tr = scan.getTimeRange(); // TimeRange is immutable
     Map<byte[], NavigableSet<byte[]>> fams = scan.getFamilyMap();
     for (Map.Entry<byte[],NavigableSet<byte[]>> entry : fams.entrySet()) {
       byte [] fam = entry.getKey();
@@ -253,6 +275,10 @@ public class Scan extends Query {
       TimeRange tr = entry.getValue();
       setColumnFamilyTimeRange(entry.getKey(), tr.getMin(), tr.getMax());
     }
+    this.mvccReadPoint = scan.getMvccReadPoint();
+    this.limit = scan.getLimit();
+    this.needCursorResult = scan.isNeedCursorResult();
+    setPriority(scan.getPriority());
   }
 
   /**
@@ -261,7 +287,9 @@ public class Scan extends Query {
    */
   public Scan(Get get) {
     this.startRow = get.getRow();
+    this.includeStartRow = true;
     this.stopRow = get.getRow();
+    this.includeStopRow = true;
     this.filter = get.getFilter();
     this.cacheBlocks = get.getCacheBlocks();
     this.maxVersions = get.getMaxVersions();
@@ -269,7 +297,6 @@ public class Scan extends Query {
     this.storeOffset = get.getRowOffsetPerColumnFamily();
     this.tr = get.getTimeRange();
     this.familyMap = get.getFamilyMap();
-    this.getScan = true;
     this.asyncPrefetch = false;
     this.consistency = get.getConsistency();
     this.setIsolationLevel(get.getIsolationLevel());
@@ -281,16 +308,15 @@ public class Scan extends Query {
       TimeRange tr = entry.getValue();
       setColumnFamilyTimeRange(entry.getKey(), tr.getMin(), tr.getMax());
     }
+    this.mvccReadPoint = -1L;
+    setPriority(get.getPriority());
   }
 
   public boolean isGetScan() {
-    return this.getScan || isStartRowAndEqualsStopRow();
+    return includeStartRow && includeStopRow
+        && ClientUtil.areScanStartRowAndStopRowEqual(this.startRow, this.stopRow);
   }
 
-  private boolean isStartRowAndEqualsStopRow() {
-    return this.startRow != null && this.startRow.length > 0 &&
-        Bytes.equals(this.startRow, this.stopRow);
-  }
   /**
    * Get all columns from the specified family.
    * <p>
@@ -315,13 +341,13 @@ public class Scan extends Query {
   public Scan addColumn(byte [] family, byte [] qualifier) {
     NavigableSet<byte []> set = familyMap.get(family);
     if(set == null) {
-      set = new TreeSet<byte []>(Bytes.BYTES_COMPARATOR);
+      set = new TreeSet<>(Bytes.BYTES_COMPARATOR);
+      familyMap.put(family, set);
     }
     if (qualifier == null) {
       qualifier = HConstants.EMPTY_BYTE_ARRAY;
     }
     set.add(qualifier);
-    familyMap.put(family, set);
     return this;
   }
 
@@ -370,45 +396,120 @@ public class Scan extends Query {
   /**
    * Set the start row of the scan.
    * <p>
-   * If the specified row does not exist, the Scanner will start from the
-   * next closest row after the specified row.
+   * If the specified row does not exist, the Scanner will start from the next closest row after the
+   * specified row.
    * @param startRow row to start scanner at or after
    * @return this
-   * @throws IllegalArgumentException if startRow does not meet criteria
-   * for a row key (when length exceeds {@link HConstants#MAX_ROW_LENGTH})
+   * @throws IllegalArgumentException if startRow does not meet criteria for a row key (when length
+   *           exceeds {@link HConstants#MAX_ROW_LENGTH})
+   * @deprecated use {@link #withStartRow(byte[])} instead. This method may change the inclusive of
+   *             the stop row to keep compatible with the old behavior.
    */
-  public Scan setStartRow(byte [] startRow) {
+  @Deprecated
+  public Scan setStartRow(byte[] startRow) {
+    withStartRow(startRow);
+    if (ClientUtil.areScanStartRowAndStopRowEqual(this.startRow, this.stopRow)) {
+      // for keeping the old behavior that a scan with the same start and stop row is a get scan.
+      this.includeStopRow = true;
+    }
+    return this;
+  }
+
+  /**
+   * Set the start row of the scan.
+   * <p>
+   * If the specified row does not exist, the Scanner will start from the next closest row after the
+   * specified row.
+   * @param startRow row to start scanner at or after
+   * @return this
+   * @throws IllegalArgumentException if startRow does not meet criteria for a row key (when length
+   *           exceeds {@link HConstants#MAX_ROW_LENGTH})
+   */
+  public Scan withStartRow(byte[] startRow) {
+    return withStartRow(startRow, true);
+  }
+
+  /**
+   * Set the start row of the scan.
+   * <p>
+   * If the specified row does not exist, or the {@code inclusive} is {@code false}, the Scanner
+   * will start from the next closest row after the specified row.
+   * @param startRow row to start scanner at or after
+   * @param inclusive whether we should include the start row when scan
+   * @return this
+   * @throws IllegalArgumentException if startRow does not meet criteria for a row key (when length
+   *           exceeds {@link HConstants#MAX_ROW_LENGTH})
+   */
+  public Scan withStartRow(byte[] startRow, boolean inclusive) {
     if (Bytes.len(startRow) > HConstants.MAX_ROW_LENGTH) {
-      throw new IllegalArgumentException(
-        "startRow's length must be less than or equal to " +
-        HConstants.MAX_ROW_LENGTH + " to meet the criteria" +
-        " for a row key.");
+      throw new IllegalArgumentException("startRow's length must be less than or equal to "
+          + HConstants.MAX_ROW_LENGTH + " to meet the criteria" + " for a row key.");
     }
     this.startRow = startRow;
+    this.includeStartRow = inclusive;
     return this;
   }
 
   /**
    * Set the stop row of the scan.
-   * @param stopRow row to end at (exclusive)
    * <p>
-   * The scan will include rows that are lexicographically less than
-   * the provided stopRow.
-   * <p><b>Note:</b> When doing a filter for a rowKey <u>Prefix</u>
-   * use {@link #setRowPrefixFilter(byte[])}.
-   * The 'trailing 0' will not yield the desired result.</p>
+   * The scan will include rows that are lexicographically less than the provided stopRow.
+   * <p>
+   * <b>Note:</b> When doing a filter for a rowKey <u>Prefix</u> use
+   * {@link #setRowPrefixFilter(byte[])}. The 'trailing 0' will not yield the desired result.
+   * </p>
+   * @param stopRow row to end at (exclusive)
    * @return this
-   * @throws IllegalArgumentException if stopRow does not meet criteria
-   * for a row key (when length exceeds {@link HConstants#MAX_ROW_LENGTH})
+   * @throws IllegalArgumentException if stopRow does not meet criteria for a row key (when length
+   *           exceeds {@link HConstants#MAX_ROW_LENGTH})
+   * @deprecated use {@link #withStartRow(byte[])} instead. This method may change the inclusive of
+   *             the stop row to keep compatible with the old behavior.
    */
-  public Scan setStopRow(byte [] stopRow) {
+  @Deprecated
+  public Scan setStopRow(byte[] stopRow) {
+    withStopRow(stopRow);
+    if (ClientUtil.areScanStartRowAndStopRowEqual(this.startRow, this.stopRow)) {
+      // for keeping the old behavior that a scan with the same start and stop row is a get scan.
+      this.includeStopRow = true;
+    }
+    return this;
+  }
+
+  /**
+   * Set the stop row of the scan.
+   * <p>
+   * The scan will include rows that are lexicographically less than the provided stopRow.
+   * <p>
+   * <b>Note:</b> When doing a filter for a rowKey <u>Prefix</u> use
+   * {@link #setRowPrefixFilter(byte[])}. The 'trailing 0' will not yield the desired result.
+   * </p>
+   * @param stopRow row to end at (exclusive)
+   * @return this
+   * @throws IllegalArgumentException if stopRow does not meet criteria for a row key (when length
+   *           exceeds {@link HConstants#MAX_ROW_LENGTH})
+   */
+  public Scan withStopRow(byte[] stopRow) {
+    return withStopRow(stopRow, false);
+  }
+
+  /**
+   * Set the stop row of the scan.
+   * <p>
+   * The scan will include rows that are lexicographically less than (or equal to if
+   * {@code inclusive} is {@code true}) the provided stopRow.
+   * @param stopRow row to end at
+   * @param inclusive whether we should include the stop row when scan
+   * @return this
+   * @throws IllegalArgumentException if stopRow does not meet criteria for a row key (when length
+   *           exceeds {@link HConstants#MAX_ROW_LENGTH})
+   */
+  public Scan withStopRow(byte[] stopRow, boolean inclusive) {
     if (Bytes.len(stopRow) > HConstants.MAX_ROW_LENGTH) {
-      throw new IllegalArgumentException(
-        "stopRow's length must be less than or equal to " +
-        HConstants.MAX_ROW_LENGTH + " to meet the criteria" +
-        " for a row key.");
+      throw new IllegalArgumentException("stopRow's length must be less than or equal to "
+          + HConstants.MAX_ROW_LENGTH + " to meet the criteria" + " for a row key.");
     }
     this.stopRow = stopRow;
+    this.includeStopRow = inclusive;
     return this;
   }
 
@@ -479,31 +580,53 @@ public class Scan extends Query {
   /**
    * Get all available versions.
    * @return this
+   * @deprecated It is easy to misunderstand with column family's max versions, so use
+   *             {@link #readAllVersions()} instead.
    */
+  @Deprecated
   public Scan setMaxVersions() {
-    this.maxVersions = Integer.MAX_VALUE;
-    return this;
+    return readAllVersions();
   }
 
   /**
    * Get up to the specified number of versions of each column.
    * @param maxVersions maximum versions for each column
    * @return this
+   * @deprecated It is easy to misunderstand with column family's max versions, so use
+   *             {@link #readVersions(int)} instead.
    */
+  @Deprecated
   public Scan setMaxVersions(int maxVersions) {
-    this.maxVersions = maxVersions;
+    return readVersions(maxVersions);
+  }
+
+  /**
+   * Get all available versions.
+   * @return this
+   */
+  public Scan readAllVersions() {
+    this.maxVersions = Integer.MAX_VALUE;
     return this;
   }
 
   /**
-   * Set the maximum number of values to return for each call to next().
-   * Callers should be aware that invoking this method with any value
-   * is equivalent to calling {@link #setAllowPartialResults(boolean)}
-   * with a value of {@code true}; partial results may be returned if
-   * this method is called. Use {@link #setMaxResultSize(long)}} to
-   * limit the size of a Scan's Results instead.
-   *
+   * Get up to the specified number of versions of each column.
+   * @param versions specified number of versions for each column
+   * @return this
+   */
+  public Scan readVersions(int versions) {
+    this.maxVersions = versions;
+    return this;
+  }
+
+  /**
+   * Set the maximum number of cells to return for each call to next(). Callers should be aware
+   * that this is not equivalent to calling {@link #setAllowPartialResults(boolean)}.
+   * If you don't allow partial results, the number of cells in each Result must equal to your
+   * batch setting unless it is the last Result for current row. So this method is helpful in paging
+   * queries. If you just want to prevent OOM at client, use setAllowPartialResults(true) is better.
    * @param batch the maximum number of values
+   * @see Result#mayHaveMoreCellsInRow()
    */
   public Scan setBatch(int batch) {
     if (this.hasFilter() && this.filter.hasFilterRow()) {
@@ -623,10 +746,24 @@ public class Scan extends Query {
   }
 
   /**
+   * @return if we should include start row when scan
+   */
+  public boolean includeStartRow() {
+    return includeStartRow;
+  }
+
+  /**
    * @return the stoprow
    */
-  public byte [] getStopRow() {
+  public byte[] getStopRow() {
     return this.stopRow;
+  }
+
+  /**
+   * @return if we should include stop row when scan
+   */
+  public boolean includeStopRow() {
+    return includeStopRow;
   }
 
   /**
@@ -734,11 +871,14 @@ public class Scan extends Query {
   }
 
   /**
-   * Setting whether the caller wants to see the partial results that may be returned from the
-   * server. By default this value is false and the complete results will be assembled client side
+   * Setting whether the caller wants to see the partial results when server returns
+   * less-than-expected cells. It is helpful while scanning a huge row to prevent OOM at client.
+   * By default this value is false and the complete results will be assembled client side
    * before being delivered to the caller.
    * @param allowPartialResults
    * @return this
+   * @see Result#mayHaveMoreCellsInRow()
+   * @see #setBatch(int)
    */
   public Scan setAllowPartialResults(final boolean allowPartialResults) {
     this.allowPartialResults = allowPartialResults;
@@ -754,6 +894,7 @@ public class Scan extends Query {
     return allowPartialResults;
   }
 
+  @Override
   public Scan setLoadColumnFamiliesOnDemand(boolean value) {
     return (Scan) super.setLoadColumnFamiliesOnDemand(value);
   }
@@ -766,9 +907,9 @@ public class Scan extends Query {
    */
   @Override
   public Map<String, Object> getFingerprint() {
-    Map<String, Object> map = new HashMap<String, Object>();
-    List<String> families = new ArrayList<String>();
-    if(this.familyMap.size() == 0) {
+    Map<String, Object> map = new HashMap<>();
+    List<String> families = new ArrayList<>();
+    if(this.familyMap.isEmpty()) {
       map.put("families", "ALL");
       return map;
     } else {
@@ -793,8 +934,7 @@ public class Scan extends Query {
     // start with the fingerpring map and build on top of it
     Map<String, Object> map = getFingerprint();
     // map from families to column list replaces fingerprint's list of families
-    Map<String, List<String>> familyColumns =
-      new HashMap<String, List<String>>();
+    Map<String, List<String>> familyColumns = new HashMap<>();
     map.put("families", familyColumns);
     // add scalar information first
     map.put("startRow", Bytes.toStringBinary(this.startRow));
@@ -805,7 +945,7 @@ public class Scan extends Query {
     map.put("maxResultSize", this.maxResultSize);
     map.put("cacheBlocks", this.cacheBlocks);
     map.put("loadColumnFamiliesOnDemand", this.loadColumnFamiliesOnDemand);
-    List<Long> timeRange = new ArrayList<Long>();
+    List<Long> timeRange = new ArrayList<>(2);
     timeRange.add(this.tr.getMin());
     timeRange.add(this.tr.getMax());
     map.put("timeRange", timeRange);
@@ -813,7 +953,7 @@ public class Scan extends Query {
     // iterate through affected families and list out up to maxCols columns
     for (Map.Entry<byte [], NavigableSet<byte[]>> entry :
       this.familyMap.entrySet()) {
-      List<String> columns = new ArrayList<String>();
+      List<String> columns = new ArrayList<>();
       familyColumns.put(Bytes.toStringBinary(entry.getKey()), columns);
       if(entry.getValue() == null) {
         colCount++;
@@ -866,37 +1006,36 @@ public class Scan extends Query {
     return attr == null ? false : Bytes.toBoolean(attr);
   }
 
-
-
   /**
    * Set whether this scan is a small scan
    * <p>
-   * Small scan should use pread and big scan can use seek + read
-   *
-   * seek + read is fast but can cause two problem (1) resource contention (2)
-   * cause too much network io
-   *
-   * [89-fb] Using pread for non-compaction read request
-   * https://issues.apache.org/jira/browse/HBASE-7266
-   *
-   * On the other hand, if setting it true, we would do
-   * openScanner,next,closeScanner in one RPC call. It means the better
-   * performance for small scan. [HBASE-9488].
-   *
-   * Generally, if the scan range is within one data block(64KB), it could be
-   * considered as a small scan.
-   *
+   * Small scan should use pread and big scan can use seek + read seek + read is fast but can cause
+   * two problem (1) resource contention (2) cause too much network io [89-fb] Using pread for
+   * non-compaction read request https://issues.apache.org/jira/browse/HBASE-7266 On the other hand,
+   * if setting it true, we would do openScanner,next,closeScanner in one RPC call. It means the
+   * better performance for small scan. [HBASE-9488]. Generally, if the scan range is within one
+   * data block(64KB), it could be considered as a small scan.
    * @param small
+   * @deprecated since 2.0.0. Use {@link #setLimit(int)} and {@link #setReadType(ReadType)} instead.
+   *             And for the one rpc optimization, now we will also fetch data when openScanner, and
+   *             if the number of rows reaches the limit then we will close the scanner
+   *             automatically which means we will fall back to one rpc.
+   * @see #setLimit(int)
+   * @see #setReadType(ReadType)
    */
+  @Deprecated
   public Scan setSmall(boolean small) {
     this.small = small;
+    this.readType = ReadType.PREAD;
     return this;
   }
 
   /**
    * Get whether this scan is a small scan
    * @return true if small scan
+   * @deprecated since 2.0.0. See the comment of {@link #setSmall(boolean)}
    */
+  @Deprecated
   public boolean isSmall() {
     return small;
   }
@@ -941,6 +1080,11 @@ public class Scan extends Query {
     return (Scan) super.setIsolationLevel(level);
   }
 
+  @Override
+  public Scan setPriority(int priority) {
+    return (Scan) super.setPriority(priority);
+  }
+
   /**
    * Enable collection of {@link ScanMetrics}. For advanced users.
    * @param enabled Set to true to enable accumulating scan metrics
@@ -961,9 +1105,13 @@ public class Scan extends Query {
   /**
    * @return Metrics on this Scan, if metrics were enabled.
    * @see #setScanMetricsEnabled(boolean)
+   * @deprecated Use {@link ResultScanner#getScanMetrics()} instead. And notice that, please do not
+   *             use this method and {@link ResultScanner#getScanMetrics()} together, the metrics
+   *             will be messed up.
    */
+  @Deprecated
   public ScanMetrics getScanMetrics() {
-    byte [] bytes = getAttribute(Scan.SCAN_ATTRIBUTES_METRICS_DATA);
+    byte[] bytes = getAttribute(Scan.SCAN_ATTRIBUTES_METRICS_DATA);
     if (bytes == null) return null;
     return ProtobufUtil.toScanMetrics(bytes);
   }
@@ -975,5 +1123,119 @@ public class Scan extends Query {
   public Scan setAsyncPrefetch(boolean asyncPrefetch) {
     this.asyncPrefetch = asyncPrefetch;
     return this;
+  }
+
+  /**
+   * @return the limit of rows for this scan
+   */
+  public int getLimit() {
+    return limit;
+  }
+
+  /**
+   * Set the limit of rows for this scan. We will terminate the scan if the number of returned rows
+   * reaches this value.
+   * <p>
+   * This condition will be tested at last, after all other conditions such as stopRow, filter, etc.
+   * @param limit the limit of rows for this scan
+   * @return this
+   */
+  public Scan setLimit(int limit) {
+    this.limit = limit;
+    return this;
+  }
+
+  /**
+   * Call this when you only want to get one row. It will set {@code limit} to {@code 1}, and also
+   * set {@code readType} to {@link ReadType#PREAD}.
+   * @return this
+   */
+  public Scan setOneRowLimit() {
+    return setLimit(1).setReadType(ReadType.PREAD);
+  }
+
+  @InterfaceAudience.Public
+  public enum ReadType {
+    DEFAULT, STREAM, PREAD
+  }
+
+  /**
+   * @return the read type for this scan
+   */
+  public ReadType getReadType() {
+    return readType;
+  }
+
+  /**
+   * Set the read type for this scan.
+   * <p>
+   * Notice that we may choose to use pread even if you specific {@link ReadType#STREAM} here. For
+   * example, we will always use pread if this is a get scan.
+   * @return this
+   */
+  public Scan setReadType(ReadType readType) {
+    this.readType = readType;
+    return this;
+  }
+
+  /**
+   * Get the mvcc read point used to open a scanner.
+   */
+  long getMvccReadPoint() {
+    return mvccReadPoint;
+  }
+
+  /**
+   * Set the mvcc read point used to open a scanner.
+   */
+  Scan setMvccReadPoint(long mvccReadPoint) {
+    this.mvccReadPoint = mvccReadPoint;
+    return this;
+  }
+
+  /**
+   * Set the mvcc read point to -1 which means do not use it.
+   */
+  Scan resetMvccReadPoint() {
+    return setMvccReadPoint(-1L);
+  }
+
+  /**
+   * When the server is slow or we scan a table with many deleted data or we use a sparse filter,
+   * the server will response heartbeat to prevent timeout. However the scanner will return a Result
+   * only when client can do it. So if there are many heartbeats, the blocking time on
+   * ResultScanner#next() may be very long, which is not friendly to online services.
+   *
+   * Set this to true then you can get a special Result whose #isCursor() returns true and is not
+   * contains any real data. It only tells you where the server has scanned. You can call next
+   * to continue scanning or open a new scanner with this row key as start row whenever you want.
+   *
+   * Users can get a cursor when and only when there is a response from the server but we can not
+   * return a Result to users, for example, this response is a heartbeat or there are partial cells
+   * but users do not allow partial result.
+   *
+   * Now the cursor is in row level which means the special Result will only contains a row key.
+   * {@link Result#isCursor()}
+   * {@link Result#getCursor()}
+   * {@link Cursor}
+   */
+  public Scan setNeedCursorResult(boolean needCursorResult) {
+    this.needCursorResult = needCursorResult;
+    return this;
+  }
+
+  public boolean isNeedCursorResult() {
+    return needCursorResult;
+  }
+
+  /**
+   * Create a new Scan with a cursor. It only set the position information like start row key.
+   * The others (like cfs, stop row, limit) should still be filled in by the user.
+   * {@link Result#isCursor()}
+   * {@link Result#getCursor()}
+   * {@link Cursor}
+   */
+  public static Scan createScanFromCursor(Cursor cursor) {
+    return new Scan().withStartRow(cursor.getRow());
   }
 }

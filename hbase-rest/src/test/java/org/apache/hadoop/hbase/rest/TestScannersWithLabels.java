@@ -21,7 +21,7 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HTableDescriptor;
-import org.apache.hadoop.hbase.KeyValue;
+import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Admin;
 import org.apache.hadoop.hbase.client.Connection;
@@ -92,9 +92,9 @@ public class TestScannersWithLabels {
 
   private static int insertData(TableName tableName, String column, double prob) throws IOException {
     byte[] k = new byte[3];
-    byte[][] famAndQf = KeyValue.parseColumn(Bytes.toBytes(column));
+    byte[][] famAndQf = CellUtil.parseColumn(Bytes.toBytes(column));
 
-    List<Put> puts = new ArrayList<>();
+    List<Put> puts = new ArrayList<>(9);
     for (int i = 0; i < 9; i++) {
       Put put = new Put(Bytes.toBytes("row" + i));
       put.setDurability(Durability.SKIP_WAL);
@@ -145,7 +145,7 @@ public class TestScannersWithLabels {
         ScannerModel.class);
     marshaller = context.createMarshaller();
     unmarshaller = context.createUnmarshaller();
-    Admin admin = TEST_UTIL.getHBaseAdmin();
+    Admin admin = TEST_UTIL.getAdmin();
     if (admin.tableExists(TABLE)) {
       return;
     }
@@ -207,7 +207,7 @@ public class TestScannersWithLabels {
     response = client.get(scannerURI, Constants.MIMETYPE_XML);
     // Respond with 204 as there are no cells to be retrieved
     assertEquals(response.getCode(), 204);
-    assertEquals(Constants.MIMETYPE_XML, response.getHeader("content-type"));
+    // With no content in the payload, the 'Content-Type' header is not echo back
   }
 
   @Test

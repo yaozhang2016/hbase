@@ -21,7 +21,7 @@ import java.io.IOException;
 import java.util.List;
 
 import org.apache.hadoop.hbase.Cell;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.hbase.exceptions.UnexpectedStateException;
 
 /**
@@ -57,29 +57,29 @@ public interface MemStore {
    *
    * @return size of data that is going to be flushed
    */
-  MemstoreSize getFlushableSize();
+  MemStoreSize getFlushableSize();
 
   /**
    * Return the size of the snapshot(s) if any
    * @return size of the memstore snapshot
    */
-  MemstoreSize getSnapshotSize();
+  MemStoreSize getSnapshotSize();
 
   /**
    * Write an update
    * @param cell
-   * @param memstoreSize The delta in memstore size will be passed back via this.
+   * @param memstoreSizing The delta in memstore size will be passed back via this.
    *        This will include both data size and heap overhead delta.
    */
-  void add(final Cell cell, MemstoreSize memstoreSize);
+  void add(final Cell cell, MemStoreSizing memstoreSizing);
 
   /**
    * Write the updates
    * @param cells
-   * @param memstoreSize The delta in memstore size will be passed back via this.
+   * @param memstoreSizing The delta in memstore size will be passed back via this.
    *        This will include both data size and heap overhead delta.
    */
-  void add(Iterable<Cell> cells, MemstoreSize memstoreSize);
+  void add(Iterable<Cell> cells, MemStoreSizing memstoreSizing);
 
   /**
    * @return Oldest timestamp of all the Cells in the MemStore
@@ -99,10 +99,10 @@ public interface MemStore {
    * only see each KeyValue update as atomic.
    * @param cells
    * @param readpoint readpoint below which we can safely remove duplicate Cells.
-   * @param memstoreSize The delta in memstore size will be passed back via this.
+   * @param memstoreSizing The delta in memstore size will be passed back via this.
    *        This will include both data size and heap overhead delta.
    */
-  void upsert(Iterable<Cell> cells, long readpoint, MemstoreSize memstoreSize);
+  void upsert(Iterable<Cell> cells, long readpoint, MemStoreSizing memstoreSizing);
 
   /**
    * @return scanner over the memstore. This might include scanner over the snapshot when one is
@@ -116,15 +116,27 @@ public interface MemStore {
    *         the memstore may be changed while computing its size. It is the responsibility of the
    *         caller to make sure this doesn't happen.
    */
-  MemstoreSize size();
+  MemStoreSize size();
 
   /**
-   * This method is called when it is clear that the flush to disk is completed.
-   * The store may do any post-flush actions at this point.
-   * One example is to update the wal with sequence number that is known only at the store level.
+   * This method is called before the flush is executed.
+   * @return an estimation (lower bound) of the unflushed sequence id in memstore after the flush
+   * is executed. if memstore will be cleared returns {@code HConstants.NO_SEQNUM}.
    */
-  void finalizeFlush();
+  long preFlushSeqIDEstimation();
 
-  /* Return true if the memstore may need some extra memory space*/
+  /* Return true if the memstore may use some extra memory space*/
   boolean isSloppy();
+
+  /**
+   * This message intends to inform the MemStore that next coming updates
+   * are going to be part of the replaying edits from WAL
+   */
+  default void startReplayingFromWAL(){return;}
+
+  /**
+   * This message intends to inform the MemStore that the replaying edits from WAL
+   * are done
+   */
+  default void stopReplayingFromWAL(){return;}
 }

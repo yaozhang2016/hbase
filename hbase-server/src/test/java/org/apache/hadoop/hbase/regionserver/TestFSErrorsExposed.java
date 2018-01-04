@@ -29,8 +29,6 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FilterFileSystem;
@@ -54,8 +52,12 @@ import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.testclassification.RegionServerTests;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.junit.Assume;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.junit.rules.TestName;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Test cases that ensure that file system level errors are bubbled up
@@ -63,9 +65,12 @@ import org.junit.experimental.categories.Category;
  */
 @Category({RegionServerTests.class, MediumTests.class})
 public class TestFSErrorsExposed {
-  private static final Log LOG = LogFactory.getLog(TestFSErrorsExposed.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestFSErrorsExposed.class);
 
   HBaseTestingUtility util = new HBaseTestingUtility();
+
+  @Rule
+  public TestName name = new TestName();
 
   /**
    * Injects errors into the pread calls of an on-disk file, and makes
@@ -86,13 +91,13 @@ public class TestFSErrorsExposed {
             .withOutputDir(hfilePath)
             .withFileContext(meta)
             .build();
-    TestStoreFile.writeStoreFile(
+    TestHStoreFile.writeStoreFile(
         writer, Bytes.toBytes("cf"), Bytes.toBytes("qual"));
 
-    StoreFile sf = new StoreFile(fs, writer.getPath(),
-      util.getConfiguration(), cacheConf, BloomType.NONE);
-
-    StoreFileReader reader = sf.createReader();
+    HStoreFile sf = new HStoreFile(fs, writer.getPath(), util.getConfiguration(), cacheConf,
+        BloomType.NONE, true);
+    sf.initReader();
+    StoreFileReader reader = sf.getReader();
     HFileScanner scanner = reader.getScanner(false, true);
 
     FaultyInputStream inStream = faultyfs.inStreams.get(0).get();
@@ -136,15 +141,15 @@ public class TestFSErrorsExposed {
             .withOutputDir(hfilePath)
             .withFileContext(meta)
             .build();
-    TestStoreFile.writeStoreFile(
+    TestHStoreFile.writeStoreFile(
         writer, Bytes.toBytes("cf"), Bytes.toBytes("qual"));
 
-    StoreFile sf = new StoreFile(fs, writer.getPath(), util.getConfiguration(),
-      cacheConf, BloomType.NONE);
+    HStoreFile sf = new HStoreFile(fs, writer.getPath(), util.getConfiguration(), cacheConf,
+        BloomType.NONE, true);
 
     List<StoreFileScanner> scanners = StoreFileScanner.getScannersForStoreFiles(
         Collections.singletonList(sf), false, true, false, false,
-        // 0 is passed as readpoint because this test operates on StoreFile directly
+        // 0 is passed as readpoint because this test operates on HStoreFile directly
         0);
     KeyValueScanner scanner = scanners.get(0);
 
@@ -186,10 +191,10 @@ public class TestFSErrorsExposed {
       util.getConfiguration().setInt("hbase.lease.recovery.timeout", 10000);
       util.getConfiguration().setInt("hbase.lease.recovery.dfs.timeout", 1000);
       util.startMiniCluster(1);
-      TableName tableName = TableName.valueOf("table");
+      final TableName tableName = TableName.valueOf(name.getMethodName());
       byte[] fam = Bytes.toBytes("fam");
 
-      Admin admin = util.getHBaseAdmin();
+      Admin admin = util.getAdmin();
       HTableDescriptor desc = new HTableDescriptor(tableName);
       desc.addFamily(new HColumnDescriptor(fam)
           .setMaxVersions(1)
@@ -228,8 +233,7 @@ public class TestFSErrorsExposed {
   }
 
   static class FaultyFileSystem extends FilterFileSystem {
-    List<SoftReference<FaultyInputStream>> inStreams =
-      new ArrayList<SoftReference<FaultyInputStream>>();
+    List<SoftReference<FaultyInputStream>> inStreams = new ArrayList<>();
 
     public FaultyFileSystem(FileSystem testFileSystem) {
       super(testFileSystem);
@@ -239,7 +243,7 @@ public class TestFSErrorsExposed {
     public FSDataInputStream open(Path p, int bufferSize) throws IOException  {
       FSDataInputStream orig = fs.open(p, bufferSize);
       FaultyInputStream faulty = new FaultyInputStream(orig);
-      inStreams.add(new SoftReference<FaultyInputStream>(faulty));
+      inStreams.add(new SoftReference<>(faulty));
       return faulty;
     }
 

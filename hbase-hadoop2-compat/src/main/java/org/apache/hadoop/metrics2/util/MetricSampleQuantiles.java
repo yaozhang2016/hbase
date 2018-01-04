@@ -25,9 +25,9 @@ import java.util.LinkedList;
 import java.util.ListIterator;
 import java.util.Map;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
 
-import com.google.common.annotations.VisibleForTesting;
+import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
 
 /**
  * Implementation of the Cormode, Korn, Muthukrishnan, and Srivastava algorithm
@@ -73,7 +73,7 @@ public class MetricSampleQuantiles {
 
   public MetricSampleQuantiles(MetricQuantile[] quantiles) {
     this.quantiles = Arrays.copyOf(quantiles, quantiles.length);
-    this.samples = new LinkedList<SampleItem>();
+    this.samples = new LinkedList<>();
   }
 
   /**
@@ -134,7 +134,7 @@ public class MetricSampleQuantiles {
 
     // Base case: no samples
     int start = 0;
-    if (samples.size() == 0) {
+    if (samples.isEmpty()) {
       SampleItem newItem = new SampleItem(buffer[0], 1, 0);
       samples.add(newItem);
       start++;
@@ -203,7 +203,7 @@ public class MetricSampleQuantiles {
    * @return Estimated value at that quantile.
    */
   private long query(double quantile) throws IOException {
-    if (samples.size() == 0) {
+    if (samples.isEmpty()) {
       throw new IOException("No samples present");
     }
 
@@ -235,7 +235,7 @@ public class MetricSampleQuantiles {
   synchronized public Map<MetricQuantile, Long> snapshot() throws IOException {
     // flush the buffer first for best results
     insertBatch();
-    Map<MetricQuantile, Long> values = new HashMap<MetricQuantile, Long>(quantiles.length);
+    Map<MetricQuantile, Long> values = new HashMap<>(quantiles.length);
     for (int i = 0; i < quantiles.length; i++) {
       values.put(quantiles[i], query(quantiles[i].quantile));
     }

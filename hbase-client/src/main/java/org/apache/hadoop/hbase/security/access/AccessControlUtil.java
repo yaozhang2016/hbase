@@ -23,20 +23,23 @@ import java.util.List;
 import java.util.Map;
 
 import org.apache.hadoop.hbase.TableName;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.protobuf.generated.AccessControlProtos;
 import org.apache.hadoop.hbase.protobuf.generated.AccessControlProtos.AccessControlService;
 import org.apache.hadoop.hbase.protobuf.generated.AccessControlProtos.GetUserPermissionsResponse;
 import org.apache.hadoop.hbase.util.ByteStringer;
 
-import com.google.common.collect.ArrayListMultimap;
-import com.google.common.collect.ListMultimap;
-import com.google.common.collect.Lists;
+import org.apache.hbase.thirdparty.com.google.common.collect.ArrayListMultimap;
+import org.apache.hbase.thirdparty.com.google.common.collect.ListMultimap;
+import org.apache.hbase.thirdparty.com.google.common.collect.Lists;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.RpcController;
 import com.google.protobuf.ServiceException;
 
+/**
+ * @since 2.0.0
+ */
 @InterfaceAudience.Private
 public class AccessControlUtil {
   private AccessControlUtil() {}
@@ -53,7 +56,7 @@ public class AccessControlUtil {
    */
   public static AccessControlProtos.GrantRequest buildGrantRequest(
       String username, TableName tableName, byte[] family, byte[] qualifier,
-      AccessControlProtos.Permission.Action... actions) {
+      boolean mergeExistingPermissions, AccessControlProtos.Permission.Action... actions) {
     AccessControlProtos.Permission.Builder ret =
         AccessControlProtos.Permission.newBuilder();
     AccessControlProtos.TablePermission.Builder permissionBuilder =
@@ -79,7 +82,7 @@ public class AccessControlUtil {
           AccessControlProtos.UserPermission.newBuilder()
               .setUser(ByteString.copyFromUtf8(username))
               .setPermission(ret)
-      ).build();
+      ).setMergeExistingPermissions(mergeExistingPermissions).build();
   }
 
   /**
@@ -91,7 +94,7 @@ public class AccessControlUtil {
    * @return A {@link AccessControlProtos} GrantRequest
    */
   public static AccessControlProtos.GrantRequest buildGrantRequest(
-      String username, String namespace,
+      String username, String namespace, boolean mergeExistingPermissions,
       AccessControlProtos.Permission.Action... actions) {
     AccessControlProtos.Permission.Builder ret =
         AccessControlProtos.Permission.newBuilder();
@@ -110,7 +113,7 @@ public class AccessControlUtil {
           AccessControlProtos.UserPermission.newBuilder()
               .setUser(ByteString.copyFromUtf8(username))
               .setPermission(ret)
-      ).build();
+      ).setMergeExistingPermissions(mergeExistingPermissions).build();
   }
 
   /**
@@ -177,8 +180,8 @@ public class AccessControlUtil {
    * @param actions the permissions to be granted
    * @return A {@link AccessControlProtos} GrantRequest
    */
-  public static AccessControlProtos.GrantRequest buildGrantRequest(
-      String username, AccessControlProtos.Permission.Action... actions) {
+  public static AccessControlProtos.GrantRequest buildGrantRequest(String username,
+      boolean mergeExistingPermissions, AccessControlProtos.Permission.Action... actions) {
     AccessControlProtos.Permission.Builder ret =
         AccessControlProtos.Permission.newBuilder();
     AccessControlProtos.GlobalPermission.Builder permissionBuilder =
@@ -193,7 +196,7 @@ public class AccessControlUtil {
           AccessControlProtos.UserPermission.newBuilder()
               .setUser(ByteString.copyFromUtf8(username))
               .setPermission(ret)
-      ).build();
+      ).setMergeExistingPermissions(mergeExistingPermissions).build();
   }
 
   public static AccessControlProtos.UsersAndPermissions toUsersAndPermissions(String user,
@@ -367,7 +370,7 @@ public class AccessControlUtil {
    */
   public static List<Permission.Action> toPermissionActions(
       List<AccessControlProtos.Permission.Action> protoActions) {
-    List<Permission.Action> actions = new ArrayList<Permission.Action>(protoActions.size());
+    List<Permission.Action> actions = new ArrayList<>(protoActions.size());
     for (AccessControlProtos.Permission.Action a : protoActions) {
       actions.add(toPermissionAction(a));
     }
@@ -490,14 +493,14 @@ public class AccessControlUtil {
    * @throws ServiceException
    */
   public static void grant(RpcController controller,
-      AccessControlService.BlockingInterface protocol, String userShortName,
+      AccessControlService.BlockingInterface protocol, String userShortName, boolean mergeExistingPermissions,
       Permission.Action... actions) throws ServiceException {
     List<AccessControlProtos.Permission.Action> permActions =
         Lists.newArrayListWithCapacity(actions.length);
     for (Permission.Action a : actions) {
       permActions.add(toPermissionAction(a));
     }
-    AccessControlProtos.GrantRequest request = buildGrantRequest(userShortName,
+    AccessControlProtos.GrantRequest request = buildGrantRequest(userShortName, mergeExistingPermissions,
         permActions.toArray(new AccessControlProtos.Permission.Action[actions.length]));
     protocol.grant(controller, request);
   }
@@ -518,14 +521,16 @@ public class AccessControlUtil {
    */
   public static void grant(RpcController controller,
       AccessControlService.BlockingInterface protocol, String userShortName, TableName tableName,
-      byte[] f, byte[] q, Permission.Action... actions) throws ServiceException {
+      byte[] f, byte[] q, boolean mergeExistingPermissions, Permission.Action... actions)
+      throws ServiceException {
     List<AccessControlProtos.Permission.Action> permActions =
         Lists.newArrayListWithCapacity(actions.length);
     for (Permission.Action a : actions) {
       permActions.add(toPermissionAction(a));
     }
-    AccessControlProtos.GrantRequest request = buildGrantRequest(userShortName, tableName, f, q,
-        permActions.toArray(new AccessControlProtos.Permission.Action[actions.length]));
+    AccessControlProtos.GrantRequest request =
+        buildGrantRequest(userShortName, tableName, f, q, mergeExistingPermissions,
+          permActions.toArray(new AccessControlProtos.Permission.Action[actions.length]));
     protocol.grant(controller, request);
   }
 
@@ -541,13 +546,13 @@ public class AccessControlUtil {
    */
   public static void grant(RpcController controller,
       AccessControlService.BlockingInterface protocol, String userShortName, String namespace,
-      Permission.Action... actions) throws ServiceException {
+      boolean mergeExistingPermissions, Permission.Action... actions) throws ServiceException {
     List<AccessControlProtos.Permission.Action> permActions =
         Lists.newArrayListWithCapacity(actions.length);
     for (Permission.Action a : actions) {
       permActions.add(toPermissionAction(a));
     }
-    AccessControlProtos.GrantRequest request = buildGrantRequest(userShortName, namespace,
+    AccessControlProtos.GrantRequest request = buildGrantRequest(userShortName, namespace, mergeExistingPermissions,
         permActions.toArray(new AccessControlProtos.Permission.Action[actions.length]));
     protocol.grant(controller, request);
   }
@@ -642,7 +647,7 @@ public class AccessControlUtil {
     AccessControlProtos.GetUserPermissionsRequest request = builder.build();
     AccessControlProtos.GetUserPermissionsResponse response =
         protocol.getUserPermissions(controller, request);
-    List<UserPermission> perms = new ArrayList<UserPermission>(response.getUserPermissionCount());
+    List<UserPermission> perms = new ArrayList<>(response.getUserPermissionCount());
     for (AccessControlProtos.UserPermission perm: response.getUserPermissionList()) {
       perms.add(toUserPermission(perm));
     }
@@ -670,7 +675,7 @@ public class AccessControlUtil {
     AccessControlProtos.GetUserPermissionsRequest request = builder.build();
     AccessControlProtos.GetUserPermissionsResponse response =
         protocol.getUserPermissions(controller, request);
-    List<UserPermission> perms = new ArrayList<UserPermission>(response.getUserPermissionCount());
+    List<UserPermission> perms = new ArrayList<>(response.getUserPermissionCount());
     for (AccessControlProtos.UserPermission perm: response.getUserPermissionList()) {
       perms.add(toUserPermission(perm));
     }
@@ -698,7 +703,7 @@ public class AccessControlUtil {
     AccessControlProtos.GetUserPermissionsRequest request = builder.build();
     AccessControlProtos.GetUserPermissionsResponse response =
         protocol.getUserPermissions(controller, request);
-    List<UserPermission> perms = new ArrayList<UserPermission>(response.getUserPermissionCount());
+    List<UserPermission> perms = new ArrayList<>(response.getUserPermissionCount());
     for (AccessControlProtos.UserPermission perm: response.getUserPermissionList()) {
       perms.add(toUserPermission(perm));
     }

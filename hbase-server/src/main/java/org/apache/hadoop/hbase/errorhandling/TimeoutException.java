@@ -17,15 +17,13 @@
  */
 package org.apache.hadoop.hbase.errorhandling;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * Exception for timeout of a task.
  * @see TimeoutExceptionInjector
  */
 @InterfaceAudience.Public
-@InterfaceStability.Evolving
 @SuppressWarnings("serial")
 public class TimeoutException extends Exception {
 

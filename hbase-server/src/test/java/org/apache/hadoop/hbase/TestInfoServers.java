@@ -18,6 +18,7 @@
  */
 package org.apache.hadoop.hbase;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
@@ -26,15 +27,18 @@ import java.io.InputStream;
 import java.net.URL;
 
 import org.apache.commons.io.IOUtils;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.apache.hadoop.hbase.client.Admin;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.testclassification.MiscTests;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.junit.rules.TestName;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Testing, info servers are disabled.  This test enables then and checks that
@@ -42,8 +46,11 @@ import org.junit.experimental.categories.Category;
  */
 @Category({MiscTests.class, MediumTests.class})
 public class TestInfoServers {
-  private static final Log LOG = LogFactory.getLog(TestInfoServers.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestInfoServers.class);
   private final static HBaseTestingUtility UTIL = new HBaseTestingUtility();
+
+  @Rule
+  public TestName name = new TestName();
 
   @BeforeClass
   public static void beforeClass() throws Exception {
@@ -65,8 +72,17 @@ public class TestInfoServers {
     UTIL.shutdownMiniCluster();
   }
 
+  @Test
+  public void testGetMasterInfoPort() throws Exception {
+    try (Admin admin = UTIL.getAdmin()) {
+      assertEquals(UTIL.getHBaseCluster().getMaster().getInfoServer().getPort(),
+        admin.getMasterInfoPort());
+    }
+  }
+
   /**
-   * @throws Exception
+   * Ensure when we go to top level index pages that we get redirected to an info-server specific status
+   * page.
    */
   @Test
   public void testInfoServersRedirect() throws Exception {
@@ -97,7 +113,7 @@ public class TestInfoServers {
 
   @Test
   public void testMasterServerReadOnly() throws Exception {
-    TableName tableName = TableName.valueOf("testMasterServerReadOnly");
+    final TableName tableName = TableName.valueOf(name.getMethodName());
     byte[] cf = Bytes.toBytes("d");
     UTIL.createTable(tableName, cf);
     UTIL.waitTableAvailable(tableName);

@@ -17,12 +17,10 @@
  */
 package org.apache.hadoop.hbase.snapshot;
 
-import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.security.PrivilegedExceptionAction;
 import java.util.Collections;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FSDataOutputStream;
@@ -30,13 +28,23 @@ import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos.SnapshotDescription;
+import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.client.Admin;
+import org.apache.hadoop.hbase.client.Connection;
+import org.apache.hadoop.hbase.client.ConnectionFactory;
 import org.apache.hadoop.hbase.security.User;
-import org.apache.hadoop.hbase.snapshot.SnapshotManifestV2;
+import org.apache.hadoop.hbase.security.access.AccessControlLists;
+import org.apache.hadoop.hbase.security.access.ShadedAccessControlUtil;
+import org.apache.hadoop.hbase.security.access.TablePermission;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.hadoop.hbase.util.FSUtils;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import org.apache.hbase.thirdparty.com.google.common.collect.ListMultimap;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.SnapshotProtos.SnapshotDescription;
 
 /**
  * Utility class to help manage {@link SnapshotDescription SnapshotDesriptions}.
@@ -90,7 +98,7 @@ public final class SnapshotDescriptionUtils {
     }
   }
 
-  private static final Log LOG = LogFactory.getLog(SnapshotDescriptionUtils.class);
+  private static final Logger LOG = LoggerFactory.getLogger(SnapshotDescriptionUtils.class);
   /**
    * Version of the fs layout for a snapshot. Future snapshots may have different file layouts,
    * which we may need to read in differently.
@@ -247,10 +255,10 @@ public final class SnapshotDescriptionUtils {
    *           {@link SnapshotDescription}.
    */
   public static SnapshotDescription validate(SnapshotDescription snapshot, Configuration conf)
-      throws IllegalArgumentException {
+      throws IllegalArgumentException, IOException {
     if (!snapshot.hasTable()) {
       throw new IllegalArgumentException(
-        "Descriptor doesn't apply to a table, so we can't build it.");
+          "Descriptor doesn't apply to a table, so we can't build it.");
     }
 
     // set the creation time, if one hasn't been set
@@ -262,6 +270,11 @@ public final class SnapshotDescriptionUtils {
       SnapshotDescription.Builder builder = snapshot.toBuilder();
       builder.setCreationTime(time);
       snapshot = builder.build();
+    }
+
+    // set the acl to snapshot if security feature is enabled.
+    if (isSecurityAvailable(conf)) {
+      snapshot = writeAclToSnapshotDescription(snapshot, conf);
     }
     return snapshot;
   }
@@ -361,9 +374,31 @@ public final class SnapshotDescriptionUtils {
    * @return true if the user is the owner of the snapshot,
    *         false otherwise or the snapshot owner field is not present.
    */
-  public static boolean isSnapshotOwner(final SnapshotDescription snapshot, final User user) {
+  public static boolean isSnapshotOwner(org.apache.hadoop.hbase.client.SnapshotDescription snapshot,
+      User user) {
     if (user == null) return false;
-    if (!snapshot.hasOwner()) return false;
-    return snapshot.getOwner().equals(user.getShortName());
+    return user.getShortName().equals(snapshot.getOwner());
+  }
+
+  public static boolean isSecurityAvailable(Configuration conf) throws IOException {
+    try (Connection conn = ConnectionFactory.createConnection(conf)) {
+      try (Admin admin = conn.getAdmin()) {
+        return admin.tableExists(AccessControlLists.ACL_TABLE_NAME);
+      }
+    }
+  }
+
+  private static SnapshotDescription writeAclToSnapshotDescription(SnapshotDescription snapshot,
+      Configuration conf) throws IOException {
+    ListMultimap<String, TablePermission> perms =
+        User.runAsLoginUser(new PrivilegedExceptionAction<ListMultimap<String, TablePermission>>() {
+          @Override
+          public ListMultimap<String, TablePermission> run() throws Exception {
+            return AccessControlLists.getTablePermissions(conf,
+              TableName.valueOf(snapshot.getTable()));
+          }
+        });
+    return snapshot.toBuilder()
+        .setUsersAndPermissions(ShadedAccessControlUtil.toUserTablePermissions(perms)).build();
   }
 }

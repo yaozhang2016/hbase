@@ -26,32 +26,37 @@ import java.util.NavigableSet;
 import java.util.Set;
 import java.util.TreeSet;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
-import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.MiniHBaseCluster;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.client.RegionInfo;
 import org.apache.hadoop.hbase.client.RegionLocator;
 import org.apache.hadoop.hbase.client.Table;
-import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.testclassification.LargeTests;
 import org.apache.hadoop.hbase.testclassification.MasterTests;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.JVMClusterUtil.MasterThread;
 import org.apache.hadoop.hbase.util.JVMClusterUtil.RegionServerThread;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.junit.rules.TestName;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
 
 /**
  * Tests the restarting of everything as done during rolling restarts.
  */
 @Category({MasterTests.class, LargeTests.class})
 public class  TestRollingRestart {
-  private static final Log LOG = LogFactory.getLog(TestRollingRestart.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestRollingRestart.class);
+
+  @Rule
+  public TestName name = new TestName();
 
   @Test (timeout=500000)
   public void testBasicRollingRestart() throws Exception {
@@ -73,19 +78,19 @@ public class  TestRollingRestart {
     cluster.waitForActiveAndReadyMaster();
 
     // Create a table with regions
-    TableName table = TableName.valueOf("tableRestart");
+    final TableName tableName = TableName.valueOf(name.getMethodName());
     byte [] family = Bytes.toBytes("family");
     log("Creating table with " + NUM_REGIONS_TO_CREATE + " regions");
-    Table ht = TEST_UTIL.createMultiRegionTable(table, family, NUM_REGIONS_TO_CREATE);
+    Table ht = TEST_UTIL.createMultiRegionTable(tableName, family, NUM_REGIONS_TO_CREATE);
     int numRegions = -1;
-    try (RegionLocator r = TEST_UTIL.getConnection().getRegionLocator(table)) {
+    try (RegionLocator r = TEST_UTIL.getConnection().getRegionLocator(tableName)) {
       numRegions = r.getStartKeys().length;
     }
     numRegions += 1; // catalogs
     log("Waiting for no more RIT\n");
     TEST_UTIL.waitUntilNoRegionsInTransition(60000);
     log("Disabling table\n");
-    TEST_UTIL.getHBaseAdmin().disableTable(table);
+    TEST_UTIL.getAdmin().disableTable(tableName);
     log("Waiting for no more RIT\n");
     TEST_UTIL.waitUntilNoRegionsInTransition(60000);
     NavigableSet<String> regions = HBaseTestingUtility.getAllOnlineRegions(cluster);
@@ -95,7 +100,7 @@ public class  TestRollingRestart {
     }
     assertEquals(2, regions.size());
     log("Enabling table\n");
-    TEST_UTIL.getHBaseAdmin().enableTable(table);
+    TEST_UTIL.getAdmin().enableTable(tableName);
     log("Waiting for no more RIT\n");
     TEST_UTIL.waitUntilNoRegionsInTransition(60000);
     log("Verifying there are " + numRegions + " assigned on cluster\n");
@@ -254,10 +259,10 @@ public class  TestRollingRestart {
 
   private NavigableSet<String> getDoubleAssignedRegions(
       MiniHBaseCluster cluster) throws IOException {
-    NavigableSet<String> online = new TreeSet<String>();
-    NavigableSet<String> doubled = new TreeSet<String>();
+    NavigableSet<String> online = new TreeSet<>();
+    NavigableSet<String> doubled = new TreeSet<>();
     for (RegionServerThread rst : cluster.getLiveRegionServerThreads()) {
-      for (HRegionInfo region : ProtobufUtil.getOnlineRegions(
+      for (RegionInfo region : ProtobufUtil.getOnlineRegions(
           rst.getRegionServer().getRSRpcServices())) {
         if(!online.add(region.getRegionNameAsString())) {
           doubled.add(region.getRegionNameAsString());

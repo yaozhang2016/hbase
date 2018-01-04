@@ -39,8 +39,9 @@ public class TestHBaseRpcControllerImpl {
 
   @Test
   public void testListOfCellScannerables() throws IOException {
-    List<CellScannable> cells = new ArrayList<CellScannable>();
     final int count = 10;
+    List<CellScannable> cells = new ArrayList<>(count);
+
     for (int i = 0; i < count; i++) {
       cells.add(createCell(i));
     }
@@ -173,6 +174,12 @@ public class TestHBaseRpcControllerImpl {
 
               @Override
               public byte[] getTagsArray() {
+                // unused
+                return null;
+              }
+
+              @Override
+              public Type getType() {
                 // unused
                 return null;
               }

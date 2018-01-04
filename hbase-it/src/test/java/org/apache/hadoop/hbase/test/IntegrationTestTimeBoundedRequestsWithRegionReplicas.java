@@ -25,17 +25,13 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
-
-import org.apache.commons.lang.math.RandomUtils;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.apache.commons.lang3.RandomUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.HRegionLocation;
 import org.apache.hadoop.hbase.IntegrationTestIngest;
 import org.apache.hadoop.hbase.IntegrationTestingUtility;
 import org.apache.hadoop.hbase.RegionLocations;
-import org.apache.hadoop.hbase.testclassification.IntegrationTests;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.chaos.factories.MonkeyFactory;
 import org.apache.hadoop.hbase.client.Admin;
@@ -45,6 +41,7 @@ import org.apache.hadoop.hbase.client.Get;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.regionserver.StorefileRefresherChore;
+import org.apache.hadoop.hbase.testclassification.IntegrationTests;
 import org.apache.hadoop.hbase.util.LoadTestTool;
 import org.apache.hadoop.hbase.util.MultiThreadedReader;
 import org.apache.hadoop.hbase.util.Threads;
@@ -53,8 +50,9 @@ import org.apache.hadoop.util.StringUtils;
 import org.apache.hadoop.util.ToolRunner;
 import org.junit.Assert;
 import org.junit.experimental.categories.Category;
-
-import com.google.common.collect.Lists;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.apache.hbase.thirdparty.com.google.common.collect.Lists;
 
 /**
  * An IntegrationTest for doing reads with a timeout, to a read-only table with region
@@ -73,7 +71,7 @@ import com.google.common.collect.Lists;
  * These parameters (and some other parameters from LoadTestTool) can be used to
  * control behavior, given values are default:
  * <pre>
- * -Dhbase.DIntegrationTestTimeBoundedRequestsWithRegionReplicas.runtime=600000
+ * -Dhbase.IntegrationTestTimeBoundedRequestsWithRegionReplicas.runtime=600000
  * -DIntegrationTestTimeBoundedRequestsWithRegionReplicas.num_regions_per_server=5
  * -DIntegrationTestTimeBoundedRequestsWithRegionReplicas.get_timeout_ms=5000
  * -DIntegrationTestTimeBoundedRequestsWithRegionReplicas.num_keys_per_server=2500
@@ -95,7 +93,7 @@ import com.google.common.collect.Lists;
 @Category(IntegrationTests.class)
 public class IntegrationTestTimeBoundedRequestsWithRegionReplicas extends IntegrationTestIngest {
 
-  private static final Log LOG = LogFactory.getLog(
+  private static final Logger LOG = LoggerFactory.getLogger(
     IntegrationTestTimeBoundedRequestsWithRegionReplicas.class);
 
   private static final String TEST_NAME
@@ -143,7 +141,7 @@ public class IntegrationTestTimeBoundedRequestsWithRegionReplicas extends Integr
   protected void runIngestTest(long defaultRunTime, long keysPerServerPerIter, int colsPerKey,
       int recordSize, int writeThreads, int readThreads) throws Exception {
     LOG.info("Cluster size:"+
-      util.getHBaseClusterInterface().getClusterStatus().getServersSize());
+      util.getHBaseClusterInterface().getClusterMetrics().getLiveServerMetrics().size());
 
     long start = System.currentTimeMillis();
     String runtimeKey = String.format(RUN_TIME_KEY, this.getClass().getSimpleName());
@@ -159,7 +157,7 @@ public class IntegrationTestTimeBoundedRequestsWithRegionReplicas extends Integr
 
     // flush the table
     LOG.info("Flushing the table");
-    Admin admin = util.getHBaseAdmin();
+    Admin admin = util.getAdmin();
     admin.flush(getTablename());
 
     // re-open the regions to make sure that the replicas are up to date
@@ -200,6 +198,16 @@ public class IntegrationTestTimeBoundedRequestsWithRegionReplicas extends Integr
     // set the intended run time for the reader. The reader will do read requests
     // to random keys for this amount of time.
     long remainingTime = runtime - (System.currentTimeMillis() - start);
+    if (remainingTime <= 0) {
+      LOG.error("The amount of time left for the test to perform random reads is "
+          + "non-positive. Increase the test execution time via "
+          + String.format(RUN_TIME_KEY,
+                IntegrationTestTimeBoundedRequestsWithRegionReplicas.class.getSimpleName())
+          + " or reduce the amount of data written per server via "
+          + IntegrationTestTimeBoundedRequestsWithRegionReplicas.class.getSimpleName()
+          + "." + IntegrationTestIngest.NUM_KEYS_PER_SERVER_KEY);
+      throw new IllegalArgumentException("No time remains to execute random reads");
+    }
     LOG.info("Reading random keys from the table for " + remainingTime/60000 + " min");
     this.conf.setLong(
       String.format(RUN_TIME_KEY, TimeBoundedMultiThreadedReader.class.getSimpleName())

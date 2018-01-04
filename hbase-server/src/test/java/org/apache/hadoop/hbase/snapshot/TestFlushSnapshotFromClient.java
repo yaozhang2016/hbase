@@ -29,8 +29,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
@@ -49,6 +47,7 @@ import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos;
 import org.apache.hadoop.hbase.client.SnapshotDescription;
 import org.apache.hadoop.hbase.regionserver.ConstantSizeRegionSplitPolicy;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.SnapshotProtos;
 import org.apache.hadoop.hbase.testclassification.LargeTests;
 import org.apache.hadoop.hbase.testclassification.RegionServerTests;
 import org.apache.hadoop.hbase.util.Bytes;
@@ -60,6 +59,8 @@ import org.junit.ClassRule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.junit.rules.TestRule;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Test creating/using/deleting snapshots from the client
@@ -71,7 +72,7 @@ import org.junit.rules.TestRule;
  */
 @Category({RegionServerTests.class, LargeTests.class})
 public class TestFlushSnapshotFromClient {
-  private static final Log LOG = LogFactory.getLog(TestFlushSnapshotFromClient.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestFlushSnapshotFromClient.class);
   @ClassRule
   public static final TestRule timeout =
       CategoryBasedTimeout.forClass(TestFlushSnapshotFromClient.class);
@@ -103,7 +104,7 @@ public class TestFlushSnapshotFromClient {
     // Enable snapshot
     conf.setBoolean(SnapshotManager.HBASE_SNAPSHOT_ENABLED, true);
     conf.set(HConstants.HBASE_REGION_SPLIT_POLICY_KEY,
-      ConstantSizeRegionSplitPolicy.class.getName());
+        ConstantSizeRegionSplitPolicy.class.getName());
   }
 
   @Before
@@ -224,7 +225,7 @@ public class TestFlushSnapshotFromClient {
     // take a snapshot of the enabled table
     String snapshotString = "offlineTableSnapshot";
     byte[] snapshot = Bytes.toBytes(snapshotString);
-    Map<String, String> props = new HashMap<String, String>();
+    Map<String, String> props = new HashMap<>();
     props.put("table", TABLE_NAME.getNameAsString());
     admin.execProcedure(SnapshotManager.ONLINE_SNAPSHOT_CONTROLLER_DESCRIPTION,
         snapshotString, props);
@@ -274,9 +275,9 @@ public class TestFlushSnapshotFromClient {
 
   @Test
   public void testAsyncFlushSnapshot() throws Exception {
-    HBaseProtos.SnapshotDescription snapshot = HBaseProtos.SnapshotDescription.newBuilder()
+    SnapshotProtos.SnapshotDescription snapshot = SnapshotProtos.SnapshotDescription.newBuilder()
         .setName("asyncSnapshot").setTable(TABLE_NAME.getNameAsString())
-        .setType(HBaseProtos.SnapshotDescription.Type.FLUSH).build();
+        .setType(SnapshotProtos.SnapshotDescription.Type.FLUSH).build();
 
     // take the snapshot async
     admin.takeSnapshotAsync(

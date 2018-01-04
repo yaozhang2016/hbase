@@ -18,6 +18,13 @@
  */
 package org.apache.hadoop.hbase.util;
 
+import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
+import org.apache.hbase.thirdparty.com.google.common.base.Throwables;
+import org.apache.hbase.thirdparty.com.google.common.collect.Iterators;
+import org.apache.hbase.thirdparty.com.google.common.primitives.Ints;
+
+import edu.umd.cs.findbugs.annotations.CheckForNull;
+
 import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
 import java.io.EOFException;
@@ -28,8 +35,6 @@ import java.io.InterruptedIOException;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.net.InetSocketAddress;
-import java.net.URI;
-import java.net.URISyntaxException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -50,10 +55,6 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.HadoopIllegalArgumentException;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.BlockLocation;
 import org.apache.hadoop.fs.FSDataInputStream;
@@ -70,18 +71,23 @@ import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HDFSBlocksDistribution;
 import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.TableName;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.hbase.exceptions.DeserializationException;
 import org.apache.hadoop.hbase.fs.HFileSystem;
+import org.apache.hadoop.hbase.io.HFileLink;
 import org.apache.hadoop.hbase.master.HMaster;
+import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.StoreFileInfo;
 import org.apache.hadoop.hbase.security.AccessDeniedException;
-import org.apache.hadoop.hbase.util.HBaseFsck.ErrorReporter;
 import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.FSProtos;
-import org.apache.hadoop.hbase.regionserver.HRegion;
+import org.apache.hadoop.hbase.util.HBaseFsck.ErrorReporter;
 import org.apache.hadoop.hdfs.DFSClient;
 import org.apache.hadoop.hdfs.DFSHedgedReadMetrics;
 import org.apache.hadoop.hdfs.DistributedFileSystem;
+import org.apache.hadoop.hdfs.protocol.HdfsConstants;
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.ipc.RemoteException;
 import org.apache.hadoop.security.UserGroupInformation;
@@ -89,25 +95,18 @@ import org.apache.hadoop.util.Progressable;
 import org.apache.hadoop.util.ReflectionUtils;
 import org.apache.hadoop.util.StringUtils;
 
-import com.google.common.base.Throwables;
-import com.google.common.collect.Iterators;
-import com.google.common.primitives.Ints;
-
-import edu.umd.cs.findbugs.annotations.CheckForNull;
-
 /**
  * Utility methods for interacting with the underlying file system.
  */
 @InterfaceAudience.Private
-public abstract class FSUtils {
-  private static final Log LOG = LogFactory.getLog(FSUtils.class);
+public abstract class FSUtils extends CommonFSUtils {
+  private static final Logger LOG = LoggerFactory.getLogger(FSUtils.class);
 
-  /** Full access permissions (starting point for a umask) */
-  public static final String FULL_RWX_PERMISSIONS = "777";
   private static final String THREAD_POOLSIZE = "hbase.client.localityCheck.threadPoolSize";
   private static final int DEFAULT_THREAD_POOLSIZE = 2;
 
   /** Set to true on Windows platforms */
+  @VisibleForTesting // currently only used in testing. TODO refactor into a test class
   public static final boolean WINDOWS = System.getProperty("os.name").startsWith("Windows");
 
   protected FSUtils() {
@@ -115,104 +114,17 @@ public abstract class FSUtils {
   }
 
   /**
-   * Sets storage policy for given path according to config setting.
-   * If the passed path is a directory, we'll set the storage policy for all files
-   * created in the future in said directory. Note that this change in storage
-   * policy takes place at the HDFS level; it will persist beyond this RS's lifecycle.
-   * If we're running on a version of HDFS that doesn't support the given storage policy
-   * (or storage policies at all), then we'll issue a log message and continue.
-   *
-   * See http://hadoop.apache.org/docs/r2.6.0/hadoop-project-dist/hadoop-hdfs/ArchivalStorage.html
-   *
-   * @param fs We only do anything if an instance of DistributedFileSystem
-   * @param conf used to look up storage policy with given key; not modified.
-   * @param path the Path whose storage policy is to be set
-   * @param policyKey e.g. HConstants.WAL_STORAGE_POLICY
-   * @param defaultPolicy usually should be the policy NONE to delegate to HDFS
+   * @return True is <code>fs</code> is instance of DistributedFileSystem
+   * @throws IOException
    */
-  public static void setStoragePolicy(final FileSystem fs, final Configuration conf,
-      final Path path, final String policyKey, final String defaultPolicy) {
-    String storagePolicy = conf.get(policyKey, defaultPolicy).toUpperCase(Locale.ROOT);
-    if (storagePolicy.equals(defaultPolicy)) {
-      if (LOG.isTraceEnabled()) {
-        LOG.trace("default policy of " + defaultPolicy + " requested, exiting early.");
-      }
-      return;
+  public static boolean isDistributedFileSystem(final FileSystem fs) throws IOException {
+    FileSystem fileSystem = fs;
+    // If passed an instance of HFileSystem, it fails instanceof DistributedFileSystem.
+    // Check its backing fs for dfs-ness.
+    if (fs instanceof HFileSystem) {
+      fileSystem = ((HFileSystem)fs).getBackingFs();
     }
-    if (fs instanceof DistributedFileSystem) {
-      DistributedFileSystem dfs = (DistributedFileSystem)fs;
-      // Once our minimum supported Hadoop version is 2.6.0 we can remove reflection.
-      Class<? extends DistributedFileSystem> dfsClass = dfs.getClass();
-      Method m = null;
-      try {
-        m = dfsClass.getDeclaredMethod("setStoragePolicy",
-            new Class<?>[] { Path.class, String.class });
-        m.setAccessible(true);
-      } catch (NoSuchMethodException e) {
-        LOG.info("FileSystem doesn't support"
-            + " setStoragePolicy; --HDFS-6584 not available");
-      } catch (SecurityException e) {
-        LOG.info("Doesn't have access to setStoragePolicy on "
-            + "FileSystems --HDFS-6584 not available", e);
-        m = null; // could happen on setAccessible()
-      }
-      if (m != null) {
-        try {
-          m.invoke(dfs, path, storagePolicy);
-          LOG.info("set " + storagePolicy + " for " + path);
-        } catch (Exception e) {
-          // check for lack of HDFS-7228
-          boolean probablyBadPolicy = false;
-          if (e instanceof InvocationTargetException) {
-            final Throwable exception = e.getCause();
-            if (exception instanceof RemoteException &&
-                HadoopIllegalArgumentException.class.getName().equals(
-                    ((RemoteException)exception).getClassName())) {
-              LOG.warn("Given storage policy, '" + storagePolicy + "', was rejected and probably " +
-                  "isn't a valid policy for the version of Hadoop you're running. I.e. if you're " +
-                  "trying to use SSD related policies then you're likely missing HDFS-7228. For " +
-                  "more information see the 'ArchivalStorage' docs for your Hadoop release.");
-              LOG.debug("More information about the invalid storage policy.", exception);
-              probablyBadPolicy = true;
-            }
-          }
-          if (!probablyBadPolicy) {
-            // This swallows FNFE, should we be throwing it? seems more likely to indicate dev
-            // misuse than a runtime problem with HDFS.
-            LOG.warn("Unable to set " + storagePolicy + " for " + path, e);
-          }
-        }
-      }
-    } else {
-      LOG.info("FileSystem isn't an instance of DistributedFileSystem; presuming it doesn't " +
-          "support setStoragePolicy.");
-    }
-  }
-
-  /**
-   * Compare of path component. Does not consider schema; i.e. if schemas
-   * different but <code>path</code> starts with <code>rootPath</code>,
-   * then the function returns true
-   * @param rootPath
-   * @param path
-   * @return True if <code>path</code> starts with <code>rootPath</code>
-   */
-  public static boolean isStartingWithPath(final Path rootPath, final String path) {
-    String uriRootPath = rootPath.toUri().getPath();
-    String tailUriPath = (new Path(path)).toUri().getPath();
-    return tailUriPath.startsWith(uriRootPath);
-  }
-
-  /**
-   * Compare path component of the Path URI; e.g. if hdfs://a/b/c and /a/b/c, it will compare the
-   * '/a/b/c' part. Does not consider schema; i.e. if schemas different but path or subpath matches,
-   * the two will equate.
-   * @param pathToSearch Path we will be trying to match.
-   * @param pathTail
-   * @return True if <code>pathTail</code> is tail on the path of <code>pathToSearch</code>
-   */
-  public static boolean isMatchingTail(final Path pathToSearch, String pathTail) {
-    return isMatchingTail(pathToSearch, new Path(pathTail));
+    return fileSystem instanceof DistributedFileSystem;
   }
 
   /**
@@ -259,18 +171,6 @@ public abstract class FSUtils {
   }
 
   /**
-   * Delete if exists.
-   * @param fs filesystem object
-   * @param dir directory to delete
-   * @return True if deleted <code>dir</code>
-   * @throws IOException e
-   */
-  public static boolean deleteDirectory(final FileSystem fs, final Path dir)
-  throws IOException {
-    return fs.exists(dir) && fs.delete(dir, true);
-  }
-
-  /**
    * Delete the region directory if exists.
    * @param conf
    * @param hri
@@ -285,89 +185,7 @@ public abstract class FSUtils {
       new Path(getTableDir(rootDir, hri.getTable()), hri.getEncodedName()));
   }
 
-  /**
-   * Return the number of bytes that large input files should be optimally
-   * be split into to minimize i/o time.
-   *
-   * use reflection to search for getDefaultBlockSize(Path f)
-   * if the method doesn't exist, fall back to using getDefaultBlockSize()
-   *
-   * @param fs filesystem object
-   * @return the default block size for the path's filesystem
-   * @throws IOException e
-   */
-  public static long getDefaultBlockSize(final FileSystem fs, final Path path) throws IOException {
-    Method m = null;
-    Class<? extends FileSystem> cls = fs.getClass();
-    try {
-      m = cls.getMethod("getDefaultBlockSize", new Class<?>[] { Path.class });
-    } catch (NoSuchMethodException e) {
-      LOG.info("FileSystem doesn't support getDefaultBlockSize");
-    } catch (SecurityException e) {
-      LOG.info("Doesn't have access to getDefaultBlockSize on FileSystems", e);
-      m = null; // could happen on setAccessible()
-    }
-    if (m == null) {
-      return fs.getDefaultBlockSize(path);
-    } else {
-      try {
-        Object ret = m.invoke(fs, path);
-        return ((Long)ret).longValue();
-      } catch (Exception e) {
-        throw new IOException(e);
-      }
-    }
-  }
-
-  /*
-   * Get the default replication.
-   *
-   * use reflection to search for getDefaultReplication(Path f)
-   * if the method doesn't exist, fall back to using getDefaultReplication()
-   *
-   * @param fs filesystem object
-   * @param f path of file
-   * @return default replication for the path's filesystem
-   * @throws IOException e
-   */
-  public static short getDefaultReplication(final FileSystem fs, final Path path) throws IOException {
-    Method m = null;
-    Class<? extends FileSystem> cls = fs.getClass();
-    try {
-      m = cls.getMethod("getDefaultReplication", new Class<?>[] { Path.class });
-    } catch (NoSuchMethodException e) {
-      LOG.info("FileSystem doesn't support getDefaultReplication");
-    } catch (SecurityException e) {
-      LOG.info("Doesn't have access to getDefaultReplication on FileSystems", e);
-      m = null; // could happen on setAccessible()
-    }
-    if (m == null) {
-      return fs.getDefaultReplication(path);
-    } else {
-      try {
-        Object ret = m.invoke(fs, path);
-        return ((Number)ret).shortValue();
-      } catch (Exception e) {
-        throw new IOException(e);
-      }
-    }
-  }
-
-  /**
-   * Returns the default buffer size to use during writes.
-   *
-   * The size of the buffer should probably be a multiple of hardware
-   * page size (4096 on Intel x86), and it determines how much data is
-   * buffered during read and write operations.
-   *
-   * @param fs filesystem object
-   * @return default buffer size to use during writes
-   */
-  public static int getDefaultBufferSize(final FileSystem fs) {
-    return fs.getConf().getInt("io.file.buffer.size", 4096);
-  }
-
-  /**
+ /**
    * Create the specified file on the filesystem. By default, this will:
    * <ol>
    * <li>overwrite the file if it exists</li>
@@ -418,71 +236,6 @@ public abstract class FSUtils {
       }
     }
     return create(fs, path, perm, true);
-  }
-
-  /**
-   * Create the specified file on the filesystem. By default, this will:
-   * <ol>
-   * <li>apply the umask in the configuration (if it is enabled)</li>
-   * <li>use the fs configured buffer size (or 4096 if not set)</li>
-   * <li>use the default replication</li>
-   * <li>use the default block size</li>
-   * <li>not track progress</li>
-   * </ol>
-   *
-   * @param fs {@link FileSystem} on which to write the file
-   * @param path {@link Path} to the file to write
-   * @param perm
-   * @param overwrite Whether or not the created file should be overwritten.
-   * @return output stream to the created file
-   * @throws IOException if the file cannot be created
-   */
-  public static FSDataOutputStream create(FileSystem fs, Path path,
-      FsPermission perm, boolean overwrite) throws IOException {
-    if (LOG.isTraceEnabled()) {
-      LOG.trace("Creating file=" + path + " with permission=" + perm + ", overwrite=" + overwrite);
-    }
-    return fs.create(path, perm, overwrite, getDefaultBufferSize(fs),
-        getDefaultReplication(fs, path), getDefaultBlockSize(fs, path), null);
-  }
-
-  /**
-   * Get the file permissions specified in the configuration, if they are
-   * enabled.
-   *
-   * @param fs filesystem that the file will be created on.
-   * @param conf configuration to read for determining if permissions are
-   *          enabled and which to use
-   * @param permssionConfKey property key in the configuration to use when
-   *          finding the permission
-   * @return the permission to use when creating a new file on the fs. If
-   *         special permissions are not specified in the configuration, then
-   *         the default permissions on the the fs will be returned.
-   */
-  public static FsPermission getFilePermissions(final FileSystem fs,
-      final Configuration conf, final String permssionConfKey) {
-    boolean enablePermissions = conf.getBoolean(
-        HConstants.ENABLE_DATA_FILE_UMASK, false);
-
-    if (enablePermissions) {
-      try {
-        FsPermission perm = new FsPermission(FULL_RWX_PERMISSIONS);
-        // make sure that we have a mask, if not, go default.
-        String mask = conf.get(permssionConfKey);
-        if (mask == null)
-          return FsPermission.getFileDefault();
-        // appy the umask
-        FsPermission umask = new FsPermission(mask);
-        return perm.applyUMask(umask);
-      } catch (IllegalArgumentException e) {
-        LOG.warn(
-            "Incorrect umask attempted to be created: "
-                + conf.get(permssionConfKey)
-                + ", using default file permissions.", e);
-        return FsPermission.getFileDefault();
-      }
-    }
-    return FsPermission.getFileDefault();
   }
 
   /**
@@ -929,46 +682,6 @@ public abstract class FSUtils {
   }
 
   /**
-   * Verifies root directory path is a valid URI with a scheme
-   *
-   * @param root root directory path
-   * @return Passed <code>root</code> argument.
-   * @throws IOException if not a valid URI with a scheme
-   */
-  public static Path validateRootPath(Path root) throws IOException {
-    try {
-      URI rootURI = new URI(root.toString());
-      String scheme = rootURI.getScheme();
-      if (scheme == null) {
-        throw new IOException("Root directory does not have a scheme");
-      }
-      return root;
-    } catch (URISyntaxException e) {
-      IOException io = new IOException("Root directory path is not a valid " +
-        "URI -- check your " + HConstants.HBASE_DIR + " configuration");
-      io.initCause(e);
-      throw io;
-    }
-  }
-
-  /**
-   * Checks for the presence of the root path (using the provided conf object) in the given path. If
-   * it exists, this method removes it and returns the String representation of remaining relative path.
-   * @param path
-   * @param conf
-   * @return String representation of the remaining relative path
-   * @throws IOException
-   */
-  public static String removeRootPath(Path path, final Configuration conf) throws IOException {
-    Path root = FSUtils.getRootDir(conf);
-    String pathStr = path.toString();
-    // check that the path is absolute... it has the root path in it.
-    if (!pathStr.startsWith(root.toString())) return pathStr;
-    // if not, return as it is.
-    return pathStr.substring(root.toString().length() + 1);// remove the "/" too.
-  }
-
-  /**
    * If DFS, check safe mode and if so, wait until we clear it.
    * @param conf configuration
    * @param wait Sleep between retries
@@ -989,40 +702,6 @@ public abstract class FSUtils {
         throw (InterruptedIOException)new InterruptedIOException().initCause(e);
       }
     }
-  }
-
-  /**
-   * Return the 'path' component of a Path.  In Hadoop, Path is an URI.  This
-   * method returns the 'path' component of a Path's URI: e.g. If a Path is
-   * <code>hdfs://example.org:9000/hbase_trunk/TestTable/compaction.dir</code>,
-   * this method returns <code>/hbase_trunk/TestTable/compaction.dir</code>.
-   * This method is useful if you want to print out a Path without qualifying
-   * Filesystem instance.
-   * @param p Filesystem Path whose 'path' component we are to return.
-   * @return Path portion of the Filesystem
-   */
-  public static String getPath(Path p) {
-    return p.toUri().getPath();
-  }
-
-  /**
-   * @param c configuration
-   * @return Path to hbase root directory: i.e. <code>hbase.rootdir</code> from
-   * configuration as a qualified Path.
-   * @throws IOException e
-   */
-  public static Path getRootDir(final Configuration c) throws IOException {
-    Path p = new Path(c.get(HConstants.HBASE_DIR));
-    FileSystem fs = p.getFileSystem(c);
-    return p.makeQualified(fs);
-  }
-
-  public static void setRootDir(final Configuration c, final Path root) throws IOException {
-    c.set(HConstants.HBASE_DIR, root.toString());
-  }
-
-  public static void setFsDefault(final Configuration c, final Path root) throws IOException {
-    c.set("fs.defaultFS", root.toString());    // for hadoop 0.21+
   }
 
   /**
@@ -1062,6 +741,21 @@ public abstract class FSUtils {
     }
 
     return blocksDistribution;
+  }
+
+  /**
+   * Update blocksDistribution with blockLocations
+   * @param blocksDistribution the hdfs blocks distribution
+   * @param blockLocations an array containing block location
+   */
+  static public void addToHDFSBlocksDistribution(
+      HDFSBlocksDistribution blocksDistribution, BlockLocation[] blockLocations)
+      throws IOException {
+    for (BlockLocation bl : blockLocations) {
+      String[] hosts = bl.getHosts();
+      long len = bl.getLength();
+      blocksDistribution.addHostsAndBlockWeight(hosts, len);
+    }
   }
 
   // TODO move this method OUT of FSUtils. No dependencies to HMaster
@@ -1111,7 +805,7 @@ public abstract class FSUtils {
   public static Map<String, Integer> getTableFragmentation(
     final FileSystem fs, final Path hbaseRootDir)
   throws IOException {
-    Map<String, Integer> frags = new HashMap<String, Integer>();
+    Map<String, Integer> frags = new HashMap<>();
     int cfCountTotal = 0;
     int cfFragTotal = 0;
     PathFilter regionFilter = new RegionDirFilter(fs);
@@ -1145,44 +839,6 @@ public abstract class FSUtils {
     frags.put("-TOTAL-",
       cfCountTotal == 0? 0: Math.round((float) cfFragTotal / cfCountTotal * 100));
     return frags;
-  }
-
-  /**
-   * Returns the {@link org.apache.hadoop.fs.Path} object representing the table directory under
-   * path rootdir
-   *
-   * @param rootdir qualified path of HBase root directory
-   * @param tableName name of table
-   * @return {@link org.apache.hadoop.fs.Path} for table
-   */
-  public static Path getTableDir(Path rootdir, final TableName tableName) {
-    return new Path(getNamespaceDir(rootdir, tableName.getNamespaceAsString()),
-        tableName.getQualifierAsString());
-  }
-
-  /**
-   * Returns the {@link org.apache.hadoop.hbase.TableName} object representing
-   * the table directory under
-   * path rootdir
-   *
-   * @param tablePath path of table
-   * @return {@link org.apache.hadoop.fs.Path} for table
-   */
-  public static TableName getTableName(Path tablePath) {
-    return TableName.valueOf(tablePath.getParent().getName(), tablePath.getName());
-  }
-
-  /**
-   * Returns the {@link org.apache.hadoop.fs.Path} object representing
-   * the namespace directory under path rootdir
-   *
-   * @param rootdir qualified path of HBase root directory
-   * @param namespace namespace name
-   * @return {@link org.apache.hadoop.fs.Path} for table
-   */
-  public static Path getNamespaceDir(Path rootdir, final String namespace) {
-    return new Path(rootdir, new Path(HConstants.BASE_NAMESPACE_DIR,
-        new Path(namespace)));
   }
 
   /**
@@ -1282,17 +938,6 @@ public abstract class FSUtils {
   }
 
   /**
-   * @param conf
-   * @return True if this filesystem whose scheme is 'hdfs'.
-   * @throws IOException
-   */
-  public static boolean isHDFS(final Configuration conf) throws IOException {
-    FileSystem fs = FileSystem.get(conf);
-    String scheme = fs.getUri().getScheme();
-    return scheme.equalsIgnoreCase("hdfs");
-  }
-
-  /**
    * Recover file lease. Used when a file might be suspect
    * to be had been left open by another process.
    * @param fs FileSystem handle
@@ -1305,7 +950,7 @@ public abstract class FSUtils {
 
   public static List<Path> getTableDirs(final FileSystem fs, final Path rootdir)
       throws IOException {
-    List<Path> tableDirs = new LinkedList<Path>();
+    List<Path> tableDirs = new LinkedList<>();
 
     for(FileStatus status :
         fs.globStatus(new Path(rootdir,
@@ -1326,20 +971,11 @@ public abstract class FSUtils {
       throws IOException {
     // presumes any directory under hbase.rootdir is a table
     FileStatus[] dirs = fs.listStatus(rootdir, new UserTableDirFilter(fs));
-    List<Path> tabledirs = new ArrayList<Path>(dirs.length);
+    List<Path> tabledirs = new ArrayList<>(dirs.length);
     for (FileStatus dir: dirs) {
       tabledirs.add(dir.getPath());
     }
     return tabledirs;
-  }
-
-  /**
-   * Checks if the given path is the one with 'recovered.edits' dir.
-   * @param path
-   * @return True if we recovered edits
-   */
-  public static boolean isRecoveredEdits(Path path) {
-    return path.toString().contains(HConstants.RECOVERED_EDITS_DIR);
   }
 
   /**
@@ -1382,9 +1018,9 @@ public abstract class FSUtils {
     // assumes we are in a table dir.
     List<FileStatus> rds = listStatusWithStatusFilter(fs, tableDir, new RegionDirFilter(fs));
     if (rds == null) {
-      return new ArrayList<Path>();
+      return new ArrayList<>();
     }
-    List<Path> regionDirs = new ArrayList<Path>(rds.size());
+    List<Path> regionDirs = new ArrayList<>(rds.size());
     for (FileStatus rdfs: rds) {
       Path rdPath = rdfs.getPath();
       regionDirs.add(rdPath);
@@ -1434,7 +1070,7 @@ public abstract class FSUtils {
   public static List<Path> getFamilyDirs(final FileSystem fs, final Path regionDir) throws IOException {
     // assumes we are in a region dir.
     FileStatus[] fds = fs.listStatus(regionDir, new FamilyDirFilter(fs));
-    List<Path> familyDirs = new ArrayList<Path>(fds.length);
+    List<Path> familyDirs = new ArrayList<>(fds.length);
     for (FileStatus fdfs: fds) {
       Path fdPath = fdfs.getPath();
       familyDirs.add(fdPath);
@@ -1445,9 +1081,9 @@ public abstract class FSUtils {
   public static List<Path> getReferenceFilePaths(final FileSystem fs, final Path familyDir) throws IOException {
     List<FileStatus> fds = listStatusWithStatusFilter(fs, familyDir, new ReferenceFileFilter(fs));
     if (fds == null) {
-      return new ArrayList<Path>();
+      return new ArrayList<>();
     }
-    List<Path> referenceFiles = new ArrayList<Path>(fds.size());
+    List<Path> referenceFiles = new ArrayList<>(fds.size());
     for (FileStatus fdfs: fds) {
       Path fdPath = fdfs.getPath();
       referenceFiles.add(fdPath);
@@ -1481,6 +1117,18 @@ public abstract class FSUtils {
     }
   }
 
+  /**
+   * Filter for HFileLinks (StoreFiles and HFiles not included).
+   * the filter itself does not consider if a link is file or not.
+   */
+  public static class HFileLinkFilter implements PathFilter {
+
+    @Override
+    public boolean accept(Path p) {
+      return HFileLink.isHFileLink(p);
+    }
+  }
+
   public static class ReferenceFileFilter extends AbstractFileStatusFilter {
 
     private final FileSystem fs;
@@ -1505,18 +1153,6 @@ public abstract class FSUtils {
       }
     }
   }
-
-
-  /**
-   * @param conf
-   * @return Returns the filesystem of the hbase rootdir.
-   * @throws IOException
-   */
-  public static FileSystem getCurrentFileSystem(Configuration conf)
-  throws IOException {
-    return getRootDir(conf).getFileSystem(conf);
-  }
-
 
   /**
    * Runs through the HBase rootdir/tablename and creates a reverse lookup map for
@@ -1568,14 +1204,14 @@ public abstract class FSUtils {
       ExecutorService executor, final ErrorReporter errors) throws IOException, InterruptedException {
 
     final Map<String, Path> finalResultMap =
-        resultMap == null ? new ConcurrentHashMap<String, Path>(128, 0.75f, 32) : resultMap;
+        resultMap == null ? new ConcurrentHashMap<>(128, 0.75f, 32) : resultMap;
 
     // only include the directory paths to tables
     Path tableDir = FSUtils.getTableDir(hbaseRootDir, tableName);
     // Inside a table, there are compaction.dir directories to skip.  Otherwise, all else
     // should be regions.
     final FamilyDirFilter familyFilter = new FamilyDirFilter(fs);
-    final Vector<Exception> exceptions = new Vector<Exception>();
+    final Vector<Exception> exceptions = new Vector<>();
 
     try {
       List<FileStatus> regionDirs = FSUtils.listStatusWithStatusFilter(fs, tableDir, new RegionDirFilter(fs));
@@ -1583,7 +1219,7 @@ public abstract class FSUtils {
         return finalResultMap;
       }
 
-      final List<Future<?>> futures = new ArrayList<Future<?>>(regionDirs.size());
+      final List<Future<?>> futures = new ArrayList<>(regionDirs.size());
 
       for (FileStatus regionDir : regionDirs) {
         if (null != errors) {
@@ -1599,7 +1235,7 @@ public abstract class FSUtils {
           @Override
           public void run() {
             try {
-              HashMap<String,Path> regionStoreFileMap = new HashMap<String, Path>();
+              HashMap<String,Path> regionStoreFileMap = new HashMap<>();
               List<FileStatus> familyDirs = FSUtils.listStatusWithStatusFilter(fs, dd, familyFilter);
               if (familyDirs == null) {
                 if (!fs.exists(dd)) {
@@ -1644,7 +1280,7 @@ public abstract class FSUtils {
           Future<?> future = executor.submit(getRegionStoreFileMapCall);
           futures.add(future);
         } else {
-          FutureTask<?> future = new FutureTask<Object>(getRegionStoreFileMapCall, null);
+          FutureTask<?> future = new FutureTask<>(getRegionStoreFileMapCall, null);
           future.run();
           futures.add(future);
         }
@@ -1730,7 +1366,7 @@ public abstract class FSUtils {
     final FileSystem fs, final Path hbaseRootDir, PathFilter sfFilter,
     ExecutorService executor, ErrorReporter errors)
   throws IOException, InterruptedException {
-    ConcurrentHashMap<String, Path> map = new ConcurrentHashMap<String, Path>(1024, 0.75f, 32);
+    ConcurrentHashMap<String, Path> map = new ConcurrentHashMap<>(1024, 0.75f, 32);
 
     // if this method looks similar to 'getTableFragmentation' that is because
     // it was borrowed from it.
@@ -1766,7 +1402,7 @@ public abstract class FSUtils {
   public static List<FileStatus> filterFileStatuses(Iterator<FileStatus> input,
       FileStatusFilter filter) {
     if (input == null) return null;
-    ArrayList<FileStatus> results = new ArrayList<FileStatus>();
+    ArrayList<FileStatus> results = new ArrayList<>();
     while (input.hasNext()) {
       FileStatus f = input.next();
       if (filter.accept(f)) {
@@ -1816,73 +1452,6 @@ public abstract class FSUtils {
   }
 
   /**
-   * Calls fs.listStatus() and treats FileNotFoundException as non-fatal
-   * This accommodates differences between hadoop versions, where hadoop 1
-   * does not throw a FileNotFoundException, and return an empty FileStatus[]
-   * while Hadoop 2 will throw FileNotFoundException.
-   *
-   * Where possible, prefer {@link #listStatusWithStatusFilter(FileSystem,
-   * Path, FileStatusFilter)} instead.
-   *
-   * @param fs file system
-   * @param dir directory
-   * @param filter path filter
-   * @return null if dir is empty or doesn't exist, otherwise FileStatus array
-   */
-  public static FileStatus [] listStatus(final FileSystem fs,
-      final Path dir, final PathFilter filter) throws IOException {
-    FileStatus [] status = null;
-    try {
-      status = filter == null ? fs.listStatus(dir) : fs.listStatus(dir, filter);
-    } catch (FileNotFoundException fnfe) {
-      // if directory doesn't exist, return null
-      if (LOG.isTraceEnabled()) {
-        LOG.trace(dir + " doesn't exist");
-      }
-    }
-    if (status == null || status.length < 1) return null;
-    return status;
-  }
-
-  /**
-   * Calls fs.listStatus() and treats FileNotFoundException as non-fatal
-   * This would accommodates differences between hadoop versions
-   *
-   * @param fs file system
-   * @param dir directory
-   * @return null if dir is empty or doesn't exist, otherwise FileStatus array
-   */
-  public static FileStatus[] listStatus(final FileSystem fs, final Path dir) throws IOException {
-    return listStatus(fs, dir, null);
-  }
-
-  /**
-   * Calls fs.delete() and returns the value returned by the fs.delete()
-   *
-   * @param fs
-   * @param path
-   * @param recursive
-   * @return the value returned by the fs.delete()
-   * @throws IOException
-   */
-  public static boolean delete(final FileSystem fs, final Path path, final boolean recursive)
-      throws IOException {
-    return fs.delete(path, recursive);
-  }
-
-  /**
-   * Calls fs.exists(). Checks if the specified path exists
-   *
-   * @param fs
-   * @param path
-   * @return the value returned by fs.exists()
-   * @throws IOException
-   */
-  public static boolean isExists(final FileSystem fs, final Path path) throws IOException {
-    return fs.exists(path);
-  }
-
-  /**
    * Throw an exception if an action is not permitted by a user on a file.
    *
    * @param ugi
@@ -1916,46 +1485,6 @@ public abstract class FSUtils {
       }
     }
     return false;
-  }
-
-  /**
-   * Log the current state of the filesystem from a certain root directory
-   * @param fs filesystem to investigate
-   * @param root root file/directory to start logging from
-   * @param LOG log to output information
-   * @throws IOException if an unexpected exception occurs
-   */
-  public static void logFileSystemState(final FileSystem fs, final Path root, Log LOG)
-      throws IOException {
-    LOG.debug("Current file system:");
-    logFSTree(LOG, fs, root, "|-");
-  }
-
-  /**
-   * Recursive helper to log the state of the FS
-   *
-   * @see #logFileSystemState(FileSystem, Path, Log)
-   */
-  private static void logFSTree(Log LOG, final FileSystem fs, final Path root, String prefix)
-      throws IOException {
-    FileStatus[] files = FSUtils.listStatus(fs, root, null);
-    if (files == null) return;
-
-    for (FileStatus file : files) {
-      if (file.isDirectory()) {
-        LOG.debug(prefix + file.getPath().getName() + "/");
-        logFSTree(LOG, fs, file.getPath(), prefix + "---");
-      } else {
-        LOG.debug(prefix + file.getPath().getName());
-      }
-    }
-  }
-
-  public static boolean renameAndSetModifyTime(final FileSystem fs, final Path src, final Path dest)
-      throws IOException {
-    // set the modify time for TimeToLive Cleaner
-    fs.setTimes(src, EnvironmentEdgeManager.currentTime(), -1);
-    return fs.rename(src, dest);
   }
 
   /**
@@ -1998,8 +1527,7 @@ public abstract class FSUtils {
   public static Map<String, Map<String, Float>> getRegionDegreeLocalityMappingFromFS(
       final Configuration conf, final String desiredTable, int threadPoolSize)
       throws IOException {
-    Map<String, Map<String, Float>> regionDegreeLocalityMapping =
-        new ConcurrentHashMap<String, Map<String, Float>>();
+    Map<String, Map<String, Float>> regionDegreeLocalityMapping = new ConcurrentHashMap<>();
     getRegionLocalityMappingFromFS(conf, desiredTable, threadPoolSize, null,
         regionDegreeLocalityMapping);
     return regionDegreeLocalityMapping;
@@ -2084,7 +1612,7 @@ public abstract class FSUtils {
     // run in multiple threads
     ThreadPoolExecutor tpe = new ThreadPoolExecutor(threadPoolSize,
         threadPoolSize, 60, TimeUnit.SECONDS,
-        new ArrayBlockingQueue<Runnable>(statusList.length));
+        new ArrayBlockingQueue<>(statusList.length));
     try {
       // ignore all file status items that are not of interest
       for (FileStatus regionStatus : statusList) {
@@ -2208,4 +1736,5 @@ public abstract class FSUtils {
       return null;
     }
   }
+
 }

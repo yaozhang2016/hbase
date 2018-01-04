@@ -33,31 +33,28 @@ import javax.crypto.spec.PBEKeySpec;
 import javax.crypto.spec.SecretKeySpec;
 
 import org.apache.commons.io.IOUtils;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.util.ReflectionUtils;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * A facade for encryption algorithms and related support.
  */
 @InterfaceAudience.Public
-@InterfaceStability.Evolving
 public final class Encryption {
 
-  private static final Log LOG = LogFactory.getLog(Encryption.class);
+  private static final Logger LOG = LoggerFactory.getLogger(Encryption.class);
 
   /**
    * Crypto context
    */
   @InterfaceAudience.Public
-  @InterfaceStability.Evolving
   public static class Context extends org.apache.hadoop.hbase.io.crypto.Context {
 
     /** The null crypto context */
@@ -208,7 +205,7 @@ public final class Encryption {
   /**
    * Return a 128 bit key derived from the concatenation of the supplied
    * arguments using PBKDF2WithHmacSHA1 at 10,000 iterations.
-   * 
+   *
    */
   public static byte[] pbkdf128(String... args) {
     byte[] salt = new byte[128];
@@ -231,7 +228,7 @@ public final class Encryption {
   /**
    * Return a 128 bit key derived from the concatenation of the supplied
    * arguments using PBKDF2WithHmacSHA1 at 10,000 iterations.
-   * 
+   *
    */
   public static byte[] pbkdf128(byte[]... args) {
     byte[] salt = new byte[128];
@@ -424,7 +421,7 @@ public final class Encryption {
    */
   public static Key getSecretKeyForSubject(String subject, Configuration conf)
       throws IOException {
-    KeyProvider provider = (KeyProvider)getKeyProvider(conf);
+    KeyProvider provider = getKeyProvider(conf);
     if (provider != null) try {
       Key[] keys = provider.getKeys(new String[] { subject });
       if (keys != null && keys.length > 0) {
@@ -533,15 +530,14 @@ public final class Encryption {
     }
   }
 
-  static final Map<Pair<String,String>,KeyProvider> keyProviderCache =
-      new ConcurrentHashMap<Pair<String,String>,KeyProvider>();
+  static final Map<Pair<String,String>,KeyProvider> keyProviderCache = new ConcurrentHashMap<>();
 
   public static KeyProvider getKeyProvider(Configuration conf) {
     String providerClassName = conf.get(HConstants.CRYPTO_KEYPROVIDER_CONF_KEY,
       KeyStoreKeyProvider.class.getName());
     String providerParameters = conf.get(HConstants.CRYPTO_KEYPROVIDER_PARAMETERS_KEY, "");
     try {
-      Pair<String,String> providerCacheKey = new Pair<String,String>(providerClassName,
+      Pair<String,String> providerCacheKey = new Pair<>(providerClassName,
         providerParameters);
       KeyProvider provider = keyProviderCache.get(providerCacheKey);
       if (provider != null) {

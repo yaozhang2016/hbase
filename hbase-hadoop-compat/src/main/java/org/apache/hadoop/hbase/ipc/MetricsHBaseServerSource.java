@@ -19,9 +19,9 @@
 
 package org.apache.hadoop.hbase.ipc;
 
-import org.apache.hadoop.hbase.metrics.BaseSource;
+import org.apache.hadoop.hbase.metrics.ExceptionTrackingSource;
 
-public interface MetricsHBaseServerSource extends BaseSource {
+public interface MetricsHBaseServerSource extends ExceptionTrackingSource {
   String AUTHORIZATION_SUCCESSES_NAME = "authorizationSuccesses";
   String AUTHORIZATION_SUCCESSES_DESC =
       "Number of authorization successes.";
@@ -62,32 +62,31 @@ public interface MetricsHBaseServerSource extends BaseSource {
   String REPLICATION_QUEUE_DESC =
       "Number of calls in the replication call queue waiting to be run";
   String PRIORITY_QUEUE_DESC = "Number of calls in the priority call queue waiting to be run";
+  String WRITE_QUEUE_NAME = "numCallsInWriteQueue";
+  String WRITE_QUEUE_DESC = "Number of calls in the write call queue; " +
+    "parsed requests waiting in scheduler to be executed";
+  String READ_QUEUE_NAME = "numCallsInReadQueue";
+  String READ_QUEUE_DESC = "Number of calls in the read call queue; " +
+    "parsed requests waiting in scheduler to be executed";
+  String SCAN_QUEUE_NAME = "numCallsInScanQueue";
+  String SCAN_QUEUE_DESC = "Number of calls in the scan call queue; " +
+    "parsed requests waiting in scheduler to be executed";
   String NUM_OPEN_CONNECTIONS_NAME = "numOpenConnections";
   String NUM_OPEN_CONNECTIONS_DESC = "Number of open connections.";
   String NUM_ACTIVE_HANDLER_NAME = "numActiveHandler";
   String NUM_ACTIVE_HANDLER_DESC = "Number of active rpc handlers.";
+  String NUM_ACTIVE_WRITE_HANDLER_NAME = "numActiveWriteHandler";
+  String NUM_ACTIVE_WRITE_HANDLER_DESC = "Number of active write rpc handlers.";
+  String NUM_ACTIVE_READ_HANDLER_NAME = "numActiveReadHandler";
+  String NUM_ACTIVE_READ_HANDLER_DESC = "Number of active read rpc handlers.";
+  String NUM_ACTIVE_SCAN_HANDLER_NAME = "numActiveScanHandler";
+  String NUM_ACTIVE_SCAN_HANDLER_DESC = "Number of active scan rpc handlers.";
   String NUM_GENERAL_CALLS_DROPPED_NAME = "numGeneralCallsDropped";
   String NUM_GENERAL_CALLS_DROPPED_DESC = "Total number of calls in general queue which " +
     "were dropped by CoDel RPC executor";
   String NUM_LIFO_MODE_SWITCHES_NAME = "numLifoModeSwitches";
   String NUM_LIFO_MODE_SWITCHES_DESC = "Total number of calls in general queue which " +
     "were served from the tail of the queue";
-
-  String EXCEPTIONS_NAME="exceptions";
-  String EXCEPTIONS_DESC="Exceptions caused by requests";
-  String EXCEPTIONS_TYPE_DESC="Number of requests that resulted in the specified type of Exception";
-  String EXCEPTIONS_OOO_NAME="exceptions.OutOfOrderScannerNextException";
-  String EXCEPTIONS_BUSY_NAME="exceptions.RegionTooBusyException";
-  String EXCEPTIONS_UNKNOWN_NAME="exceptions.UnknownScannerException";
-  String EXCEPTIONS_SCANNER_RESET_NAME="exceptions.ScannerResetException";
-  String EXCEPTIONS_SANITY_NAME="exceptions.FailedSanityCheckException";
-  String EXCEPTIONS_MOVED_NAME="exceptions.RegionMovedException";
-  String EXCEPTIONS_NSRE_NAME="exceptions.NotServingRegionException";
-  String EXCEPTIONS_MULTI_TOO_LARGE_NAME = "exceptions.multiResponseTooLarge";
-  String EXCEPTIONS_MULTI_TOO_LARGE_DESC = "A response to a multi request was too large and the " +
-      "rest of the requests will have to be retried.";
-  String EXCEPTIONS_CALL_QUEUE_TOO_BIG = "exceptions.callQueueTooBig";
-  String EXCEPTIONS_CALL_QUEUE_TOO_BIG_DESC = "Call queue is full";
 
   void authorizationSuccess();
 
@@ -98,21 +97,6 @@ public interface MetricsHBaseServerSource extends BaseSource {
   void authenticationFailure();
 
   void authenticationFallback();
-
-  void exception();
-
-  /**
-   * Different types of exceptions
-   */
-  void outOfOrderException();
-  void failedSanityException();
-  void movedRegionException();
-  void notServingRegionException();
-  void unknownScannerException();
-  void scannerResetException();
-  void tooBusyException();
-  void multiActionTooLargeException();
-  void callQueueTooBigException();
 
   void sentBytes(long count);
 
@@ -127,6 +111,4 @@ public interface MetricsHBaseServerSource extends BaseSource {
   void processedCall(int processingTime);
 
   void queuedAndProcessedCall(int totalTime);
-
-
 }

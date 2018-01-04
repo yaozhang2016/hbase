@@ -16,8 +16,6 @@
  */
 package org.apache.hadoop.hbase.io.encoding;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellUtil;
@@ -43,6 +41,8 @@ import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -58,7 +58,7 @@ import static org.junit.Assert.assertTrue;
  */
 @Category({IOTests.class, LargeTests.class})
 public class TestChangingEncoding {
-  private static final Log LOG = LogFactory.getLog(TestChangingEncoding.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestChangingEncoding.class);
   static final String CF = "EncodingTestCF";
   static final byte[] CF_BYTES = Bytes.toBytes(CF);
 
@@ -77,8 +77,7 @@ public class TestChangingEncoding {
       createEncodingsToIterate();
 
   private static final List<DataBlockEncoding> createEncodingsToIterate() {
-    List<DataBlockEncoding> encodings = new ArrayList<DataBlockEncoding>(
-        Arrays.asList(DataBlockEncoding.values()));
+    List<DataBlockEncoding> encodings = new ArrayList<>(Arrays.asList(DataBlockEncoding.values()));
     encodings.add(DataBlockEncoding.NONE);
     return Collections.unmodifiableList(encodings);
   }
@@ -151,6 +150,9 @@ public class TestChangingEncoding {
       Result result = table.get(get);
       for (int j = 0; j < NUM_COLS_PER_ROW; ++j) {
         Cell kv = result.getColumnLatestCell(CF_BYTES, getQualifier(j));
+        if (kv == null) {
+          continue;
+        }
         assertTrue(CellUtil.matchingValue(kv, getValue(batchId, i, j)));
       }
     }
@@ -218,7 +220,7 @@ public class TestChangingEncoding {
   private void compactAndWait() throws IOException, InterruptedException {
     LOG.debug("Compacting table " + tableName);
     HRegionServer rs = TEST_UTIL.getMiniHBaseCluster().getRegionServer(0);
-    Admin admin = TEST_UTIL.getHBaseAdmin();
+    Admin admin = TEST_UTIL.getAdmin();
     admin.majorCompact(tableName);
 
     // Waiting for the compaction to start, at least .5s.
@@ -239,7 +241,7 @@ public class TestChangingEncoding {
   public void testCrazyRandomChanges() throws Exception {
     prepareTest("RandomChanges");
     Random rand = new Random(2934298742974297L);
-    for (int i = 0; i < 20; ++i) {
+    for (int i = 0; i < 10; ++i) {
       int encodingOrdinal = rand.nextInt(DataBlockEncoding.values().length);
       DataBlockEncoding encoding = DataBlockEncoding.values()[encodingOrdinal];
       setEncodingConf(encoding, rand.nextBoolean());
@@ -247,5 +249,4 @@ public class TestChangingEncoding {
       verifyAllData();
     }
   }
-
 }

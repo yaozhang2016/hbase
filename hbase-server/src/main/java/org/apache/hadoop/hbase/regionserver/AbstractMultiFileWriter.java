@@ -22,10 +22,10 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.hbase.regionserver.CellSink;
 
 /**
@@ -34,7 +34,7 @@ import org.apache.hadoop.hbase.regionserver.CellSink;
 @InterfaceAudience.Private
 public abstract class AbstractMultiFileWriter implements CellSink, ShipperListener {
 
-  private static final Log LOG = LogFactory.getLog(AbstractMultiFileWriter.class);
+  private static final Logger LOG = LoggerFactory.getLogger(AbstractMultiFileWriter.class);
 
   /** Factory that is used to produce single StoreFile.Writer-s */
   protected WriterFactory writerFactory;
@@ -70,7 +70,7 @@ public abstract class AbstractMultiFileWriter implements CellSink, ShipperListen
       LOG.debug("Commit " + writers.size() + " writers, maxSeqId=" + maxSeqId
           + ", majorCompaction=" + majorCompaction);
     }
-    List<Path> paths = new ArrayList<Path>();
+    List<Path> paths = new ArrayList<>();
     for (StoreFileWriter writer : writers) {
       if (writer == null) {
         continue;
@@ -87,7 +87,7 @@ public abstract class AbstractMultiFileWriter implements CellSink, ShipperListen
    * Close all writers without throwing any exceptions. This is used when compaction failed usually.
    */
   public List<Path> abortWriters() {
-    List<Path> paths = new ArrayList<Path>();
+    List<Path> paths = new ArrayList<>();
     for (StoreFileWriter writer : writers()) {
       try {
         if (writer != null) {

@@ -18,11 +18,10 @@
 package org.apache.hadoop.hbase.regionserver.wal;
 
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.exceptions.TimeoutIOException;
-import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
-import org.apache.htrace.Span;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * A Future on a filesystem sync call. It given to a client or 'Handler' for it to wait on till the
@@ -69,25 +68,13 @@ class SyncFuture {
   private Thread t;
 
   /**
-   * Optionally carry a disconnected scope to the SyncRunner.
-   */
-  private Span span;
-
-  SyncFuture(long txid, Span span) {
-    this.t = Thread.currentThread();
-    this.txid = txid;
-    this.span = span;
-    this.doneTxid = NOT_DONE;
-  }
-
-  /**
    * Call this method to clear old usage and get it ready for new deploy.
    * @param txid the new transaction id
    * @param span current span, detached from caller. Don't forget to attach it when resuming after a
-   *          call to {@link #get()}.
+   *          call to {@link #get(long)}.
    * @return this
    */
-  synchronized SyncFuture reset(final long txid, Span span) {
+  synchronized SyncFuture reset(long txid) {
     if (t != null && t != Thread.currentThread()) {
       throw new IllegalStateException();
     }
@@ -97,7 +84,6 @@ class SyncFuture {
     }
     this.doneTxid = NOT_DONE;
     this.txid = txid;
-    this.span = span;
     this.throwable = null;
     return this;
   }
@@ -109,23 +95,6 @@ class SyncFuture {
 
   synchronized long getTxid() {
     return this.txid;
-  }
-
-  /**
-   * Retrieve the {@code span} instance from this Future. EventHandler calls this method to continue
-   * the span. Thread waiting on this Future musn't call this method until AFTER calling
-   * {@link #get()} and the future has been released back to the originating thread.
-   */
-  synchronized Span getSpan() {
-    return this.span;
-  }
-
-  /**
-   * Used to re-attach a {@code span} to the Future. Called by the EventHandler after a it has
-   * completed processing and detached the span from its scope.
-   */
-  synchronized void setSpan(Span span) {
-    this.span = span;
   }
 
   /**
@@ -157,15 +126,15 @@ class SyncFuture {
     throw new UnsupportedOperationException();
   }
 
-  synchronized long get(long timeout) throws InterruptedException,
+  synchronized long get(long timeoutNs) throws InterruptedException,
       ExecutionException, TimeoutIOException {
-    final long done = EnvironmentEdgeManager.currentTime() + timeout;
+    final long done = System.nanoTime() + timeoutNs;
     while (!isDone()) {
       wait(1000);
-      if (EnvironmentEdgeManager.currentTime() >= done) {
-        throw new TimeoutIOException("Failed to get sync result after "
-            + timeout + " ms for txid=" + this.txid
-            + ", WAL system stuck?");
+      if (System.nanoTime() >= done) {
+        throw new TimeoutIOException(
+            "Failed to get sync result after " + TimeUnit.NANOSECONDS.toMillis(timeoutNs)
+                + " ms for txid=" + this.txid + ", WAL system stuck?");
       }
     }
     if (this.throwable != null) {

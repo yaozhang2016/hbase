@@ -21,30 +21,31 @@ import java.security.PrivilegedExceptionAction;
 import java.util.HashMap;
 import java.util.Map;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Get;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.Table;
+import org.apache.hadoop.hbase.security.HBaseKerberosUtils;
 import org.apache.hadoop.hbase.security.User;
 import org.apache.hadoop.hbase.util.test.LoadTestDataGenerator;
 import org.apache.hadoop.security.UserGroupInformation;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * A MultiThreadReader that helps to work with ACL
  */
 public class MultiThreadedReaderWithACL extends MultiThreadedReader {
-  private static final Log LOG = LogFactory.getLog(MultiThreadedReaderWithACL.class);
+  private static final Logger LOG = LoggerFactory.getLogger(MultiThreadedReaderWithACL.class);
 
   private static final String COMMA = ",";
   /**
    * Maps user with Table instance. Because the table instance has to be created
    * per user inorder to work in that user's context
    */
-  private Map<String, Table> userVsTable = new HashMap<String, Table>();
-  private Map<String, User> users = new HashMap<String, User>();
+  private Map<String, Table> userVsTable = new HashMap<>();
+  private Map<String, User> users = new HashMap<>();
   private String[] userNames;
 
   public MultiThreadedReaderWithACL(LoadTestDataGenerator dataGen, Configuration conf,
@@ -121,7 +122,7 @@ public class MultiThreadedReaderWithACL extends MultiThreadedReader {
         UserGroupInformation realUserUgi;
         if(!users.containsKey(userNames[mod])) {
           if(User.isHBaseSecurityEnabled(conf)) {
-            realUserUgi = LoadTestTool.loginAndReturnUGI(conf, userNames[mod]);
+            realUserUgi = HBaseKerberosUtils.loginAndReturnUGI(conf, userNames[mod]);
           } else {
             realUserUgi = UserGroupInformation.createRemoteUser(userNames[mod]);
           }

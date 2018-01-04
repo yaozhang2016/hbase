@@ -25,8 +25,6 @@ import java.util.UUID;
 import java.util.Set;
 import java.util.HashSet;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
@@ -34,13 +32,15 @@ import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.testclassification.MiscTests;
 import org.junit.*;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Test {@link FSUtils}.
  */
 @Category({MiscTests.class, MediumTests.class})
 public class TestFSVisitor {
-  private static final Log LOG = LogFactory.getLog(TestFSVisitor.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestFSVisitor.class);
 
   private final static HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
 
@@ -59,9 +59,9 @@ public class TestFSVisitor {
     fs = FileSystem.get(TEST_UTIL.getConfiguration());
     rootDir = TEST_UTIL.getDataTestDir("hbase");
 
-    tableFamilies = new HashSet<String>();
-    tableRegions = new HashSet<String>();
-    tableHFiles = new HashSet<String>();
+    tableFamilies = new HashSet<>();
+    tableRegions = new HashSet<>();
+    tableHFiles = new HashSet<>();
     tableDir = createTableFiles(rootDir, TABLE_NAME, tableRegions, tableFamilies, tableHFiles);
     FSUtils.logFileSystemState(fs, rootDir, LOG);
   }
@@ -73,9 +73,9 @@ public class TestFSVisitor {
 
   @Test
   public void testVisitStoreFiles() throws IOException {
-    final Set<String> regions = new HashSet<String>();
-    final Set<String> families = new HashSet<String>();
-    final Set<String> hfiles = new HashSet<String>();
+    final Set<String> regions = new HashSet<>();
+    final Set<String> families = new HashSet<>();
+    final Set<String> hfiles = new HashSet<>();
     FSVisitor.visitTableStoreFiles(fs, tableDir, new FSVisitor.StoreFileVisitor() {
       public void storeFile(final String region, final String family, final String hfileName)
           throws IOException {

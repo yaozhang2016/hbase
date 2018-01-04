@@ -17,9 +17,9 @@
  */
 package org.apache.hadoop.hbase.util;
 
-import static com.google.common.base.Preconditions.checkArgument;
-import static com.google.common.base.Preconditions.checkNotNull;
-import static com.google.common.base.Preconditions.checkPositionIndex;
+import static org.apache.hbase.thirdparty.com.google.common.base.Preconditions.checkArgument;
+import static org.apache.hbase.thirdparty.com.google.common.base.Preconditions.checkNotNull;
+import static org.apache.hbase.thirdparty.com.google.common.base.Preconditions.checkPositionIndex;
 
 import java.io.DataInput;
 import java.io.DataOutput;
@@ -30,28 +30,29 @@ import java.math.BigInteger;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.Iterator;
 import java.util.List;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellComparator;
 import org.apache.hadoop.hbase.KeyValue;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
 import org.apache.hadoop.io.RawComparator;
 import org.apache.hadoop.io.WritableComparator;
 import org.apache.hadoop.io.WritableUtils;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
+
+import com.google.protobuf.ByteString;
 
 import sun.misc.Unsafe;
-
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.collect.Lists;
-import com.google.protobuf.ByteString;
 
 /**
  * Utility class that handles byte arrays, conversions to/from other types,
@@ -60,7 +61,6 @@ import com.google.protobuf.ByteString;
  */
 @SuppressWarnings("restriction")
 @InterfaceAudience.Public
-@InterfaceStability.Stable
 @edu.umd.cs.findbugs.annotations.SuppressWarnings(
     value="EQ_CHECK_FOR_OPERAND_NOT_COMPATIBLE_WITH_THIS",
     justification="It has been like this forever")
@@ -73,7 +73,7 @@ public class Bytes implements Comparable<Bytes> {
   //HConstants.EMPTY_BYTE_ARRAY should be updated if this changed
   private static final byte [] EMPTY_BYTE_ARRAY = new byte [0];
 
-  private static final Log LOG = LogFactory.getLog(Bytes.class);
+  private static final Logger LOG = LoggerFactory.getLogger(Bytes.class);
 
   /**
    * Size of boolean in bytes
@@ -272,6 +272,7 @@ public class Bytes implements Comparable<Bytes> {
    * @return Positive if left is bigger than right, 0 if they are equal, and
    *         negative if left is smaller than right.
    */
+  @Override
   public int compareTo(Bytes that) {
     return BYTES_RAWCOMPARATOR.compare(
         this.bytes, this.offset, this.length,
@@ -335,7 +336,6 @@ public class Bytes implements Comparable<Bytes> {
    * Byte array comparator class.
    */
   @InterfaceAudience.Public
-  @InterfaceStability.Stable
   public static class ByteArrayComparator implements RawComparator<byte []> {
     /**
      * Constructor
@@ -363,7 +363,6 @@ public class Bytes implements Comparable<Bytes> {
   // while comparing row keys, start keys etc; but as the largest value for comparing
   // region boundaries for endKeys.
   @InterfaceAudience.Public
-  @InterfaceStability.Stable
   public static class RowEndKeyComparator extends ByteArrayComparator {
     @Override
     public int compare(byte[] left, byte[] right) {
@@ -1161,9 +1160,9 @@ public class Bytes implements Comparable<Bytes> {
       return UnsafeAccess.toShort(bytes, offset);
     } else {
       short n = 0;
-      n ^= bytes[offset] & 0xFF;
-      n <<= 8;
-      n ^= bytes[offset+1] & 0xFF;
+      n = (short) ((n ^ bytes[offset]) & 0xFF);
+      n = (short) (n << 8);
+      n = (short) ((n ^ bytes[offset+1]) & 0xFF);
       return n;
    }
   }
@@ -1514,51 +1513,6 @@ public class Bytes implements Comparable<Bytes> {
       }
 
       /**
-       * Returns true if x1 is less than x2, when both values are treated as
-       * unsigned long.
-       * Both values are passed as is read by Unsafe. When platform is Little Endian, have to
-       * convert to corresponding Big Endian value and then do compare. We do all writes in
-       * Big Endian format.
-       */
-      static boolean lessThanUnsignedLong(long x1, long x2) {
-        if (UnsafeAccess.littleEndian) {
-          x1 = Long.reverseBytes(x1);
-          x2 = Long.reverseBytes(x2);
-        }
-        return (x1 + Long.MIN_VALUE) < (x2 + Long.MIN_VALUE);
-      }
-
-      /**
-       * Returns true if x1 is less than x2, when both values are treated as
-       * unsigned int.
-       * Both values are passed as is read by Unsafe. When platform is Little Endian, have to
-       * convert to corresponding Big Endian value and then do compare. We do all writes in
-       * Big Endian format.
-       */
-      static boolean lessThanUnsignedInt(int x1, int x2) {
-        if (UnsafeAccess.littleEndian) {
-          x1 = Integer.reverseBytes(x1);
-          x2 = Integer.reverseBytes(x2);
-        }
-        return (x1 & 0xffffffffL) < (x2 & 0xffffffffL);
-      }
-
-      /**
-       * Returns true if x1 is less than x2, when both values are treated as
-       * unsigned short.
-       * Both values are passed as is read by Unsafe. When platform is Little Endian, have to
-       * convert to corresponding Big Endian value and then do compare. We do all writes in
-       * Big Endian format.
-       */
-      static boolean lessThanUnsignedShort(short x1, short x2) {
-        if (UnsafeAccess.littleEndian) {
-          x1 = Short.reverseBytes(x1);
-          x2 = Short.reverseBytes(x2);
-        }
-        return (x1 & 0xffff) < (x2 & 0xffff);
-      }
-
-      /**
        * Lexicographically compare two arrays.
        *
        * @param buffer1 left operand
@@ -1579,47 +1533,42 @@ public class Bytes implements Comparable<Bytes> {
             length1 == length2) {
           return 0;
         }
+        final int stride = 8;
         final int minLength = Math.min(length1, length2);
-        final int minWords = minLength / SIZEOF_LONG;
+        int strideLimit = minLength & ~(stride - 1);
         final long offset1Adj = offset1 + UnsafeAccess.BYTE_ARRAY_BASE_OFFSET;
         final long offset2Adj = offset2 + UnsafeAccess.BYTE_ARRAY_BASE_OFFSET;
+        int i;
 
         /*
-         * Compare 8 bytes at a time. Benchmarking shows comparing 8 bytes at a
-         * time is no slower than comparing 4 bytes at a time even on 32-bit.
-         * On the other hand, it is substantially faster on 64-bit.
+         * Compare 8 bytes at a time. Benchmarking on x86 shows a stride of 8 bytes is no slower
+         * than 4 bytes even on 32-bit. On the other hand, it is substantially faster on 64-bit.
          */
-        // This is the end offset of long parts.
-        int j = minWords << 3; // Same as minWords * SIZEOF_LONG
-        for (int i = 0; i < j; i += SIZEOF_LONG) {
-          long lw = theUnsafe.getLong(buffer1, offset1Adj + (long) i);
-          long rw = theUnsafe.getLong(buffer2, offset2Adj + (long) i);
-          long diff = lw ^ rw;
-          if (diff != 0) {
-              return lessThanUnsignedLong(lw, rw) ? -1 : 1;
-          }
-        }
-        int offset = j;
+        for (i = 0; i < strideLimit; i += stride) {
+          long lw = theUnsafe.getLong(buffer1, offset1Adj + i);
+          long rw = theUnsafe.getLong(buffer2, offset2Adj + i);
+          if (lw != rw) {
+            if(!UnsafeAccess.littleEndian) {
+              return ((lw + Long.MIN_VALUE) < (rw + Long.MIN_VALUE)) ? -1 : 1;
+            }
 
-        if (minLength - offset >= SIZEOF_INT) {
-          int il = theUnsafe.getInt(buffer1, offset1Adj + offset);
-          int ir = theUnsafe.getInt(buffer2, offset2Adj + offset);
-          if (il != ir) {
-            return lessThanUnsignedInt(il, ir) ? -1: 1;
+            /*
+             * We want to compare only the first index where left[index] != right[index]. This
+             * corresponds to the least significant nonzero byte in lw ^ rw, since lw and rw are
+             * little-endian. Long.numberOfTrailingZeros(diff) tells us the least significant
+             * nonzero bit, and zeroing out the first three bits of L.nTZ gives us the shift to get
+             * that least significant nonzero byte. This comparison logic is based on UnsignedBytes
+             * comparator from guava v21
+             */
+            int n = Long.numberOfTrailingZeros(lw ^ rw) & ~0x7;
+            return ((int) ((lw >>> n) & 0xFF)) - ((int) ((rw >>> n) & 0xFF));
           }
-          offset += SIZEOF_INT;
         }
-        if (minLength - offset >= SIZEOF_SHORT) {
-          short sl = theUnsafe.getShort(buffer1, offset1Adj + offset);
-          short sr = theUnsafe.getShort(buffer2, offset2Adj + offset);
-          if (sl != sr) {
-            return lessThanUnsignedShort(sl, sr) ? -1: 1;
-          }
-          offset += SIZEOF_SHORT;
-        }
-        if (minLength - offset == 1) {
-          int a = (buffer1[(int)(offset1 + offset)] & 0xff);
-          int b = (buffer2[(int)(offset2 + offset)] & 0xff);
+
+        // The epilogue to cover the last (minLength % stride) elements.
+        for (; i < minLength; i++) {
+          int a = (buffer1[offset1 + i] & 0xFF);
+          int b = (buffer2[offset2 + i] & 0xFF);
           if (a != b) {
             return a - b;
           }
@@ -1990,7 +1939,7 @@ public class Bytes implements Comparable<Bytes> {
   public static int hashCode(byte[] bytes, int offset, int length) {
     int hash = 1;
     for (int i = offset; i < offset + length; i++)
-      hash = (31 * hash) + (int) bytes[i];
+      hash = (31 * hash) + bytes[i];
     return hash;
   }
 
@@ -2391,21 +2340,24 @@ public class Bytes implements Comparable<Bytes> {
   }
 
   public static boolean isSorted(Collection<byte[]> arrays) {
-    byte[] previous = new byte[0];
-    for (byte[] array : IterableUtils.nullSafe(arrays)) {
-      if (Bytes.compareTo(previous, array) > 0) {
-        return false;
+    if (!CollectionUtils.isEmpty(arrays)) {
+      byte[] previous = new byte[0];
+      for (byte[] array : arrays) {
+        if (Bytes.compareTo(previous, array) > 0) {
+          return false;
+        }
+        previous = array;
       }
-      previous = array;
     }
     return true;
   }
 
   public static List<byte[]> getUtf8ByteArrays(List<String> strings) {
-    List<byte[]> byteArrays = Lists.newArrayListWithCapacity(CollectionUtils.nullSafeSize(strings));
-    for (String s : IterableUtils.nullSafe(strings)) {
-      byteArrays.add(Bytes.toBytes(s));
+    if (CollectionUtils.isEmpty(strings)) {
+      return Collections.emptyList();
     }
+    List<byte[]> byteArrays = new ArrayList<>(strings.size());
+    strings.forEach(s -> byteArrays.add(Bytes.toBytes(s)));
     return byteArrays;
   }
 
@@ -2571,7 +2523,7 @@ public class Bytes implements Comparable<Bytes> {
     }
     return new String(ch);
   }
-  
+
   /**
    * Convert a byte array into a hex string
    */

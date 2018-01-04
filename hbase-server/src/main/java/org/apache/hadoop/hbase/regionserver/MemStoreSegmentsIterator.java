@@ -20,11 +20,10 @@
 package org.apache.hadoop.hbase.regionserver;
 
 import org.apache.hadoop.hbase.Cell;
-import org.apache.hadoop.hbase.CellComparator;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
 
 import java.io.IOException;
-import java.util.*;
+import java.util.Iterator;
 
 /**
  * The MemStoreSegmentsIterator is designed to perform one iteration over given list of segments
@@ -35,29 +34,11 @@ import java.util.*;
 @InterfaceAudience.Private
 public abstract class MemStoreSegmentsIterator implements Iterator<Cell> {
 
-  // scanner for full or partial pipeline (heap of segment scanners)
-  // we need to keep those scanners in order to close them at the end
-  protected KeyValueScanner scanner;
-
   protected final ScannerContext scannerContext;
 
-
   // C-tor
-  public MemStoreSegmentsIterator(List<ImmutableSegment> segments, CellComparator comparator,
-      int compactionKVMax, Store store) throws IOException {
-
+  public MemStoreSegmentsIterator(int compactionKVMax) throws IOException {
     this.scannerContext = ScannerContext.newBuilder().setBatchLimit(compactionKVMax).build();
-
-    // list of Scanners of segments in the pipeline, when compaction starts
-    List<KeyValueScanner> scanners = new ArrayList<KeyValueScanner>();
-
-    // create the list of scanners with the smallest read point, meaning that
-    // only relevant KVs are going to be returned by the pipeline traversing
-    for (Segment segment : segments) {
-      scanners.add(segment.getScanner(store.getSmallestReadPoint()));
-    }
-
-    scanner = new MemStoreScanner(comparator, scanners, true);
   }
 
   public abstract void close();

@@ -23,15 +23,16 @@ import static org.apache.hadoop.hbase.HConstants.HBASE_MASTER_LOGCLEANER_PLUGINS
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.NavigableMap;
+import java.util.OptionalLong;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.hadoop.hbase.wal.WALKey;
+import org.apache.hadoop.hbase.wal.WALKeyImpl;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.apache.hadoop.hbase.coprocessor.CoprocessorHost;
 import org.apache.hadoop.hbase.master.cleaner.HFileCleaner;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
@@ -44,8 +45,7 @@ import org.apache.hadoop.hbase.Server;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.WALEntry;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.WALProtos;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.WALProtos.BulkLoadDescriptor;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.WALProtos.StoreDescriptor;
+import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.hbase.regionserver.ReplicationSinkService;
 import org.apache.hadoop.hbase.regionserver.ReplicationSourceService;
 import org.apache.hadoop.hbase.replication.ReplicationException;
@@ -55,23 +55,23 @@ import org.apache.hadoop.hbase.replication.ReplicationQueues;
 import org.apache.hadoop.hbase.replication.ReplicationQueuesArguments;
 import org.apache.hadoop.hbase.replication.ReplicationTracker;
 import org.apache.hadoop.hbase.regionserver.wal.WALActionsListener;
-import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
+import org.apache.hadoop.hbase.wal.WALEdit;
 import org.apache.hadoop.hbase.replication.master.ReplicationHFileCleaner;
 import org.apache.hadoop.hbase.replication.master.ReplicationLogCleaner;
-import org.apache.hadoop.hbase.wal.WALKey;
 import org.apache.hadoop.hbase.zookeeper.ZKClusterId;
 import org.apache.zookeeper.KeeperException;
-
-import com.google.common.util.concurrent.ThreadFactoryBuilder;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.apache.hbase.thirdparty.com.google.common.util.concurrent.ThreadFactoryBuilder;
 
 /**
  * Gateway to Replication.  Used by {@link org.apache.hadoop.hbase.regionserver.HRegionServer}.
  */
 @InterfaceAudience.Private
-public class Replication extends WALActionsListener.Base implements
-  ReplicationSourceService, ReplicationSinkService {
-  private static final Log LOG =
-      LogFactory.getLog(Replication.class);
+public class Replication implements
+  ReplicationSourceService, ReplicationSinkService, WALActionsListener {
+  private static final Logger LOG =
+      LoggerFactory.getLogger(Replication.class);
   private boolean replicationForBulkLoadData;
   private ReplicationSourceManager replicationManager;
   private ReplicationQueues replicationQueues;
@@ -86,6 +86,7 @@ public class Replication extends WALActionsListener.Base implements
   private int statsThreadPeriod;
   // ReplicationLoad to access replication metrics
   private ReplicationLoad replicationLoad;
+
   /**
    * Instantiate the replication management (if rep is enabled).
    * @param server Hosting server
@@ -94,9 +95,8 @@ public class Replication extends WALActionsListener.Base implements
    * @param oldLogDir directory where logs are archived
    * @throws IOException
    */
-  public Replication(final Server server, final FileSystem fs,
-      final Path logDir, final Path oldLogDir) throws IOException{
-    initialize(server, fs, logDir, oldLogDir);
+  public Replication(Server server, FileSystem fs, Path logDir, Path oldLogDir) throws IOException {
+    initialize(server, fs, logDir, oldLogDir, p -> OptionalLong.empty());
   }
 
   /**
@@ -105,8 +105,8 @@ public class Replication extends WALActionsListener.Base implements
   public Replication() {
   }
 
-  public void initialize(final Server server, final FileSystem fs,
-      final Path logDir, final Path oldLogDir) throws IOException {
+  public void initialize(Server server, FileSystem fs, Path logDir, Path oldLogDir,
+      WALFileLengthProvider walFileLengthProvider) throws IOException {
     this.server = server;
     this.conf = this.server.getConfiguration();
     this.replicationForBulkLoadData = isReplicationForBulkLoadDataEnabled(this.conf);
@@ -145,8 +145,8 @@ public class Replication extends WALActionsListener.Base implements
       throw new IOException("Could not read cluster id", ke);
     }
     this.replicationManager =
-        new ReplicationSourceManager(replicationQueues, replicationPeers, replicationTracker,
-            conf, this.server, fs, logDir, oldLogDir, clusterId);
+        new ReplicationSourceManager(replicationQueues, replicationPeers, replicationTracker, conf,
+            this.server, fs, logDir, oldLogDir, clusterId, walFileLengthProvider);
     this.statsThreadPeriod =
         this.conf.getInt("replication.stats.thread.period.seconds", 5 * 60);
     LOG.debug("ReplicationStatisticsThread " + this.statsThreadPeriod);
@@ -236,34 +236,6 @@ public class Replication extends WALActionsListener.Base implements
     scopeWALEdits(logKey, logEdit, this.conf, this.getReplicationManager());
   }
 
-  @Override
-  public void postAppend(long entryLen, long elapsedTimeMillis, final WALKey logKey,
-      final WALEdit edit) throws IOException {
-    NavigableMap<byte[], Integer> scopes = logKey.getReplicationScopes();
-    if (this.replicationForBulkLoadData && scopes != null && !scopes.isEmpty()) {
-      TableName tableName = logKey.getTablename();
-      for (Cell c : edit.getCells()) {
-        // Only check for bulk load events
-        if (CellUtil.matchingQualifier(c, WALEdit.BULK_LOAD)) {
-          BulkLoadDescriptor bld = null;
-          try {
-            bld = WALEdit.getBulkLoadDescriptor(c);
-          } catch (IOException e) {
-            LOG.error("Failed to get bulk load events information from the wal file.", e);
-            throw e;
-          }
-
-          for (StoreDescriptor s : bld.getStoresList()) {
-            byte[] fam = s.getFamilyName().toByteArray();
-            if (scopes.containsKey(fam)) {
-              addHFileRefsToQueue(this.getReplicationManager(), tableName, fam, s);
-            }
-          }
-        }
-      }
-    }
-  }
-
   /**
    * Utility method used to set the correct scopes on each log key. Doesn't set a scope on keys from
    * compaction WAL edits and if the scope is local.
@@ -294,14 +266,14 @@ public class Replication extends WALActionsListener.Base implements
       }
     }
     if ((!replicationForBulkLoadEnabled && !foundOtherEdits) || logEdit.isReplay()) {
-      logKey.serializeReplicationScope(false);
+      ((WALKeyImpl)logKey).serializeReplicationScope(false);
     }
   }
 
-  private static void addHFileRefsToQueue(ReplicationSourceManager replicationManager,
-      TableName tableName, byte[] family, StoreDescriptor s) throws IOException {
+  void addHFileRefsToQueue(TableName tableName, byte[] family, List<Pair<Path, Path>> pairs)
+      throws IOException {
     try {
-      replicationManager.addHFileRefs(tableName, family, s.getStoreFileList());
+      this.replicationManager.addHFileRefs(tableName, family, pairs);
     } catch (ReplicationException e) {
       LOG.error("Failed to add hfile references in the replication queue.", e);
       throw new IOException(e);
@@ -333,6 +305,22 @@ public class Replication extends WALActionsListener.Base implements
       cleanerClass = ReplicationHFileCleaner.class.getCanonicalName();
       if (!plugins.contains(cleanerClass)) {
         conf.set(HFileCleaner.MASTER_HFILE_CLEANER_PLUGINS, plugins + "," + cleanerClass);
+      }
+    }
+  }
+
+  /**
+   * This method modifies the region server's configuration in order to inject replication-related
+   * features
+   * @param conf region server configurations
+   */
+  public static void decorateRegionServerConfiguration(Configuration conf) {
+    if (isReplicationForBulkLoadDataEnabled(conf)) {
+      String plugins = conf.get(CoprocessorHost.REGIONSERVER_COPROCESSOR_CONF_KEY, "");
+      String rsCoprocessorClass = ReplicationObserver.class.getCanonicalName();
+      if (!plugins.contains(rsCoprocessorClass)) {
+        conf.set(CoprocessorHost.REGIONSERVER_COPROCESSOR_CONF_KEY,
+          plugins + "," + rsCoprocessorClass);
       }
     }
   }
@@ -376,14 +364,12 @@ public class Replication extends WALActionsListener.Base implements
   }
 
   private void buildReplicationLoad() {
-    List<MetricsSource> sourceMetricsList = new ArrayList<MetricsSource>();
+    List<MetricsSource> sourceMetricsList = new ArrayList<>();
 
     // get source
     List<ReplicationSourceInterface> sources = this.replicationManager.getSources();
     for (ReplicationSourceInterface source : sources) {
-      if (source instanceof ReplicationSource) {
-        sourceMetricsList.add(((ReplicationSource) source).getSourceMetrics());
-      }
+      sourceMetricsList.add(source.getSourceMetrics());
     }
 
     // get old source

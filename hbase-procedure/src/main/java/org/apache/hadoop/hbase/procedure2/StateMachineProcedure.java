@@ -19,22 +19,21 @@
 package org.apache.hadoop.hbase.procedure2;
 
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceStability;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ProcedureProtos.StateMachineProcedureData;
 
 /**
  * Procedure described by a series of steps.
  *
- * The procedure implementor must have an enum of 'states', describing
+ * <p>The procedure implementor must have an enum of 'states', describing
  * the various step of the procedure.
  * Once the procedure is running, the procedure-framework will call executeFromState()
  * using the 'state' provided by the user. The first call to executeFromState()
@@ -46,7 +45,7 @@ import org.apache.hadoop.hbase.shaded.protobuf.generated.ProcedureProtos.StateMa
 @InterfaceStability.Evolving
 public abstract class StateMachineProcedure<TEnvironment, TState>
     extends Procedure<TEnvironment> {
-  private static final Log LOG = LogFactory.getLog(StateMachineProcedure.class);
+  private static final Logger LOG = LoggerFactory.getLogger(StateMachineProcedure.class);
 
   private static final int EOF_STATE = Integer.MIN_VALUE;
 
@@ -56,7 +55,21 @@ public abstract class StateMachineProcedure<TEnvironment, TState>
   private int stateCount = 0;
   private int[] states = null;
 
-  private ArrayList<Procedure> subProcList = null;
+  private List<Procedure<TEnvironment>> subProcList = null;
+
+  protected final int getCycles() {
+    return cycles;
+  }
+
+  /**
+   * Cycles on same state. Good for figuring if we are stuck.
+   */
+  private int cycles = 0;
+
+  /**
+   * Ordinal of the previous state. So we can tell if we are progressing or not.
+   */
+  private int previousState;
 
   protected enum Flow {
     HAS_MORE_STATE,
@@ -70,7 +83,7 @@ public abstract class StateMachineProcedure<TEnvironment, TState>
    *         Flow.HAS_MORE_STATE if there is another step.
    */
   protected abstract Flow executeFromState(TEnvironment env, TState state)
-    throws ProcedureSuspendedException, ProcedureYieldException, InterruptedException;
+  throws ProcedureSuspendedException, ProcedureYieldException, InterruptedException;
 
   /**
    * called to perform the rollback of the specified state
@@ -105,11 +118,8 @@ public abstract class StateMachineProcedure<TEnvironment, TState>
    * @param state the state enum object
    */
   protected void setNextState(final TState state) {
-    if (aborted.get() && isRollbackSupported(getCurrentState())) {
-      setAbortFailure(getClass().getSimpleName(), "abort requested");
-    } else {
-      setNextState(getStateId(state));
-    }
+    setNextState(getStateId(state));
+    failIfAborted();
   }
 
   /**
@@ -128,12 +138,15 @@ public abstract class StateMachineProcedure<TEnvironment, TState>
    * Add a child procedure to execute
    * @param subProcedure the child procedure
    */
-  protected void addChildProcedure(Procedure... subProcedure) {
+  protected void addChildProcedure(Procedure<TEnvironment>... subProcedure) {
+    if (subProcedure == null) return;
+    final int len = subProcedure.length;
+    if (len == 0) return;
     if (subProcList == null) {
-      subProcList = new ArrayList<Procedure>(subProcedure.length);
+      subProcList = new ArrayList<>(len);
     }
-    for (int i = 0; i < subProcedure.length; ++i) {
-      Procedure proc = subProcedure[i];
+    for (int i = 0; i < len; ++i) {
+      Procedure<TEnvironment> proc = subProcedure[i];
       if (!proc.hasOwner()) proc.setOwner(getOwner());
       subProcList.add(proc);
     }
@@ -141,25 +154,38 @@ public abstract class StateMachineProcedure<TEnvironment, TState>
 
   @Override
   protected Procedure[] execute(final TEnvironment env)
-      throws ProcedureSuspendedException, ProcedureYieldException, InterruptedException {
+  throws ProcedureSuspendedException, ProcedureYieldException, InterruptedException {
     updateTimestamp();
     try {
-      if (!hasMoreState() || isFailed()) return null;
+      failIfAborted();
 
+      if (!hasMoreState() || isFailed()) return null;
       TState state = getCurrentState();
       if (stateCount == 0) {
         setNextState(getStateId(state));
       }
 
+      if (LOG.isTraceEnabled()) {
+        LOG.trace(state  + " " + this + "; cycles=" + this.cycles);
+      }
+      // Keep running count of cycles
+      if (getStateId(state) != this.previousState) {
+        this.previousState = getStateId(state);
+        this.cycles = 0;
+      } else {
+        this.cycles++;
+      }
+
+      if (LOG.isDebugEnabled()) {
+        LOG.debug(toString());
+      }
       stateFlow = executeFromState(env, state);
       if (!hasMoreState()) setNextState(EOF_STATE);
-
-      if (subProcList != null && subProcList.size() != 0) {
+      if (subProcList != null && !subProcList.isEmpty()) {
         Procedure[] subProcedures = subProcList.toArray(new Procedure[subProcList.size()]);
         subProcList = null;
         return subProcedures;
       }
-
       return (isWaiting() || isFailed() || !hasMoreState()) ? null : new Procedure[] {this};
     } finally {
       updateTimestamp();
@@ -187,16 +213,31 @@ public abstract class StateMachineProcedure<TEnvironment, TState>
   protected boolean abort(final TEnvironment env) {
     final boolean isDebugEnabled = LOG.isDebugEnabled();
     final TState state = getCurrentState();
-    if (isRollbackSupported(state)) {
-      if (isDebugEnabled) {
-        LOG.debug("abort requested for " + this + " state=" + state);
-      }
+    if (isDebugEnabled) {
+      LOG.debug("abort requested for " + this + " state=" + state);
+    }
+
+    if (hasMoreState()) {
       aborted.set(true);
       return true;
     } else if (isDebugEnabled) {
       LOG.debug("ignoring abort request on state=" + state + " for " + this);
     }
     return false;
+  }
+
+  /**
+   * If procedure has more states then abort it otherwise procedure is finished and abort can be
+   * ignored.
+   */
+  protected final void failIfAborted() {
+    if (aborted.get()) {
+      if (hasMoreState()) {
+        setAbortFailure(getClass().getSimpleName(), "abort requested");
+      } else {
+        LOG.warn("Ignoring abort request on state='" + getCurrentState() + "' for " + this);
+      }
+    }
   }
 
   /**
@@ -216,7 +257,7 @@ public abstract class StateMachineProcedure<TEnvironment, TState>
     return stateFlow != Flow.NO_MORE_STATE;
   }
 
-  private TState getCurrentState() {
+  protected TState getCurrentState() {
     return stateCount > 0 ? getState(states[stateCount-1]) : getInitialState();
   }
 
@@ -245,17 +286,19 @@ public abstract class StateMachineProcedure<TEnvironment, TState>
   }
 
   @Override
-  protected void serializeStateData(final OutputStream stream) throws IOException {
+  protected void serializeStateData(ProcedureStateSerializer serializer)
+      throws IOException {
     StateMachineProcedureData.Builder data = StateMachineProcedureData.newBuilder();
     for (int i = 0; i < stateCount; ++i) {
       data.addState(states[i]);
     }
-    data.build().writeDelimitedTo(stream);
+    serializer.serialize(data.build());
   }
 
   @Override
-  protected void deserializeStateData(final InputStream stream) throws IOException {
-    StateMachineProcedureData data = StateMachineProcedureData.parseDelimitedFrom(stream);
+  protected void deserializeStateData(ProcedureStateSerializer serializer)
+      throws IOException {
+    StateMachineProcedureData data = serializer.deserialize(StateMachineProcedureData.class);
     stateCount = data.getStateCount();
     if (stateCount > 0) {
       states = new int[stateCount];

@@ -22,20 +22,19 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.concurrent.LinkedBlockingQueue;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.CompatibilitySingletonFactory;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.test.MetricsAssertHelper;
 import org.apache.hadoop.hbase.testclassification.ClientTests;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
-import org.apache.hadoop.hbase.thrift.CallQueue.Call;
+import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 import org.junit.runners.Parameterized.Parameters;
-import org.junit.Test;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Unit testing for CallQueue, a part of the
@@ -45,7 +44,7 @@ import org.junit.Test;
 @RunWith(Parameterized.class)
 public class TestCallQueue {
 
-  private static final Log LOG = LogFactory.getLog(TestCallQueue.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestCallQueue.class);
   private static final HBaseTestingUtility UTIL = new HBaseTestingUtility();
 
   private static final MetricsAssertHelper metricsHelper =
@@ -56,7 +55,7 @@ public class TestCallQueue {
 
   @Parameters
   public static Collection<Object[]> getParameters() {
-    Collection<Object[]> parameters = new ArrayList<Object[]>();
+    Collection<Object[]> parameters = new ArrayList<>();
     for (int elementsAdded : new int[] {100, 200, 300}) {
       for (int elementsRemoved : new int[] {0, 20, 100}) {
         parameters.add(new Object[]{new Integer(elementsAdded),
@@ -77,8 +76,7 @@ public class TestCallQueue {
   @Test(timeout = 60000)
   public void testPutTake() throws Exception {
     ThriftMetrics metrics = createMetrics();
-    CallQueue callQueue = new CallQueue(
-        new LinkedBlockingQueue<Call>(), metrics);
+    CallQueue callQueue = new CallQueue(new LinkedBlockingQueue<>(), metrics);
     for (int i = 0; i < elementsAdded; ++i) {
       callQueue.put(createDummyRunnable());
     }
@@ -91,8 +89,7 @@ public class TestCallQueue {
   @Test(timeout = 60000)
   public void testOfferPoll() throws Exception {
     ThriftMetrics metrics = createMetrics();
-    CallQueue callQueue = new CallQueue(
-        new LinkedBlockingQueue<Call>(), metrics);
+    CallQueue callQueue = new CallQueue(new LinkedBlockingQueue<>(), metrics);
     for (int i = 0; i < elementsAdded; ++i) {
       callQueue.offer(createDummyRunnable());
     }

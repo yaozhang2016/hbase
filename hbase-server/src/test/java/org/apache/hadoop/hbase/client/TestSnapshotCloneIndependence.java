@@ -19,8 +19,8 @@
 package org.apache.hadoop.hbase.client;
 
 import java.util.List;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import java.util.regex.Pattern;
+
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
@@ -36,7 +36,6 @@ import org.apache.hadoop.hbase.regionserver.ConstantSizeRegionSplitPolicy;
 import org.apache.hadoop.hbase.snapshot.SnapshotTestingUtils;
 import org.apache.hadoop.hbase.testclassification.ClientTests;
 import org.apache.hadoop.hbase.testclassification.LargeTests;
-import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.Threads;
 import org.junit.After;
@@ -50,13 +49,15 @@ import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.junit.rules.TestName;
 import org.junit.rules.TestRule;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Test to verify that the cloned table is independent of the table from which it was cloned
  */
 @Category({LargeTests.class, ClientTests.class})
 public class TestSnapshotCloneIndependence {
-  private static final Log LOG = LogFactory.getLog(TestSnapshotCloneIndependence.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestSnapshotCloneIndependence.class);
 
   @ClassRule
   public static final TestRule timeout =
@@ -124,7 +125,7 @@ public class TestSnapshotCloneIndependence {
     fs = UTIL.getHBaseCluster().getMaster().getMasterFileSystem().getFileSystem();
     rootDir = UTIL.getHBaseCluster().getMaster().getMasterFileSystem().getRootDir();
 
-    admin = UTIL.getHBaseAdmin();
+    admin = UTIL.getAdmin();
     originalTableName = TableName.valueOf("test" + testName.getMethodName());
     cloneTableName = TableName.valueOf("test-clone-" + originalTableName);
     snapshotNameAsString = "snapshot_" + originalTableName;
@@ -140,7 +141,7 @@ public class TestSnapshotCloneIndependence {
   public void tearDown() throws Exception {
     UTIL.deleteTable(originalTableName);
     UTIL.deleteTable(cloneTableName);
-    SnapshotTestingUtils.deleteAllSnapshots(UTIL.getHBaseAdmin());
+    SnapshotTestingUtils.deleteAllSnapshots(UTIL.getAdmin());
     SnapshotTestingUtils.deleteArchiveDirectory(UTIL);
   }
 
@@ -361,9 +362,10 @@ public class TestSnapshotCloneIndependence {
     admin.deleteSnapshot(snapshotName);
 
     // Wait for cleaner run and DFS heartbeats so that anything that is deletable is fully deleted
+    Pattern pattern = Pattern.compile(snapshotNameAsString);
     do {
       Thread.sleep(5000);
-    } while (!admin.listSnapshots(snapshotNameAsString).isEmpty());
+    } while (!admin.listSnapshots(pattern).isEmpty());
 
     try (Table original = UTIL.getConnection().getTable(originalTableName)) {
       try (Table clonedTable = UTIL.getConnection().getTable(cloneTableName)) {

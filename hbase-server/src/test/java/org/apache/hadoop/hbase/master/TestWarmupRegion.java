@@ -19,41 +19,43 @@
 package org.apache.hadoop.hbase.master;
 
 import static org.apache.hadoop.hbase.regionserver.HRegion.warmupHRegion;
+import static org.junit.Assert.assertTrue;
+
 import java.io.IOException;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
-import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.MiniHBaseCluster;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.Waiter;
-import org.apache.hadoop.hbase.client.Put;
-import org.apache.hadoop.hbase.client.Table;
-import org.apache.hadoop.hbase.client.Admin;
 import org.apache.hadoop.hbase.client.CompactionState;
+import org.apache.hadoop.hbase.client.Put;
+import org.apache.hadoop.hbase.client.RegionInfo;
+import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.HRegionServer;
 import org.apache.hadoop.hbase.testclassification.LargeTests;
 import org.apache.hadoop.hbase.testclassification.MasterTests;
 import org.apache.hadoop.hbase.util.Bytes;
-import org.junit.experimental.categories.Category;
-import org.junit.BeforeClass;
+import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.Before;
-import org.junit.After;
+import org.junit.BeforeClass;
 import org.junit.Test;
+import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
- * Run tests that use the HBase clients; {@link HTable}.
+ * Run tests that use the HBase clients; {@link org.apache.hadoop.hbase.client.HTable}.
  * Sets up the HBase mini cluster once at start and runs through all client tests.
  * Each creates a table named for the method and does its stuff against that.
  */
 @Category({MasterTests.class, LargeTests.class})
 @SuppressWarnings ("deprecation")
 public class TestWarmupRegion {
-  private static final Log LOG = LogFactory.getLog(TestWarmupRegion.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestWarmupRegion.class);
   protected TableName TABLENAME = TableName.valueOf("testPurgeFutureDeletes");
   protected final static HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
   private static byte [] ROW = Bytes.toBytes("testRow");
@@ -99,14 +101,14 @@ public class TestWarmupRegion {
     }
 
     // major compaction, purged future deletes
-    TEST_UTIL.getHBaseAdmin().flush(TABLENAME);
-    TEST_UTIL.getHBaseAdmin().majorCompact(TABLENAME);
+    TEST_UTIL.getAdmin().flush(TABLENAME);
+    TEST_UTIL.getAdmin().majorCompact(TABLENAME);
 
     // waiting for the major compaction to complete
     TEST_UTIL.waitFor(6000, new Waiter.Predicate<IOException>() {
       @Override
       public boolean evaluate() throws IOException {
-        return TEST_UTIL.getHBaseAdmin().getCompactionState(TABLENAME) ==
+        return TEST_UTIL.getAdmin().getCompactionState(TABLENAME) ==
             CompactionState.NONE;
       }
     });
@@ -129,7 +131,7 @@ public class TestWarmupRegion {
       public void run() {
         HRegionServer rs = TEST_UTIL.getMiniHBaseCluster().getRegionServer(0);
         HRegion region = TEST_UTIL.getMiniHBaseCluster().getRegions(TABLENAME).get(0);
-        HRegionInfo info = region.getRegionInfo();
+        RegionInfo info = region.getRegionInfo();
 
         try {
           HTableDescriptor htd = table.getTableDescriptor();
@@ -153,11 +155,13 @@ public class TestWarmupRegion {
    public void testWarmup() throws Exception {
      int serverid = 0;
      HRegion region = TEST_UTIL.getMiniHBaseCluster().getRegions(TABLENAME).get(0);
-     HRegionInfo info = region.getRegionInfo();
+     RegionInfo info = region.getRegionInfo();
      runwarmup();
      for (int i = 0; i < 10; i++) {
        HRegionServer rs = TEST_UTIL.getMiniHBaseCluster().getRegionServer(serverid);
        byte [] destName = Bytes.toBytes(rs.getServerName().toString());
+       assertTrue(destName != null);
+       LOG.info("i=" + i );
        TEST_UTIL.getMiniHBaseCluster().getMaster().move(info.getEncodedNameAsBytes(), destName);
        serverid = (serverid + 1) % 2;
      }

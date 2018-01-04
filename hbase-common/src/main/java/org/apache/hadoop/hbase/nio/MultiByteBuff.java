@@ -17,15 +17,19 @@
  */
 package org.apache.hadoop.hbase.nio;
 
+import java.io.IOException;
 import java.nio.BufferOverflowException;
 import java.nio.BufferUnderflowException;
 import java.nio.ByteBuffer;
 import java.nio.InvalidMarkException;
+import java.nio.channels.ReadableByteChannel;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.util.ByteBufferUtils;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.ObjectIntPair;
+import org.apache.yetus.audience.InterfaceAudience;
+
+import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
 
 /**
  * Provides a unified view of all the underlying ByteBuffers and will look as if a bigger
@@ -173,6 +177,7 @@ public class MultiByteBuff extends ByteBuff {
    * @param index
    * @return the int value at the given index
    */
+  @Override
   public int getInt(int index) {
     // Mostly the index specified will land within this current item. Short circuit for that
     int itemIndex;
@@ -203,6 +208,7 @@ public class MultiByteBuff extends ByteBuff {
    * @param index
    * @return the short value at the given index
    */
+  @Override
   public short getShort(int index) {
     // Mostly the index specified will land within this current item. Short circuit for that
     int itemIndex;
@@ -224,9 +230,9 @@ public class MultiByteBuff extends ByteBuff {
     ByteBuffer nextItem = items[itemIndex + 1];
     // Get available one byte from this item and remaining one from next
     short n = 0;
-    n ^= ByteBufferUtils.toByte(item, offsetInItem) & 0xFF;
-    n <<= 8;
-    n ^= ByteBufferUtils.toByte(nextItem, 0) & 0xFF;
+    n = (short) (n ^ (ByteBufferUtils.toByte(item, offsetInItem) & 0xFF));
+    n = (short) (n << 8);
+    n = (short) (n ^ (ByteBufferUtils.toByte(nextItem, 0) & 0xFF));
     return n;
   }
 
@@ -283,12 +289,12 @@ public class MultiByteBuff extends ByteBuff {
     // Get available bytes from this item and remaining from next
     short l = 0;
     for (int i = offsetInItem; i < item.capacity(); i++) {
-      l <<= 8;
-      l ^= ByteBufferUtils.toByte(item, i) & 0xFF;
+      l = (short) (l << 8);
+      l = (short) (l ^ (ByteBufferUtils.toByte(item, i) & 0xFF));
     }
     for (int i = 0; i < Bytes.SIZEOF_SHORT - remainingLen; i++) {
-      l <<= 8;
-      l ^= ByteBufferUtils.toByte(nextItem, i) & 0xFF;
+      l = (short) (l << 8);
+      l = (short) (l ^ (ByteBufferUtils.toByte(item, i) & 0xFF));
     }
     return l;
   }
@@ -323,6 +329,7 @@ public class MultiByteBuff extends ByteBuff {
    * @param index
    * @return the long value at the given index
    */
+  @Override
   public long getLong(int index) {
     // Mostly the index specified will land within this current item. Short circuit for that
     int itemIndex;
@@ -516,9 +523,9 @@ public class MultiByteBuff extends ByteBuff {
       return this.curItem.getShort();
     }
     short n = 0;
-    n ^= get() & 0xFF;
-    n <<= 8;
-    n ^= get() & 0xFF;
+    n = (short) (n ^ (get() & 0xFF));
+    n = (short) (n << 8);
+    n = (short) (n ^ (get() & 0xFF));
     return n;
   }
 
@@ -1071,6 +1078,28 @@ public class MultiByteBuff extends ByteBuff {
   }
 
   @Override
+  public int read(ReadableByteChannel channel) throws IOException {
+    int total = 0;
+    while (true) {
+      // Read max possible into the current BB
+      int len = channelRead(channel, this.curItem);
+      if (len > 0)
+        total += len;
+      if (this.curItem.hasRemaining()) {
+        // We were not able to read enough to fill the current BB itself. Means there is no point in
+        // doing more reads from Channel. Only this much there for now.
+        break;
+      } else {
+        if (this.curItemIndex >= this.limitedItemIndex)
+          break;
+        this.curItemIndex++;
+        this.curItem = this.items[this.curItemIndex];
+      }
+    }
+    return total;
+  }
+
+  @Override
   public boolean equals(Object obj) {
     if (!(obj instanceof MultiByteBuff)) return false;
     if (this == obj) return true;
@@ -1090,5 +1119,13 @@ public class MultiByteBuff extends ByteBuff {
       hash += b.hashCode();
     }
     return hash;
+  }
+
+  /**
+   * @return the ByteBuffers which this wraps.
+   */
+  @VisibleForTesting
+  public ByteBuffer[] getEnclosingByteBuffers() {
+    return this.items;
   }
 }

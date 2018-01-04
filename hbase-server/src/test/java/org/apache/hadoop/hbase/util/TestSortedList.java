@@ -26,7 +26,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.ListIterator;
 
-import com.google.common.collect.Lists;
+import org.apache.hbase.thirdparty.com.google.common.collect.Lists;
 
 import org.apache.hadoop.hbase.testclassification.MiscTests;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
@@ -45,7 +45,7 @@ public class TestSortedList {
 
   @Test
   public void testSorting() throws Exception {
-    SortedList<String> list = new SortedList<String>(new StringComparator());
+    SortedList<String> list = new SortedList<>(new StringComparator());
     list.add("c");
     list.add("d");
     list.add("a");
@@ -72,8 +72,7 @@ public class TestSortedList {
 
   @Test
   public void testReadOnlyIterators() throws Exception {
-    SortedList<String> list = new SortedList<String>(
-        Lists.newArrayList("a", "b", "c", "d", "e"), new StringComparator());
+    SortedList<String> list = new SortedList<>(Lists.newArrayList("a", "b", "c", "d", "e"), new StringComparator());
 
     Iterator<String> i = list.iterator();
     i.next();
@@ -108,8 +107,7 @@ public class TestSortedList {
 
   @Test
   public void testIteratorIsolation() throws Exception {
-    SortedList<String> list = new SortedList<String>(
-        Lists.newArrayList("a", "b", "c", "d", "e"), new StringComparator());
+    SortedList<String> list = new SortedList<>(Lists.newArrayList("a", "b", "c", "d", "e"), new StringComparator());
 
     // isolation of remove()
     Iterator<String> iter = list.iterator();
@@ -161,8 +159,7 @@ public class TestSortedList {
 
   @Test
   public void testRandomAccessIsolation() throws Exception {
-    SortedList<String> list = new SortedList<String>(
-        Lists.newArrayList("a", "b", "c"), new StringComparator());
+    SortedList<String> list = new SortedList<>(Lists.newArrayList("a", "b", "c"), new StringComparator());
     List<String> innerList = list.get();
     assertEquals("a", innerList.get(0));
     assertEquals("b", innerList.get(1));

@@ -23,15 +23,13 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * A list of 'host:port' addresses of HTTP servers operating as a single
  * entity, for example multiple redundant web service gateways.
  */
 @InterfaceAudience.Public
-@InterfaceStability.Stable
 public class Cluster {
   protected List<String> nodes = 
     Collections.synchronizedList(new ArrayList<String>());

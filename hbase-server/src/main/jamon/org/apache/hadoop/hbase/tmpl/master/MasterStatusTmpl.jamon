@@ -30,9 +30,9 @@ AssignmentManager assignmentManager = null;
 </%args>
 <%import>
 java.util.*;
+org.apache.hadoop.hbase.client.RegionInfo;
 org.apache.hadoop.hbase.HBaseConfiguration;
 org.apache.hadoop.hbase.HConstants;
-org.apache.hadoop.hbase.HRegionInfo;
 org.apache.hadoop.hbase.HTableDescriptor;
 org.apache.hadoop.hbase.NamespaceDescriptor;
 org.apache.hadoop.hbase.ServerLoad;
@@ -41,7 +41,7 @@ org.apache.hadoop.hbase.TableName;
 org.apache.hadoop.hbase.client.Admin;
 org.apache.hadoop.hbase.client.MasterSwitchType;
 org.apache.hadoop.hbase.client.SnapshotDescription;
-org.apache.hadoop.hbase.master.AssignmentManager;
+org.apache.hadoop.hbase.master.assignment.AssignmentManager;
 org.apache.hadoop.hbase.master.DeadServer;
 org.apache.hadoop.hbase.master.HMaster;
 org.apache.hadoop.hbase.master.RegionState;
@@ -93,9 +93,7 @@ AssignmentManager assignmentManager = master.getAssignmentManager();
   }
 </%class>
 
-<!--[if IE]>
 <!DOCTYPE html>
-<![endif]-->
 <?xml version="1.0" encoding="UTF-8" ?>
 <html lang="en">
   <head>
@@ -125,7 +123,10 @@ AssignmentManager assignmentManager = master.getAssignmentManager();
                 <ul class="nav navbar-nav">
                 <li class="active"><a href="/">Home</a></li>
                 <li><a href="/tablesDetailed.jsp">Table Details</a></li>
-                <li><a href="/procedures.jsp">Procedures</a></li>
+                <%if master.isActiveMaster() %>
+                <li><a href="/procedures.jsp">Procedures &amp; Locks</a></li>
+                </%if>
+                <li><a href="/processMaster.jsp">Process Metrics</a></li>
                 <li><a href="/logs/">Local Logs</a></li>
                 <li><a href="/logLevel">Log Level</a></li>
                 <li><a href="/dump">Debug Dump</a></li>
@@ -434,7 +435,7 @@ AssignmentManager assignmentManager = master.getAssignmentManager();
     <%for HTableDescriptor htDesc : tables%>
     <%java>
       TableName tableName = htDesc.getTableName();
-      Map<RegionState.State, List<HRegionInfo>> tableRegions =
+      Map<RegionState.State, List<RegionInfo>> tableRegions =
           master.getAssignmentManager().getRegionStates()
             .getRegionByStateOfTable(tableName);
       int openRegionsCount = tableRegions.get(RegionState.State.OPEN).size();
@@ -443,7 +444,7 @@ AssignmentManager assignmentManager = master.getAssignmentManager();
       int failedRegionsCount = tableRegions.get(RegionState.State.FAILED_OPEN).size()
              + tableRegions.get(RegionState.State.FAILED_CLOSE).size();
       int otherRegionsCount = 0;
-      for (List<HRegionInfo> list: tableRegions.values()) {
+      for (List<RegionInfo> list: tableRegions.values()) {
          otherRegionsCount += list.size();
       }
       // now subtract known states

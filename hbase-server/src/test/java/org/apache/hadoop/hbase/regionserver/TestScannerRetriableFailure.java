@@ -21,9 +21,8 @@ package org.apache.hadoop.hbase.regionserver;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
@@ -36,26 +35,29 @@ import org.apache.hadoop.hbase.client.Durability;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.coprocessor.CoprocessorHost;
-import org.apache.hadoop.hbase.coprocessor.BaseRegionObserver;
 import org.apache.hadoop.hbase.coprocessor.ObserverContext;
+import org.apache.hadoop.hbase.coprocessor.RegionCoprocessor;
 import org.apache.hadoop.hbase.coprocessor.RegionCoprocessorEnvironment;
+import org.apache.hadoop.hbase.coprocessor.RegionObserver;
 import org.apache.hadoop.hbase.testclassification.RegionServerTests;
 import org.apache.hadoop.hbase.testclassification.LargeTests;
 import org.apache.hadoop.hbase.util.Bytes;
-import org.apache.hadoop.hbase.util.TestTableName;
+import org.apache.hadoop.hbase.TestTableName;
 
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
 @Category({RegionServerTests.class, LargeTests.class})
 public class TestScannerRetriableFailure {
-  private static final Log LOG = LogFactory.getLog(TestScannerRetriableFailure.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestScannerRetriableFailure.class);
 
   private static final HBaseTestingUtility UTIL = new HBaseTestingUtility();
 
@@ -64,8 +66,13 @@ public class TestScannerRetriableFailure {
 
   @Rule public TestTableName TEST_TABLE = new TestTableName();
 
-  public static class FaultyScannerObserver extends BaseRegionObserver {
+  public static class FaultyScannerObserver implements RegionCoprocessor, RegionObserver {
     private int faults = 0;
+
+    @Override
+    public Optional<RegionObserver> getRegionObserver() {
+      return Optional.of(this);
+    }
 
     @Override
     public boolean preScannerNext(final ObserverContext<RegionCoprocessorEnvironment> e,
@@ -128,7 +135,7 @@ public class TestScannerRetriableFailure {
   }
 
   public void loadTable(final Table table, int numRows) throws IOException {
-    List<Put> puts = new ArrayList<Put>(numRows);
+    List<Put> puts = new ArrayList<>(numRows);
     for (int i = 0; i < numRows; ++i) {
       byte[] row = Bytes.toBytes(String.format("%09d", i));
       Put put = new Put(row);

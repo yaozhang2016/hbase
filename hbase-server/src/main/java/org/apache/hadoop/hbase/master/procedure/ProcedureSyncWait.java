@@ -21,30 +21,25 @@ package org.apache.hadoop.hbase.master.procedure;
 import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.util.List;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.CoordinatedStateException;
-import org.apache.hadoop.hbase.HRegionInfo;
-import org.apache.hadoop.hbase.MetaTableAccessor;
 import org.apache.hadoop.hbase.NotAllMetaRegionsOnlineException;
-import org.apache.hadoop.hbase.ProcedureInfo;
-import org.apache.hadoop.hbase.ServerName;
-import org.apache.hadoop.hbase.TableName;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.hadoop.hbase.client.RegionInfo;
 import org.apache.hadoop.hbase.exceptions.TimeoutIOException;
-import org.apache.hadoop.hbase.master.AssignmentManager;
-import org.apache.hadoop.hbase.master.RegionState.State;
-import org.apache.hadoop.hbase.master.RegionStates;
-import org.apache.hadoop.hbase.master.ServerManager;
+import org.apache.hadoop.hbase.master.assignment.RegionStates;
 import org.apache.hadoop.hbase.procedure2.Procedure;
 import org.apache.hadoop.hbase.procedure2.ProcedureExecutor;
 import org.apache.hadoop.hbase.quotas.MasterQuotaManager;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
-import org.apache.hadoop.hbase.util.Threads;
-import org.apache.hadoop.hbase.zookeeper.MetaTableLocator;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceStability;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Helper to synchronously wait on conditions.
@@ -55,7 +50,7 @@ import org.apache.hadoop.hbase.zookeeper.MetaTableLocator;
 @InterfaceAudience.Private
 @InterfaceStability.Evolving
 public final class ProcedureSyncWait {
-  private static final Log LOG = LogFactory.getLog(ProcedureSyncWait.class);
+  private static final Logger LOG = LoggerFactory.getLogger(ProcedureSyncWait.class);
 
   private ProcedureSyncWait() {}
 
@@ -64,32 +59,104 @@ public final class ProcedureSyncWait {
     T evaluate() throws IOException;
   }
 
-  public static byte[] submitAndWaitProcedure(ProcedureExecutor<MasterProcedureEnv> procExec,
-      final Procedure proc) throws IOException {
-    long procId = procExec.submitProcedure(proc);
-    return waitForProcedureToComplete(procExec, procId);
+  private static class ProcedureFuture implements Future<byte[]> {
+      private final ProcedureExecutor<MasterProcedureEnv> procExec;
+      private final Procedure<?> proc;
+
+      private boolean hasResult = false;
+      private byte[] result = null;
+
+      public ProcedureFuture(ProcedureExecutor<MasterProcedureEnv> procExec, Procedure<?> proc) {
+        this.procExec = procExec;
+        this.proc = proc;
+      }
+
+      @Override
+      public boolean cancel(boolean mayInterruptIfRunning) { return false; }
+
+      @Override
+      public boolean isCancelled() { return false; }
+
+      @Override
+      public boolean isDone() { return hasResult; }
+
+      @Override
+      public byte[] get() throws InterruptedException, ExecutionException {
+        if (hasResult) return result;
+        try {
+          return waitForProcedureToComplete(procExec, proc, Long.MAX_VALUE);
+        } catch (Exception e) {
+          throw new ExecutionException(e);
+        }
+      }
+
+      @Override
+      public byte[] get(long timeout, TimeUnit unit)
+          throws InterruptedException, ExecutionException, TimeoutException {
+        if (hasResult) return result;
+        try {
+          result = waitForProcedureToComplete(procExec, proc, unit.toMillis(timeout));
+          hasResult = true;
+          return result;
+        } catch (TimeoutIOException e) {
+          throw new TimeoutException(e.getMessage());
+        } catch (Exception e) {
+          throw new ExecutionException(e);
+        }
+      }
+    }
+
+  public static Future<byte[]> submitProcedure(final ProcedureExecutor<MasterProcedureEnv> procExec,
+      final Procedure<?> proc) {
+    if (proc.isInitializing()) {
+      procExec.submitProcedure(proc);
+    }
+    return new ProcedureFuture(procExec, proc);
   }
 
-  private static byte[] waitForProcedureToComplete(ProcedureExecutor<MasterProcedureEnv> procExec,
-      final long procId) throws IOException {
-    while (!procExec.isFinished(procId) && procExec.isRunning()) {
-      // TODO: add a config to make it tunable
-      // Dev Consideration: are we waiting forever, or we can set up some timeout value?
-      Threads.sleepWithoutInterrupt(250);
+  public static byte[] submitAndWaitProcedure(ProcedureExecutor<MasterProcedureEnv> procExec,
+      final Procedure<?> proc) throws IOException {
+    if (proc.isInitializing()) {
+      procExec.submitProcedure(proc);
     }
-    ProcedureInfo result = procExec.getResult(procId);
-    if (result != null) {
-      if (result.isFailed()) {
-        // If the procedure fails, we should always have an exception captured. Throw it.
-        throw result.getException();
+    return waitForProcedureToCompleteIOE(procExec, proc, Long.MAX_VALUE);
+  }
+
+  public static byte[] waitForProcedureToCompleteIOE(
+      final ProcedureExecutor<MasterProcedureEnv> procExec,
+      final Procedure<?> proc, final long timeout)
+  throws IOException {
+    try {
+      return waitForProcedureToComplete(procExec, proc, timeout);
+    } catch (IOException e) {
+      throw e;
+    } catch (Exception e) {
+      throw new IOException(e);
+    }
+  }
+
+  public static byte[] waitForProcedureToComplete(
+      final ProcedureExecutor<MasterProcedureEnv> procExec,
+      final Procedure<?> proc, final long timeout)
+      throws IOException {
+    waitFor(procExec.getEnvironment(), "pid=" + proc.getProcId(),
+      new ProcedureSyncWait.Predicate<Boolean>() {
+        @Override
+        public Boolean evaluate() throws IOException {
+          return !procExec.isRunning() || procExec.isFinished(proc.getProcId());
+        }
       }
-      return result.getResult();
+    );
+
+    if (!procExec.isRunning()) {
+      throw new IOException("The Master is Aborting");
+    }
+
+    if (proc.hasException()) {
+      // If the procedure fails, we should always have an exception captured. Throw it.
+      throw proc.getException().unwrapRemoteIOException();
     } else {
-      if (procExec.isRunning()) {
-        throw new IOException("Procedure " + procId + "not found");
-      } else {
-        throw new IOException("The Master is Aborting");
-      }
+      return proc.getResult();
     }
   }
 
@@ -104,6 +171,7 @@ public final class ProcedureSyncWait {
   public static <T> T waitFor(MasterProcedureEnv env, long waitTime, long waitingTimeForEvents,
       String purpose, Predicate<T> predicate) throws IOException {
     final long done = EnvironmentEdgeManager.currentTime() + waitTime;
+    boolean logged = false;
     do {
       T result = predicate.evaluate();
       if (result != null && !result.equals(Boolean.FALSE)) {
@@ -115,7 +183,12 @@ public final class ProcedureSyncWait {
         LOG.warn("Interrupted while sleeping, waiting on " + purpose);
         throw (InterruptedIOException)new InterruptedIOException().initCause(e);
       }
-      LOG.debug("Waiting on " + purpose);
+      if (LOG.isTraceEnabled()) {
+        LOG.trace("waitFor " + purpose);
+      } else {
+        if (!logged) LOG.debug("waitFor " + purpose);
+      }
+      logged = true;
     } while (EnvironmentEdgeManager.currentTime() < done && env.isRunning());
 
     throw new TimeoutIOException("Timed out while waiting on " + purpose);
@@ -133,44 +206,14 @@ public final class ProcedureSyncWait {
     }
   }
 
-  protected static void waitRegionServers(final MasterProcedureEnv env) throws IOException {
-    final ServerManager sm = env.getMasterServices().getServerManager();
-    ProcedureSyncWait.waitFor(env, "server to assign region(s)",
-        new ProcedureSyncWait.Predicate<Boolean>() {
-      @Override
-      public Boolean evaluate() throws IOException {
-        List<ServerName> servers = sm.createDestinationServersList();
-        return servers != null && !servers.isEmpty();
-      }
-    });
-  }
-
-  protected static List<HRegionInfo> getRegionsFromMeta(final MasterProcedureEnv env,
-      final TableName tableName) throws IOException {
-    return ProcedureSyncWait.waitFor(env, "regions of table=" + tableName + " from meta",
-        new ProcedureSyncWait.Predicate<List<HRegionInfo>>() {
-      @Override
-      public List<HRegionInfo> evaluate() throws IOException {
-        if (TableName.META_TABLE_NAME.equals(tableName)) {
-          return new MetaTableLocator().getMetaRegions(env.getMasterServices().getZooKeeper());
-        }
-        return MetaTableAccessor.getTableRegions(env.getMasterServices().getConnection(),tableName);
-      }
-    });
-  }
-
   protected static void waitRegionInTransition(final MasterProcedureEnv env,
-      final List<HRegionInfo> regions) throws IOException, CoordinatedStateException {
-    final AssignmentManager am = env.getMasterServices().getAssignmentManager();
-    final RegionStates states = am.getRegionStates();
-    for (final HRegionInfo region : regions) {
+      final List<RegionInfo> regions) throws IOException, CoordinatedStateException {
+    final RegionStates states = env.getAssignmentManager().getRegionStates();
+    for (final RegionInfo region : regions) {
       ProcedureSyncWait.waitFor(env, "regions " + region.getRegionNameAsString() + " in transition",
           new ProcedureSyncWait.Predicate<Boolean>() {
         @Override
         public Boolean evaluate() throws IOException {
-          if (states.isRegionInState(region, State.FAILED_OPEN)) {
-            am.regionOffline(region);
-          }
           return !states.isRegionInTransition(region);
         }
       });

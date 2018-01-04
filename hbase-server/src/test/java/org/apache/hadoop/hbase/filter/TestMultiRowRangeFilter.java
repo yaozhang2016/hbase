@@ -24,10 +24,9 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
+import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.KeyValueUtil;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Put;
@@ -41,19 +40,26 @@ import org.apache.hadoop.hbase.util.Bytes;
 import org.junit.AfterClass;
 import org.junit.Assert;
 import org.junit.BeforeClass;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.junit.rules.TestName;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Category(MediumTests.class)
 public class TestMultiRowRangeFilter {
 
   private final static HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
-  private static final Log LOG = LogFactory.getLog(TestMultiRowRangeFilter.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestMultiRowRangeFilter.class);
   private byte[] family = Bytes.toBytes("family");
   private byte[] qf = Bytes.toBytes("qf");
   private byte[] value = Bytes.toBytes("val");
   private TableName tableName;
   private int numRows = 100;
+
+  @Rule
+  public TestName name = new TestName();
 
   /**
    * @throws Exception
@@ -91,7 +97,7 @@ public class TestMultiRowRangeFilter {
      * Expected :SEEK_NEXT_USING_HINT
      * Actual   :INCLUDE
      * */
-    assertEquals(Filter.ReturnCode.SEEK_NEXT_USING_HINT, filter.filterKeyValue(null));
+    assertEquals(Filter.ReturnCode.SEEK_NEXT_USING_HINT, filter.filterCell(null));
   }
 
   @Test
@@ -101,61 +107,61 @@ public class TestMultiRowRangeFilter {
             new MultiRowRangeFilter.RowRange(Bytes.toBytes("d"), true, Bytes.toBytes("e"), true)
     ));
     filter.filterRowKey(KeyValueUtil.createFirstOnRow(Bytes.toBytes("a")));
-    assertEquals(Filter.ReturnCode.SEEK_NEXT_USING_HINT, filter.filterKeyValue(null));
+    assertEquals(Filter.ReturnCode.SEEK_NEXT_USING_HINT, filter.filterCell(null));
     filter.filterRowKey(KeyValueUtil.createFirstOnRow(Bytes.toBytes("b")));
-    assertEquals(Filter.ReturnCode.INCLUDE, filter.filterKeyValue(null));
+    assertEquals(Filter.ReturnCode.INCLUDE, filter.filterCell(null));
     filter.filterRowKey(KeyValueUtil.createFirstOnRow(Bytes.toBytes("c")));
-    assertEquals(Filter.ReturnCode.INCLUDE, filter.filterKeyValue(null));
+    assertEquals(Filter.ReturnCode.INCLUDE, filter.filterCell(null));
     filter.filterRowKey(KeyValueUtil.createFirstOnRow(Bytes.toBytes("d")));
-    assertEquals(Filter.ReturnCode.INCLUDE, filter.filterKeyValue(null));
+    assertEquals(Filter.ReturnCode.INCLUDE, filter.filterCell(null));
     filter.filterRowKey(KeyValueUtil.createFirstOnRow(Bytes.toBytes("e")));
-    assertEquals(Filter.ReturnCode.INCLUDE, filter.filterKeyValue(null));
+    assertEquals(Filter.ReturnCode.INCLUDE, filter.filterCell(null));
   }
 
   @Test
   public void testMergeAndSortWithEmptyStartRow() throws IOException {
-    List<RowRange> ranges = new ArrayList<RowRange>();
+    List<RowRange> ranges = new ArrayList<>();
     ranges.add(new RowRange(Bytes.toBytes(""), true, Bytes.toBytes(20), false));
     ranges.add(new RowRange(Bytes.toBytes(15), true, Bytes.toBytes(40), false));
     List<RowRange> actualRanges = MultiRowRangeFilter.sortAndMerge(ranges);
-    List<RowRange> expectedRanges = new ArrayList<RowRange>();
+    List<RowRange> expectedRanges = new ArrayList<>();
     expectedRanges.add(new RowRange(Bytes.toBytes(""), true, Bytes.toBytes(40), false));
     assertRangesEqual(expectedRanges, actualRanges);
   }
 
   @Test
   public void testMergeAndSortWithEmptyStopRow() throws IOException {
-    List<RowRange> ranges = new ArrayList<RowRange>();
+    List<RowRange> ranges = new ArrayList<>();
     ranges.add(new RowRange(Bytes.toBytes(10), true, Bytes.toBytes(20), false));
     ranges.add(new RowRange(Bytes.toBytes(15), true, Bytes.toBytes(""), false));
     ranges.add(new RowRange(Bytes.toBytes(30), true, Bytes.toBytes(70), false));
     List<RowRange> actualRanges = MultiRowRangeFilter.sortAndMerge(ranges);
-    List<RowRange> expectedRanges = new ArrayList<RowRange>();
+    List<RowRange> expectedRanges = new ArrayList<>();
     expectedRanges.add(new RowRange(Bytes.toBytes(10), true, Bytes.toBytes(""), false));
     assertRangesEqual(expectedRanges, actualRanges);
   }
 
   @Test
   public void testMergeAndSortWithEmptyStartRowAndStopRow() throws IOException {
-    List<RowRange> ranges = new ArrayList<RowRange>();
+    List<RowRange> ranges = new ArrayList<>();
     ranges.add(new RowRange(Bytes.toBytes(10), true, Bytes.toBytes(20), false));
     ranges.add(new RowRange(Bytes.toBytes(""), true, Bytes.toBytes(""), false));
     ranges.add(new RowRange(Bytes.toBytes(30), true, Bytes.toBytes(70), false));
     List<RowRange> actualRanges = MultiRowRangeFilter.sortAndMerge(ranges);
-    List<RowRange> expectedRanges = new ArrayList<RowRange>();
+    List<RowRange> expectedRanges = new ArrayList<>();
     expectedRanges.add(new RowRange(Bytes.toBytes(""), true, Bytes.toBytes(""), false));
     assertRangesEqual(expectedRanges, actualRanges);
   }
 
   @Test(expected=IllegalArgumentException.class)
   public void testMultiRowRangeWithoutRange() throws IOException {
-    List<RowRange> ranges = new ArrayList<RowRange>();
+    List<RowRange> ranges = new ArrayList<>();
     new MultiRowRangeFilter(ranges);
   }
 
   @Test(expected=IllegalArgumentException.class)
   public void testMultiRowRangeWithInvalidRange() throws IOException {
-    List<RowRange> ranges = new ArrayList<RowRange>();
+    List<RowRange> ranges = new ArrayList<>();
     ranges.add(new RowRange(Bytes.toBytes(10), true, Bytes.toBytes(20), false));
     // the start row larger than the stop row
     ranges.add(new RowRange(Bytes.toBytes(80), true, Bytes.toBytes(20), false));
@@ -165,12 +171,12 @@ public class TestMultiRowRangeFilter {
 
   @Test
   public void testMergeAndSortWithoutOverlap() throws IOException {
-    List<RowRange> ranges = new ArrayList<RowRange>();
+    List<RowRange> ranges = new ArrayList<>();
     ranges.add(new RowRange(Bytes.toBytes(10), true, Bytes.toBytes(20), false));
     ranges.add(new RowRange(Bytes.toBytes(30), true, Bytes.toBytes(40), false));
     ranges.add(new RowRange(Bytes.toBytes(60), true, Bytes.toBytes(70), false));
     List<RowRange> actualRanges = MultiRowRangeFilter.sortAndMerge(ranges);
-    List<RowRange> expectedRanges = new ArrayList<RowRange>();
+    List<RowRange> expectedRanges = new ArrayList<>();
     expectedRanges.add(new RowRange(Bytes.toBytes(10), true, Bytes.toBytes(20), false));
     expectedRanges.add(new RowRange(Bytes.toBytes(30), true, Bytes.toBytes(40), false));
     expectedRanges.add(new RowRange(Bytes.toBytes(60), true, Bytes.toBytes(70), false));
@@ -179,7 +185,7 @@ public class TestMultiRowRangeFilter {
 
   @Test
   public void testMergeAndSortWithOverlap() throws IOException {
-    List<RowRange> ranges = new ArrayList<RowRange>();
+    List<RowRange> ranges = new ArrayList<>();
     ranges.add(new RowRange(Bytes.toBytes(10), true, Bytes.toBytes(20), false));
     ranges.add(new RowRange(Bytes.toBytes(15), true, Bytes.toBytes(40), false));
     ranges.add(new RowRange(Bytes.toBytes(20), true, Bytes.toBytes(30), false));
@@ -188,7 +194,7 @@ public class TestMultiRowRangeFilter {
     ranges.add(new RowRange(Bytes.toBytes(90), true, Bytes.toBytes(100), false));
     ranges.add(new RowRange(Bytes.toBytes(95), true, Bytes.toBytes(100), false));
     List<RowRange> actualRanges = MultiRowRangeFilter.sortAndMerge(ranges);
-    List<RowRange> expectedRanges = new ArrayList<RowRange>();
+    List<RowRange> expectedRanges = new ArrayList<>();
     expectedRanges.add(new RowRange(Bytes.toBytes(10), true, Bytes.toBytes(70), false));
     expectedRanges.add(new RowRange(Bytes.toBytes(90), true, Bytes.toBytes(100), false));
     assertRangesEqual(expectedRanges, actualRanges);
@@ -196,22 +202,22 @@ public class TestMultiRowRangeFilter {
 
   @Test
   public void testMergeAndSortWithStartRowInclusive() throws IOException {
-    List<RowRange> ranges = new ArrayList<RowRange>();
+    List<RowRange> ranges = new ArrayList<>();
     ranges.add(new RowRange(Bytes.toBytes(10), true, Bytes.toBytes(20), false));
     ranges.add(new RowRange(Bytes.toBytes(20), true, Bytes.toBytes(""), false));
     List<RowRange> actualRanges = MultiRowRangeFilter.sortAndMerge(ranges);
-    List<RowRange> expectedRanges = new ArrayList<RowRange>();
+    List<RowRange> expectedRanges = new ArrayList<>();
     expectedRanges.add(new RowRange(Bytes.toBytes(10), true, Bytes.toBytes(""), false));
     assertRangesEqual(expectedRanges, actualRanges);
   }
 
   @Test
   public void testMergeAndSortWithRowExclusive() throws IOException {
-    List<RowRange> ranges = new ArrayList<RowRange>();
+    List<RowRange> ranges = new ArrayList<>();
     ranges.add(new RowRange(Bytes.toBytes(10), true, Bytes.toBytes(20), false));
     ranges.add(new RowRange(Bytes.toBytes(20), false, Bytes.toBytes(""), false));
     List<RowRange> actualRanges = MultiRowRangeFilter.sortAndMerge(ranges);
-    List<RowRange> expectedRanges = new ArrayList<RowRange>();
+    List<RowRange> expectedRanges = new ArrayList<>();
     expectedRanges.add(new RowRange(Bytes.toBytes(10), true, Bytes.toBytes(20), false));
     expectedRanges.add(new RowRange(Bytes.toBytes(20), false, Bytes.toBytes(""), false));
     assertRangesEqual(expectedRanges, actualRanges);
@@ -219,11 +225,11 @@ public class TestMultiRowRangeFilter {
 
   @Test
   public void testMergeAndSortWithRowInclusive() throws IOException {
-    List<RowRange> ranges = new ArrayList<RowRange>();
+    List<RowRange> ranges = new ArrayList<>();
     ranges.add(new RowRange(Bytes.toBytes(10), true, Bytes.toBytes(20), true));
     ranges.add(new RowRange(Bytes.toBytes(20), false, Bytes.toBytes(""), false));
     List<RowRange> actualRanges = MultiRowRangeFilter.sortAndMerge(ranges);
-    List<RowRange> expectedRanges = new ArrayList<RowRange>();
+    List<RowRange> expectedRanges = new ArrayList<>();
     expectedRanges.add(new RowRange(Bytes.toBytes(10), true, Bytes.toBytes(""), false));
     assertRangesEqual(expectedRanges, actualRanges);
   }
@@ -242,14 +248,14 @@ public class TestMultiRowRangeFilter {
 
   @Test
   public void testMultiRowRangeFilterWithRangeOverlap() throws IOException {
-    tableName = TableName.valueOf("testMultiRowRangeFilterWithRangeOverlap");
+    tableName = TableName.valueOf(name.getMethodName());
     Table ht = TEST_UTIL.createTable(tableName, family, Integer.MAX_VALUE);
     generateRows(numRows, ht, family, qf, value);
 
     Scan scan = new Scan();
     scan.setMaxVersions();
 
-    List<RowRange> ranges = new ArrayList<RowRange>();
+    List<RowRange> ranges = new ArrayList<>();
     ranges.add(new RowRange(Bytes.toBytes(10), true, Bytes.toBytes(20), false));
     ranges.add(new RowRange(Bytes.toBytes(15), true, Bytes.toBytes(40), false));
     ranges.add(new RowRange(Bytes.toBytes(65), true, Bytes.toBytes(75), false));
@@ -270,14 +276,14 @@ public class TestMultiRowRangeFilter {
 
   @Test
   public void testMultiRowRangeFilterWithoutRangeOverlap() throws IOException {
-    tableName = TableName.valueOf("testMultiRowRangeFilterWithoutRangeOverlap");
+    tableName = TableName.valueOf(name.getMethodName());
     Table ht = TEST_UTIL.createTable(tableName, family, Integer.MAX_VALUE);
     generateRows(numRows, ht, family, qf, value);
 
     Scan scan = new Scan();
     scan.setMaxVersions();
 
-    List<RowRange> ranges = new ArrayList<RowRange>();
+    List<RowRange> ranges = new ArrayList<>();
     ranges.add(new RowRange(Bytes.toBytes(30), true, Bytes.toBytes(40), false));
     ranges.add(new RowRange(Bytes.toBytes(10), true, Bytes.toBytes(20), false));
     ranges.add(new RowRange(Bytes.toBytes(60), true, Bytes.toBytes(70), false));
@@ -297,13 +303,13 @@ public class TestMultiRowRangeFilter {
 
   @Test
   public void testMultiRowRangeFilterWithEmptyStartRow() throws IOException {
-    tableName = TableName.valueOf("testMultiRowRangeFilterWithEmptyStartRow");
+    tableName = TableName.valueOf(name.getMethodName());
     Table ht = TEST_UTIL.createTable(tableName, family, Integer.MAX_VALUE);
     generateRows(numRows, ht, family, qf, value);
     Scan scan = new Scan();
     scan.setMaxVersions();
 
-    List<RowRange> ranges = new ArrayList<RowRange>();
+    List<RowRange> ranges = new ArrayList<>();
     ranges.add(new RowRange(Bytes.toBytes(""), true, Bytes.toBytes(10), false));
     ranges.add(new RowRange(Bytes.toBytes(30), true, Bytes.toBytes(40), false));
 
@@ -319,13 +325,13 @@ public class TestMultiRowRangeFilter {
 
   @Test
   public void testMultiRowRangeFilterWithEmptyStopRow() throws IOException {
-    tableName = TableName.valueOf("testMultiRowRangeFilterWithEmptyStopRow");
+    tableName = TableName.valueOf(name.getMethodName());
     Table ht = TEST_UTIL.createTable(tableName, family, Integer.MAX_VALUE);
     generateRows(numRows, ht, family, qf, value);
     Scan scan = new Scan();
     scan.setMaxVersions();
 
-    List<RowRange> ranges = new ArrayList<RowRange>();
+    List<RowRange> ranges = new ArrayList<>();
     ranges.add(new RowRange(Bytes.toBytes(10), true, Bytes.toBytes(""), false));
     ranges.add(new RowRange(Bytes.toBytes(30), true, Bytes.toBytes(40), false));
 
@@ -340,14 +346,14 @@ public class TestMultiRowRangeFilter {
 
   @Test
   public void testMultiRowRangeFilterWithInclusive() throws IOException {
-    tableName = TableName.valueOf("testMultiRowRangeFilterWithInclusive");
+    tableName = TableName.valueOf(name.getMethodName());
     Table ht = TEST_UTIL.createTable(tableName, family, Integer.MAX_VALUE);
     generateRows(numRows, ht, family, qf, value);
 
     Scan scan = new Scan();
     scan.setMaxVersions();
 
-    List<RowRange> ranges = new ArrayList<RowRange>();
+    List<RowRange> ranges = new ArrayList<>();
     ranges.add(new RowRange(Bytes.toBytes(10), true, Bytes.toBytes(20), false));
     ranges.add(new RowRange(Bytes.toBytes(20), true, Bytes.toBytes(40), false));
     ranges.add(new RowRange(Bytes.toBytes(65), true, Bytes.toBytes(75), false));
@@ -368,14 +374,17 @@ public class TestMultiRowRangeFilter {
 
   @Test
   public void testMultiRowRangeFilterWithExclusive() throws IOException {
-    tableName = TableName.valueOf("testMultiRowRangeFilterWithExclusive");
+    tableName = TableName.valueOf(name.getMethodName());
+    TEST_UTIL.getConfiguration().setInt(HConstants.HBASE_CLIENT_SCANNER_TIMEOUT_PERIOD, 6000000);
     Table ht = TEST_UTIL.createTable(tableName, family, Integer.MAX_VALUE);
+    ht.setReadRpcTimeout(600000);
+    ht.setOperationTimeout(6000000);
     generateRows(numRows, ht, family, qf, value);
 
     Scan scan = new Scan();
     scan.setMaxVersions();
 
-    List<RowRange> ranges = new ArrayList<RowRange>();
+    List<RowRange> ranges = new ArrayList<>();
     ranges.add(new RowRange(Bytes.toBytes(10), true, Bytes.toBytes(20), false));
     ranges.add(new RowRange(Bytes.toBytes(20), false, Bytes.toBytes(40), false));
     ranges.add(new RowRange(Bytes.toBytes(65), true, Bytes.toBytes(75), false));
@@ -394,21 +403,21 @@ public class TestMultiRowRangeFilter {
 
   @Test
   public void testMultiRowRangeWithFilterListAndOperator() throws IOException {
-    tableName = TableName.valueOf("TestMultiRowRangeFilterWithFilterListAndOperator");
+    tableName = TableName.valueOf(name.getMethodName());
     Table ht = TEST_UTIL.createTable(tableName, family, Integer.MAX_VALUE);
     generateRows(numRows, ht, family, qf, value);
 
     Scan scan = new Scan();
     scan.setMaxVersions();
 
-    List<RowRange> ranges1 = new ArrayList<RowRange>();
+    List<RowRange> ranges1 = new ArrayList<>();
     ranges1.add(new RowRange(Bytes.toBytes(10), true, Bytes.toBytes(20), false));
     ranges1.add(new RowRange(Bytes.toBytes(30), true, Bytes.toBytes(40), false));
     ranges1.add(new RowRange(Bytes.toBytes(60), true, Bytes.toBytes(70), false));
 
     MultiRowRangeFilter filter1 = new MultiRowRangeFilter(ranges1);
 
-    List<RowRange> ranges2 = new ArrayList<RowRange>();
+    List<RowRange> ranges2 = new ArrayList<>();
     ranges2.add(new RowRange(Bytes.toBytes(20), true, Bytes.toBytes(40), false));
     ranges2.add(new RowRange(Bytes.toBytes(80), true, Bytes.toBytes(90), false));
 
@@ -429,21 +438,21 @@ public class TestMultiRowRangeFilter {
 
   @Test
   public void testMultiRowRangeWithFilterListOrOperator() throws IOException {
-    tableName = TableName.valueOf("TestMultiRowRangeFilterWithFilterListOrOperator");
+    tableName = TableName.valueOf(name.getMethodName());
     Table ht = TEST_UTIL.createTable(tableName, family, Integer.MAX_VALUE);
     generateRows(numRows, ht, family, qf, value);
 
     Scan scan = new Scan();
     scan.setMaxVersions();
 
-    List<RowRange> ranges1 = new ArrayList<RowRange>();
+    List<RowRange> ranges1 = new ArrayList<>();
     ranges1.add(new RowRange(Bytes.toBytes(30), true, Bytes.toBytes(40), false));
     ranges1.add(new RowRange(Bytes.toBytes(10), true, Bytes.toBytes(20), false));
     ranges1.add(new RowRange(Bytes.toBytes(60), true, Bytes.toBytes(70), false));
 
     MultiRowRangeFilter filter1 = new MultiRowRangeFilter(ranges1);
 
-    List<RowRange> ranges2 = new ArrayList<RowRange>();
+    List<RowRange> ranges2 = new ArrayList<>();
     ranges2.add(new RowRange(Bytes.toBytes(20), true, Bytes.toBytes(40), false));
     ranges2.add(new RowRange(Bytes.toBytes(80), true, Bytes.toBytes(90), false));
 
@@ -461,6 +470,35 @@ public class TestMultiRowRangeFilter {
 
     assertEquals(results1.size() + results2.size() + results3.size(),resultsSize);
 
+    ht.close();
+  }
+
+  @Test
+  public void testOneRowRange() throws IOException {
+    tableName = TableName.valueOf(name.getMethodName());
+    Table ht = TEST_UTIL.createTable(tableName, family, Integer.MAX_VALUE);
+    generateRows(numRows, ht, family, qf, value);
+    ArrayList<MultiRowRangeFilter.RowRange> rowRangesList = new ArrayList<>();
+    rowRangesList
+        .add(new MultiRowRangeFilter.RowRange(Bytes.toBytes(50), true, Bytes.toBytes(50), true));
+    Scan scan = new Scan();
+    scan.setFilter(new MultiRowRangeFilter(rowRangesList));
+    int resultsSize = getResultsSize(ht, scan);
+    assertEquals(1, resultsSize);
+    rowRangesList.clear();
+    rowRangesList
+        .add(new MultiRowRangeFilter.RowRange(Bytes.toBytes(50), true, Bytes.toBytes(51), false));
+    scan = new Scan();
+    scan.setFilter(new MultiRowRangeFilter(rowRangesList));
+    resultsSize = getResultsSize(ht, scan);
+    assertEquals(1, resultsSize);
+    rowRangesList.clear();
+    rowRangesList
+        .add(new MultiRowRangeFilter.RowRange(Bytes.toBytes(50), true, Bytes.toBytes(51), true));
+    scan = new Scan();
+    scan.setFilter(new MultiRowRangeFilter(rowRangesList));
+    resultsSize = getResultsSize(ht, scan);
+    assertEquals(2, resultsSize);
     ht.close();
   }
 
@@ -485,25 +523,27 @@ public class TestMultiRowRangeFilter {
       scan.setStopRow(stopRow);
     }
     ResultScanner scanner = ht.getScanner(scan);
-    List<Cell> kvList = new ArrayList<Cell>();
+    List<Cell> kvList = new ArrayList<>();
     Result r;
     while ((r = scanner.next()) != null) {
       for (Cell kv : r.listCells()) {
         kvList.add(kv);
       }
     }
+    scanner.close();
     return kvList;
   }
 
   private int getResultsSize(Table ht, Scan scan) throws IOException {
     ResultScanner scanner = ht.getScanner(scan);
-    List<Cell> results = new ArrayList<Cell>();
+    List<Cell> results = new ArrayList<>();
     Result r;
     while ((r = scanner.next()) != null) {
       for (Cell kv : r.listCells()) {
         results.add(kv);
       }
     }
+    scanner.close();
     return results.size();
   }
 }

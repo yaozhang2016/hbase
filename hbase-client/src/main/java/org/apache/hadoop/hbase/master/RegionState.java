@@ -18,11 +18,13 @@
 package org.apache.hadoop.hbase.master;
 
 import java.util.Date;
-
-import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.ServerName;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.hadoop.hbase.client.RegionInfo;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceStability;
+
+import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ClusterStatusProtos;
 
 /**
@@ -36,10 +38,8 @@ public class RegionState {
   @InterfaceStability.Evolving
   public enum State {
     OFFLINE,        // region is in an offline state
-    PENDING_OPEN,   // same as OPENING, to be removed
     OPENING,        // server has begun to open but not yet done
     OPEN,           // server opened region and updated meta
-    PENDING_CLOSE,  // same as CLOSING, to be removed
     CLOSING,        // server has begun to close but not yet done
     CLOSED,         // server closed region and updated meta
     SPLITTING,      // server started split of a region
@@ -64,17 +64,11 @@ public class RegionState {
       case OFFLINE:
         rs = ClusterStatusProtos.RegionState.State.OFFLINE;
         break;
-      case PENDING_OPEN:
-        rs = ClusterStatusProtos.RegionState.State.PENDING_OPEN;
-        break;
       case OPENING:
         rs = ClusterStatusProtos.RegionState.State.OPENING;
         break;
       case OPEN:
         rs = ClusterStatusProtos.RegionState.State.OPEN;
-        break;
-      case PENDING_CLOSE:
-        rs = ClusterStatusProtos.RegionState.State.PENDING_CLOSE;
         break;
       case CLOSING:
         rs = ClusterStatusProtos.RegionState.State.CLOSING;
@@ -124,8 +118,6 @@ public class RegionState {
         state = OFFLINE;
         break;
       case PENDING_OPEN:
-        state = PENDING_OPEN;
-        break;
       case OPENING:
         state = OPENING;
         break;
@@ -133,8 +125,6 @@ public class RegionState {
         state = OPEN;
         break;
       case PENDING_CLOSE:
-        state = PENDING_CLOSE;
-        break;
       case CLOSING:
         state = CLOSING;
         break;
@@ -166,32 +156,40 @@ public class RegionState {
         state = MERGING_NEW;
         break;
       default:
-        throw new IllegalStateException("");
+        throw new IllegalStateException("Unhandled state " + protoState);
       }
       return state;
     }
   }
 
   private final long stamp;
-  private final HRegionInfo hri;
+  private final RegionInfo hri;
   private final ServerName serverName;
   private final State state;
+  // The duration of region in transition
+  private long ritDuration;
 
-  public RegionState(HRegionInfo region, State state) {
-    this(region, state, System.currentTimeMillis(), null);
+  @VisibleForTesting
+  public static RegionState createForTesting(RegionInfo region, State state) {
+    return new RegionState(region, state, System.currentTimeMillis(), null);
   }
 
-  public RegionState(HRegionInfo region,
-      State state, ServerName serverName) {
+  public RegionState(RegionInfo region, State state, ServerName serverName) {
     this(region, state, System.currentTimeMillis(), serverName);
   }
 
-  public RegionState(HRegionInfo region,
+  public RegionState(RegionInfo region,
       State state, long stamp, ServerName serverName) {
+    this(region, state, stamp, serverName, 0);
+  }
+
+  public RegionState(RegionInfo region, State state, long stamp, ServerName serverName,
+      long ritDuration) {
     this.hri = region;
     this.state = state;
     this.stamp = stamp;
     this.serverName = serverName;
+    this.ritDuration = ritDuration;
   }
 
   public State getState() {
@@ -202,7 +200,7 @@ public class RegionState {
     return stamp;
   }
 
-  public HRegionInfo getRegion() {
+  public RegionInfo getRegion() {
     return hri;
   }
 
@@ -210,22 +208,29 @@ public class RegionState {
     return serverName;
   }
 
+  public long getRitDuration() {
+    return ritDuration;
+  }
+
   /**
-   * PENDING_CLOSE (to be removed) is the same as CLOSING
+   * Update the duration of region in transition
+   * @param previousStamp previous RegionState's timestamp
    */
+  @InterfaceAudience.Private
+  void updateRitDuration(long previousStamp) {
+    this.ritDuration += (this.stamp - previousStamp);
+  }
+
   public boolean isClosing() {
-    return state == State.PENDING_CLOSE || state == State.CLOSING;
+    return state == State.CLOSING;
   }
 
   public boolean isClosed() {
     return state == State.CLOSED;
   }
 
-  /**
-   * PENDING_OPEN (to be removed) is the same as OPENING
-   */
   public boolean isOpening() {
-    return state == State.PENDING_OPEN || state == State.OPENING;
+    return state == State.OPENING;
   }
 
   public boolean isOpened() {
@@ -378,7 +383,7 @@ public class RegionState {
    */
   public ClusterStatusProtos.RegionState convert() {
     ClusterStatusProtos.RegionState.Builder regionState = ClusterStatusProtos.RegionState.newBuilder();
-    regionState.setRegionInfo(HRegionInfo.convert(hri));
+    regionState.setRegionInfo(ProtobufUtil.toRegionInfo(hri));
     regionState.setState(state.convert());
     regionState.setStamp(getStamp());
     return regionState.build();
@@ -390,7 +395,7 @@ public class RegionState {
    * @return the RegionState
    */
   public static RegionState convert(ClusterStatusProtos.RegionState proto) {
-    return new RegionState(HRegionInfo.convert(proto.getRegionInfo()),
+    return new RegionState(ProtobufUtil.toRegionInfo(proto.getRegionInfo()),
       State.convert(proto.getState()), proto.getStamp(), null);
   }
 
@@ -404,7 +409,8 @@ public class RegionState {
       return false;
     }
     RegionState tmp = (RegionState)obj;
-    return tmp.hri.equals(hri) && tmp.state == state
+
+    return RegionInfo.COMPARATOR.compare(tmp.hri, hri) == 0 && tmp.state == state
       && ((serverName != null && serverName.equals(tmp.serverName))
         || (tmp.serverName == null && serverName == null));
   }

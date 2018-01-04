@@ -1,4 +1,4 @@
-/**
+/*
  *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -19,24 +19,24 @@
 
 package org.apache.hadoop.hbase.wal;
 
-import com.google.common.annotations.VisibleForTesting;
-
 import java.io.Closeable;
 import java.io.IOException;
 import java.util.Map;
 import java.util.Set;
 
 import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.HRegionInfo;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
-// imports we use from yet-to-be-moved regionsever.wal
+import org.apache.hadoop.hbase.client.RegionInfo;
 import org.apache.hadoop.hbase.regionserver.wal.CompressionContext;
 import org.apache.hadoop.hbase.regionserver.wal.FailedLogCloseException;
-import org.apache.hadoop.hbase.regionserver.wal.HLogKey;
 import org.apache.hadoop.hbase.regionserver.wal.WALActionsListener;
 import org.apache.hadoop.hbase.regionserver.wal.WALCoprocessorHost;
-import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
+import org.apache.hadoop.hbase.replication.regionserver.WALFileLengthProvider;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceStability;
+
+import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
+
+// imports we use from yet-to-be-moved regionsever.wal
 
 /**
  * A Write Ahead Log (WAL) provides service for reading, writing waledits. This interface provides
@@ -47,7 +47,7 @@ import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
  */
 @InterfaceAudience.Private
 @InterfaceStability.Evolving
-public interface WAL extends Closeable {
+public interface WAL extends Closeable, WALFileLengthProvider {
 
   /**
    * Registers WALActionsListener
@@ -68,7 +68,7 @@ public interface WAL extends Closeable {
    *
    * @return If lots of logs, flush the returned regions so next time through we
    *         can clean logs. Returns null if nothing to flush. Names are actual
-   *         region names as returned by {@link HRegionInfo#getEncodedName()}
+   *         region names as returned by {@link RegionInfo#getEncodedName()}
    */
   byte[][] rollWriter() throws FailedLogCloseException, IOException;
 
@@ -84,7 +84,7 @@ public interface WAL extends Closeable {
    *          been written to the current writer
    * @return If lots of logs, flush the returned regions so next time through we
    *         can clean logs. Returns null if nothing to flush. Names are actual
-   *         region names as returned by {@link HRegionInfo#getEncodedName()}
+   *         region names as returned by {@link RegionInfo#getEncodedName()}
    */
   byte[][] rollWriter(boolean force) throws FailedLogCloseException, IOException;
 
@@ -116,7 +116,7 @@ public interface WAL extends Closeable {
    * @return Returns a 'transaction id' and <code>key</code> will have the region edit/sequence id
    * in it.
    */
-  long append(HRegionInfo info, WALKey key, WALEdit edits, boolean inMemstore) throws IOException;
+  long append(RegionInfo info, WALKeyImpl key, WALEdit edits, boolean inMemstore) throws IOException;
 
   /**
    * updates the seuence number of a specific store.
@@ -162,6 +162,8 @@ public interface WAL extends Closeable {
    */
   Long startCacheFlush(final byte[] encodedRegionName, Set<byte[]> families);
 
+  Long startCacheFlush(final byte[] encodedRegionName, Map<byte[], Long> familyToSeq);
+
   /**
    * Complete the cache flush.
    * @param encodedRegionName Encoded region name.
@@ -188,11 +190,11 @@ public interface WAL extends Closeable {
    * @param encodedRegionName The region to get the number for.
    * @return The earliest/lowest/oldest sequence id if present, HConstants.NO_SEQNUM if absent.
    * @deprecated Since version 1.2.0. Removing because not used and exposes subtle internal
-   * workings. Use {@link #getEarliestMemstoreSeqNum(byte[], byte[])}
+   * workings. Use {@link #getEarliestMemStoreSeqNum(byte[], byte[])}
    */
   @VisibleForTesting
   @Deprecated
-  long getEarliestMemstoreSeqNum(byte[] encodedRegionName);
+  long getEarliestMemStoreSeqNum(byte[] encodedRegionName);
 
   /**
    * Gets the earliest unflushed sequence id in the memstore for the store.
@@ -200,7 +202,7 @@ public interface WAL extends Closeable {
    * @param familyName The family to get the number for.
    * @return The earliest/lowest/oldest sequence id if present, HConstants.NO_SEQNUM if absent.
    */
-  long getEarliestMemstoreSeqNum(byte[] encodedRegionName, byte[] familyName);
+  long getEarliestMemStoreSeqNum(byte[] encodedRegionName, byte[] familyName);
 
   /**
    * Human readable identifying information about the state of this WAL.
@@ -227,13 +229,11 @@ public interface WAL extends Closeable {
    * Utility class that lets us keep track of the edit with it's key.
    */
   class Entry {
-    private WALEdit edit;
-    private WALKey key;
+    private final WALEdit edit;
+    private final WALKeyImpl key;
 
     public Entry() {
-      edit = new WALEdit();
-      // we use HLogKey here instead of WALKey directly to support legacy coprocessors.
-      key = new HLogKey();
+      this(new WALKeyImpl(), new WALEdit());
     }
 
     /**
@@ -242,8 +242,7 @@ public interface WAL extends Closeable {
      * @param edit log's edit
      * @param key log's key
      */
-    public Entry(WALKey key, WALEdit edit) {
-      super();
+    public Entry(WALKeyImpl key, WALEdit edit) {
       this.key = key;
       this.edit = edit;
     }
@@ -262,7 +261,7 @@ public interface WAL extends Closeable {
      *
      * @return key
      */
-    public WALKey getKey() {
+    public WALKeyImpl getKey() {
       return key;
     }
 
@@ -273,7 +272,6 @@ public interface WAL extends Closeable {
      *          Compression context
      */
     public void setCompressionContext(CompressionContext compressionContext) {
-      edit.setCompressionContext(compressionContext);
       key.setCompressionContext(compressionContext);
     }
 

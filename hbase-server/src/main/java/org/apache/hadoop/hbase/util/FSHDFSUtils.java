@@ -24,22 +24,22 @@ import java.io.InterruptedIOException;
 import java.lang.reflect.Method;
 import java.net.InetSocketAddress;
 import java.net.URI;
+import java.util.Collection;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
-import java.util.Collection;
 
-import com.google.common.collect.Sets;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.server.namenode.LeaseExpiredException;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceStability;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
+import org.apache.hbase.thirdparty.com.google.common.collect.Sets;
 
 /**
  * Implementation for hdfs
@@ -47,7 +47,7 @@ import org.apache.hadoop.hdfs.server.namenode.LeaseExpiredException;
 @InterfaceAudience.Private
 @InterfaceStability.Evolving
 public class FSHDFSUtils extends FSUtils {
-  private static final Log LOG = LogFactory.getLog(FSHDFSUtils.class);
+  private static final Logger LOG = LoggerFactory.getLogger(FSHDFSUtils.class);
   private static Class dfsUtilClazz;
   private static Method getNNAddressesMethod;
 
@@ -58,7 +58,7 @@ public class FSHDFSUtils extends FSUtils {
    */
   private static Set<InetSocketAddress> getNNAddresses(DistributedFileSystem fs,
                                                       Configuration conf) {
-    Set<InetSocketAddress> addresses = new HashSet<InetSocketAddress>();
+    Set<InetSocketAddress> addresses = new HashSet<>();
     String serviceName = fs.getCanonicalServiceName();
 
     if (serviceName.startsWith("ha-hdfs")) {
@@ -83,8 +83,9 @@ public class FSHDFSUtils extends FSUtils {
         Map<String, Map<String, InetSocketAddress>> addressMap =
                 (Map<String, Map<String, InetSocketAddress>>) getNNAddressesMethod
                         .invoke(null, conf);
-        for (Map.Entry<String, Map<String, InetSocketAddress>> entry : addressMap.entrySet()) {
-          Map<String, InetSocketAddress> nnMap = entry.getValue();
+        String nameService = serviceName.substring(serviceName.indexOf(":") + 1);
+        if (addressMap.containsKey(nameService)) {
+          Map<String, InetSocketAddress> nnMap = addressMap.get(nameService);
           for (Map.Entry<String, InetSocketAddress> e2 : nnMap.entrySet()) {
             InetSocketAddress addr = e2.getValue();
             addresses.add(addr);
@@ -200,11 +201,11 @@ public class FSHDFSUtils extends FSUtils {
     // This setting should be a little bit above what the cluster dfs heartbeat is set to.
     long firstPause = conf.getInt("hbase.lease.recovery.first.pause", 4000);
     // This should be set to how long it'll take for us to timeout against primary datanode if it
-    // is dead.  We set it to 61 seconds, 1 second than the default READ_TIMEOUT in HDFS, the
+    // is dead.  We set it to 64 seconds, 4 second than the default READ_TIMEOUT in HDFS, the
     // default value for DFS_CLIENT_SOCKET_TIMEOUT_KEY. If recovery is still failing after this
     // timeout, then further recovery will take liner backoff with this base, to avoid endless
     // preemptions when this value is not properly configured.
-    long subsequentPauseBase = conf.getLong("hbase.lease.recovery.dfs.timeout", 61 * 1000);
+    long subsequentPauseBase = conf.getLong("hbase.lease.recovery.dfs.timeout", 64 * 1000);
 
     Method isFileClosedMeth = null;
     // whether we need to look for isFileClosed method

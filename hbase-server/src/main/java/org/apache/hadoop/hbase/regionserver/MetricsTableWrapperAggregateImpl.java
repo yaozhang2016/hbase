@@ -31,10 +31,10 @@ import java.util.concurrent.TimeUnit;
 import org.apache.hadoop.hbase.CompatibilitySingletonFactory;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.TableName;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.metrics2.MetricsExecutor;
 
-import com.google.common.collect.Sets;
+import org.apache.hbase.thirdparty.com.google.common.collect.Sets;
 
 @InterfaceAudience.Private
 public class MetricsTableWrapperAggregateImpl implements MetricsTableWrapperAggregate, Closeable {
@@ -62,7 +62,7 @@ public class MetricsTableWrapperAggregateImpl implements MetricsTableWrapperAggr
       Map<TableName, MetricsTableValues> localMetricsTableMap = new HashMap<>();
 
       for (Region r : regionServer.getOnlineRegionsLocalContext()) {
-        TableName tbl= r.getTableDesc().getTableName();
+        TableName tbl= r.getTableDescriptor().getTableName();
         MetricsTableValues metricsTable = localMetricsTableMap.get(tbl);
         if (metricsTable == null) {
           metricsTable = new MetricsTableValues();
@@ -72,9 +72,9 @@ public class MetricsTableWrapperAggregateImpl implements MetricsTableWrapperAggr
         for (Store store : r.getStores()) {
           tempStorefilesSize += store.getStorefilesSize();
         }
-        metricsTable.setMemstoresSize(metricsTable.getMemstoresSize() + r.getMemstoreSize());
+        metricsTable.setMemStoresSize(metricsTable.getMemStoresSize() + r.getMemStoreSize());
         metricsTable.setStoreFilesSize(metricsTable.getStoreFilesSize() + tempStorefilesSize);
-        metricsTable.setTableSize(metricsTable.getMemstoresSize() + metricsTable.getStoreFilesSize());
+        metricsTable.setTableSize(metricsTable.getMemStoresSize() + metricsTable.getStoreFilesSize());
         metricsTable.setReadRequestsCount(metricsTable.getReadRequestsCount() + r.getReadRequestsCount());
         metricsTable.setWriteRequestsCount(metricsTable.getWriteRequestsCount() + r.getWriteRequestsCount());
         metricsTable.setTotalRequestsCount(metricsTable.getReadRequestsCount() + metricsTable.getWriteRequestsCount());
@@ -133,12 +133,12 @@ public class MetricsTableWrapperAggregateImpl implements MetricsTableWrapperAggr
   }
 
   @Override
-  public long getMemstoresSize(String table) {
+  public long getMemStoresSize(String table) {
     MetricsTableValues metricsTable = metricsTableMap.get(TableName.valueOf(table));
     if (metricsTable == null)
       return 0;
     else
-      return metricsTable.getMemstoresSize();
+      return metricsTable.getMemStoresSize();
   }
 
   @Override
@@ -197,11 +197,11 @@ public class MetricsTableWrapperAggregateImpl implements MetricsTableWrapperAggr
       this.writeRequestsCount = writeRequestsCount;
     }
 
-    public long getMemstoresSize() {
+    public long getMemStoresSize() {
       return memstoresSize;
     }
 
-    public void setMemstoresSize(long memstoresSize) {
+    public void setMemStoresSize(long memstoresSize) {
       this.memstoresSize = memstoresSize;
     }
 

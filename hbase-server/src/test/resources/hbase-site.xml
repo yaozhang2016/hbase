@@ -100,14 +100,6 @@
     </description>
   </property>
   <property>
-    <name>hbase.master.lease.thread.wakefrequency</name>
-    <value>3000</value>
-    <description>The interval between checks for expired region server leases.
-    This value has been reduced due to the other reduced values above so that
-    the master will notice a dead region server sooner. The default is 15 seconds.
-    </description>
-  </property>
-  <property>
     <name>hbase.regionserver.safemode</name>
     <value>false</value>
     <description>
@@ -165,5 +157,14 @@
   <property>
     <name>hbase.hconnection.threads.keepalivetime</name>
     <value>3</value>
+  </property>
+  <property>
+    <name>hbase.unsafe.stream.capability.enforce</name>
+    <value>false</value>
+    <description>
+      Controls whether HBase will check for stream capabilities (hflush/hsync).
+      Disable this if you intend to run on LocalFileSystem.
+      WARNING: Doing so may expose you to additional risk of data loss!
+    </description>
   </property>
 </configuration>

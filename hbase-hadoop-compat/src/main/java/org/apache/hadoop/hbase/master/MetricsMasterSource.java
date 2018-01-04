@@ -19,6 +19,7 @@
 package org.apache.hadoop.hbase.master;
 
 import org.apache.hadoop.hbase.metrics.BaseSource;
+import org.apache.hadoop.hbase.metrics.OperationMetrics;
 
 /**
  * Interface that classes that expose metrics about the master will implement.
@@ -48,6 +49,7 @@ public interface MetricsMasterSource extends BaseSource {
   // Strings used for exporting to metrics system.
   String MASTER_ACTIVE_TIME_NAME = "masterActiveTime";
   String MASTER_START_TIME_NAME = "masterStartTime";
+  String MASTER_FINISHED_INITIALIZATION_TIME_NAME = "masterFinishedInitializationTime";
   String AVERAGE_LOAD_NAME = "averageLoad";
   String LIVE_REGION_SERVERS_NAME = "liveRegionServers";
   String DEAD_REGION_SERVERS_NAME = "deadRegionServers";
@@ -63,6 +65,8 @@ public interface MetricsMasterSource extends BaseSource {
   String CLUSTER_REQUESTS_NAME = "clusterRequests";
   String MASTER_ACTIVE_TIME_DESC = "Master Active Time";
   String MASTER_START_TIME_DESC = "Master Start Time";
+  String MASTER_FINISHED_INITIALIZATION_TIME_DESC =
+          "Timestamp when Master has finished initializing";
   String AVERAGE_LOAD_DESC = "AverageLoad";
   String LIVE_REGION_SERVERS_DESC = "Names of live RegionServers";
   String NUMBER_OF_REGION_SERVERS_DESC = "Number of RegionServers";
@@ -75,6 +79,7 @@ public interface MetricsMasterSource extends BaseSource {
   String SPLIT_PLAN_COUNT_DESC = "Number of Region Split Plans executed";
   String MERGE_PLAN_COUNT_DESC = "Number of Region Merge Plans executed";
 
+  String SERVER_CRASH_METRIC_PREFIX = "serverCrash";
 
   /**
    * Increment the number of requests the cluster has seen.
@@ -83,7 +88,8 @@ public interface MetricsMasterSource extends BaseSource {
    */
   void incRequests(final long inc);
 
-
-
-
+  /**
+   * @return {@link OperationMetrics} containing common metrics for server crash operation
+   */
+  OperationMetrics getServerCrashMetrics();
 }

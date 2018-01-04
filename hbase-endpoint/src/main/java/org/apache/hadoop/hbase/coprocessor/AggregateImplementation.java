@@ -18,20 +18,27 @@
  */
 package org.apache.hadoop.hbase.coprocessor;
 
+import static org.apache.hadoop.hbase.client.coprocessor.AggregationHelper.getParsedGenericInstance;
+
+import com.google.protobuf.ByteString;
+import com.google.protobuf.Message;
+import com.google.protobuf.RpcCallback;
+import com.google.protobuf.RpcController;
+import com.google.protobuf.Service;
+
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.NavigableSet;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.Cell;
-import org.apache.hadoop.hbase.Coprocessor;
 import org.apache.hadoop.hbase.CoprocessorEnvironment;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.hbase.client.Scan;
-import org.apache.hadoop.hbase.client.coprocessor.AggregationClient;
 import org.apache.hadoop.hbase.filter.FirstKeyOnlyFilter;
 import org.apache.hadoop.hbase.ipc.CoprocessorRpcUtils;
 import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
@@ -39,12 +46,6 @@ import org.apache.hadoop.hbase.protobuf.generated.AggregateProtos.AggregateReque
 import org.apache.hadoop.hbase.protobuf.generated.AggregateProtos.AggregateResponse;
 import org.apache.hadoop.hbase.protobuf.generated.AggregateProtos.AggregateService;
 import org.apache.hadoop.hbase.regionserver.InternalScanner;
-
-import com.google.protobuf.ByteString;
-import com.google.protobuf.Message;
-import com.google.protobuf.RpcCallback;
-import com.google.protobuf.RpcController;
-import com.google.protobuf.Service;
 
 /**
  * A concrete AggregateProtocol implementation. Its system level coprocessor
@@ -59,9 +60,9 @@ import com.google.protobuf.Service;
  * @param R PB message that is used to transport Promoted (&lt;S&gt;) instance
  */
 @InterfaceAudience.Private
-public class AggregateImplementation<T, S, P extends Message, Q extends Message, R extends Message> 
-extends AggregateService implements CoprocessorService, Coprocessor {
-  protected static final Log log = LogFactory.getLog(AggregateImplementation.class);
+public class AggregateImplementation<T, S, P extends Message, Q extends Message, R extends Message>
+extends AggregateService implements RegionCoprocessor {
+  protected static final Logger log = LoggerFactory.getLogger(AggregateImplementation.class);
   private RegionCoprocessorEnvironment env;
 
   /**
@@ -82,7 +83,7 @@ extends AggregateService implements CoprocessorService, Coprocessor {
       T temp;
       Scan scan = ProtobufUtil.toScan(request.getScan());
       scanner = env.getRegion().getScanner(scan);
-      List<Cell> results = new ArrayList<Cell>();
+      List<Cell> results = new ArrayList<>();
       byte[] colFamily = scan.getFamilies()[0];
       NavigableSet<byte[]> qualifiers = scan.getFamilyMap().get(colFamily);
       byte[] qualifier = null;
@@ -137,7 +138,7 @@ extends AggregateService implements CoprocessorService, Coprocessor {
       T temp;
       Scan scan = ProtobufUtil.toScan(request.getScan());
       scanner = env.getRegion().getScanner(scan);
-      List<Cell> results = new ArrayList<Cell>();
+      List<Cell> results = new ArrayList<>();
       byte[] colFamily = scan.getFamilies()[0];
       NavigableSet<byte[]> qualifiers = scan.getFamilyMap().get(colFamily);
       byte[] qualifier = null;
@@ -155,7 +156,7 @@ extends AggregateService implements CoprocessorService, Coprocessor {
         results.clear();
       } while (hasMoreRows);
       if (min != null) {
-        response = AggregateResponse.newBuilder().addFirstPart( 
+        response = AggregateResponse.newBuilder().addFirstPart(
           ci.getProtoForCellType(min).toByteString()).build();
       }
     } catch (IOException e) {
@@ -197,7 +198,7 @@ extends AggregateService implements CoprocessorService, Coprocessor {
       if (qualifiers != null && !qualifiers.isEmpty()) {
         qualifier = qualifiers.pollFirst();
       }
-      List<Cell> results = new ArrayList<Cell>();
+      List<Cell> results = new ArrayList<>();
       boolean hasMoreRows = false;
       do {
         hasMoreRows = scanner.next(results);
@@ -210,7 +211,7 @@ extends AggregateService implements CoprocessorService, Coprocessor {
         results.clear();
       } while (hasMoreRows);
       if (sumVal != null) {
-        response = AggregateResponse.newBuilder().addFirstPart( 
+        response = AggregateResponse.newBuilder().addFirstPart(
           ci.getProtoForPromotedType(sumVal).toByteString()).build();
       }
     } catch (IOException e) {
@@ -236,7 +237,7 @@ extends AggregateService implements CoprocessorService, Coprocessor {
       RpcCallback<AggregateResponse> done) {
     AggregateResponse response = null;
     long counter = 0l;
-    List<Cell> results = new ArrayList<Cell>();
+    List<Cell> results = new ArrayList<>();
     InternalScanner scanner = null;
     try {
       Scan scan = ProtobufUtil.toScan(request.getScan());
@@ -261,7 +262,7 @@ extends AggregateService implements CoprocessorService, Coprocessor {
       } while (hasMoreRows);
       ByteBuffer bb = ByteBuffer.allocate(8).putLong(counter);
       bb.rewind();
-      response = AggregateResponse.newBuilder().addFirstPart( 
+      response = AggregateResponse.newBuilder().addFirstPart(
           ByteString.copyFrom(bb)).build();
     } catch (IOException e) {
       CoprocessorRpcUtils.setControllerException(controller, e);
@@ -307,9 +308,9 @@ extends AggregateService implements CoprocessorService, Coprocessor {
       if (qualifiers != null && !qualifiers.isEmpty()) {
         qualifier = qualifiers.pollFirst();
       }
-      List<Cell> results = new ArrayList<Cell>();
+      List<Cell> results = new ArrayList<>();
       boolean hasMoreRows = false;
-    
+
       do {
         results.clear();
         hasMoreRows = scanner.next(results);
@@ -367,10 +368,10 @@ extends AggregateService implements CoprocessorService, Coprocessor {
       if (qualifiers != null && !qualifiers.isEmpty()) {
         qualifier = qualifiers.pollFirst();
       }
-      List<Cell> results = new ArrayList<Cell>();
+      List<Cell> results = new ArrayList<>();
 
       boolean hasMoreRows = false;
-    
+
       do {
         tempVal = null;
         hasMoreRows = scanner.next(results);
@@ -412,7 +413,7 @@ extends AggregateService implements CoprocessorService, Coprocessor {
    * It is computed for the combination of column
    * family and column qualifier(s) in the given row range as defined in the
    * Scan object. In its current implementation, it takes one column family and
-   * two column qualifiers. The first qualifier is for values column and 
+   * two column qualifiers. The first qualifier is for values column and
    * the second qualifier (optional) is for weight column.
    */
   @Override
@@ -433,10 +434,10 @@ extends AggregateService implements CoprocessorService, Coprocessor {
         // if weighted median is requested, get qualifier for the weight column
         weightQualifier = qualifiers.pollLast();
       }
-      List<Cell> results = new ArrayList<Cell>();
+      List<Cell> results = new ArrayList<>();
 
       boolean hasMoreRows = false;
-    
+
       do {
         tempVal = null;
         tempWeight = null;
@@ -460,7 +461,7 @@ extends AggregateService implements CoprocessorService, Coprocessor {
       ByteString first_sumWeights = ci.getProtoForPromotedType(s).toByteString();
       AggregateResponse.Builder pair = AggregateResponse.newBuilder();
       pair.addFirstPart(first_sumVal);
-      pair.addFirstPart(first_sumWeights); 
+      pair.addFirstPart(first_sumWeights);
       response = pair.build();
     } catch (IOException e) {
       CoprocessorRpcUtils.setControllerException(controller, e);
@@ -485,7 +486,7 @@ extends AggregateService implements CoprocessorService, Coprocessor {
       ColumnInterpreter<T,S,P,Q,R> ci = (ColumnInterpreter<T, S, P, Q, R>) cls.newInstance();
       if (request.hasInterpreterSpecificBytes()) {
         ByteString b = request.getInterpreterSpecificBytes();
-        P initMsg = AggregationClient.getParsedGenericInstance(ci.getClass(), 2, b);
+        P initMsg = getParsedGenericInstance(ci.getClass(), 2, b);
         ci.initialize(initMsg);
       }
       return ci;
@@ -499,8 +500,8 @@ extends AggregateService implements CoprocessorService, Coprocessor {
   }
 
   @Override
-  public Service getService() {
-    return this;
+  public Iterable<Service> getServices() {
+    return Collections.singleton(this);
   }
 
   /**
@@ -526,5 +527,5 @@ extends AggregateService implements CoprocessorService, Coprocessor {
   public void stop(CoprocessorEnvironment env) throws IOException {
     // nothing to do
   }
-  
+
 }

@@ -25,16 +25,16 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.hbase.errorhandling.ForeignException;
 import org.apache.hadoop.hbase.errorhandling.ForeignExceptionDispatcher;
 import org.apache.hadoop.hbase.errorhandling.ForeignExceptionListener;
 import org.apache.hadoop.hbase.errorhandling.ForeignExceptionSnare;
 import org.apache.hadoop.hbase.errorhandling.TimeoutExceptionInjector;
 
-import com.google.common.collect.Lists;
+import org.apache.hbase.thirdparty.com.google.common.collect.Lists;
 
 /**
  * A globally-barriered distributed procedure.  This class encapsulates state and methods for
@@ -67,7 +67,7 @@ import com.google.common.collect.Lists;
  */
 @InterfaceAudience.Private
 public class Procedure implements Callable<Void>, ForeignExceptionListener {
-  private static final Log LOG = LogFactory.getLog(Procedure.class);
+  private static final Logger LOG = LoggerFactory.getLogger(Procedure.class);
 
   //
   // Arguments and naming
@@ -125,9 +125,9 @@ public class Procedure implements Callable<Void>, ForeignExceptionListener {
   public Procedure(ProcedureCoordinator coord, ForeignExceptionDispatcher monitor, long wakeFreq,
       long timeout, String procName, byte[] args, List<String> expectedMembers) {
     this.coord = coord;
-    this.acquiringMembers = new ArrayList<String>(expectedMembers);
-    this.inBarrierMembers = new ArrayList<String>(acquiringMembers.size());
-    this.dataFromFinishedMembers = new HashMap<String, byte[]>();
+    this.acquiringMembers = new ArrayList<>(expectedMembers);
+    this.inBarrierMembers = new ArrayList<>(acquiringMembers.size());
+    this.dataFromFinishedMembers = new HashMap<>();
     this.procName = procName;
     this.args = args;
     this.monitor = monitor;

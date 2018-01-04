@@ -127,11 +127,6 @@ observe and mediate client actions on the region:
   <li>preCheckAndDelete, postCheckAndDelete: Called before and after the client
   calls checkAndDelete().</li>
 </ul>
-You can also extend abstract class <code>BaseRegionObserverCoprocessor</code>
-which
-implements both <code>Coprocessor</code> and <code>RegionObserver</code>.
-In addition, it overrides all methods with default behaviors so you don't
-have to override all of them.
 <p>
 Here's an example of what a simple RegionObserver might look like. This
 example shows how to implement access control for HBase. This
@@ -186,9 +181,8 @@ To implement an Endpoint, you need to:
  <a href="https://developers.google.com/protocol-buffers/docs/proto#services">protocol buffer guide</a>
  for more details on defining services.</li>
  <li>Generate the Service and Message code using the protoc compiler</li>
- <li>Implement the generated Service interface in your coprocessor class and implement the
- <code>CoprocessorService</code> interface.  The <code>CoprocessorService.getService()</code>
- method should return a reference to the Endpoint's protocol buffer Service instance.
+ <li>Implement the generated Service interface and override get*Service() method in
+ relevant Coprocessor to return a reference to the Endpoint's protocol buffer Service instance.
 </ul>
 <p>
 For a more detailed discussion of how to implement a coprocessor Endpoint, along with some sample
@@ -197,7 +191,7 @@ code, see the {@link org.apache.hadoop.hbase.client.coprocessor} package documen
 
 <h2><a name="load">Coprocessor loading</a></h2>
 A customized coprocessor can be loaded by two different ways, by configuration,
-or by <code>HTableDescriptor</code> for a newly created table.
+or by <code>TableDescriptor</code> for a newly created table.
 <p>
 (Currently we don't really have an on demand coprocessor loading mechanism for
 opened regions.)
@@ -260,13 +254,14 @@ policy implementations, perhaps) ahead of observers.
     "TestClassloading.jar");
 
   // create a table that references the jar
-  HTableDescriptor htd = new HTableDescriptor(TableName.valueOf(getClass().getTableName()));
-  htd.addFamily(new HColumnDescriptor("test"));
-  htd.setValue("Coprocessor$1",
-    path.toString() +
-    ":" + classFullName +
-    ":" + Coprocessor.Priority.USER);
-  HBaseAdmin admin = new HBaseAdmin(this.conf);
+  TableDescriptor htd = TableDescriptorBuilder
+                        .newBuilder(TableName.valueOf(getClass().getTableName()))
+                        .addColumnFamily(ColumnFamilyDescriptorBuilder.of("test"))
+                        .setValue(Bytes.toBytes("Coprocessor$1", path.toString()+
+                          ":" + classFullName +
+                          ":" + Coprocessor.Priority.USER))
+                        .build();
+  Admin admin = connection.getAdmin();
   admin.createTable(htd);
 </pre></blockquote>
 <h3>Chain of RegionObservers</h3>

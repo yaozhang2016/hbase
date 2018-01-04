@@ -37,7 +37,7 @@ private[spark] object HBaseConnectionCache extends Logging {
   val cacheStat = HBaseConnectionCacheStat(0, 0, 0)
 
   // in milliseconds
-  private final val DEFAULT_TIME_OUT: Long = HBaseSparkConf.connectionCloseDelay
+  private final val DEFAULT_TIME_OUT: Long = HBaseSparkConf.DEFAULT_CONNECTION_CLOSE_DELAY
   private var timeout = DEFAULT_TIME_OUT
   private var closed: Boolean = false
 
@@ -160,7 +160,6 @@ class HBaseConnectionKey(c: Configuration) extends Logging {
     HConstants.ZOOKEEPER_QUORUM,
     HConstants.ZOOKEEPER_ZNODE_PARENT,
     HConstants.ZOOKEEPER_CLIENT_PORT,
-    HConstants.ZOOKEEPER_RECOVERABLE_WAITTIME,
     HConstants.HBASE_CLIENT_PAUSE,
     HConstants.HBASE_CLIENT_RETRIES_NUMBER,
     HConstants.HBASE_RPC_TIMEOUT_KEY,

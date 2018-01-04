@@ -68,16 +68,16 @@ import org.apache.hadoop.hbase.protobuf.generated.RowProcessorProtos.RowProcesso
 import org.apache.hadoop.hbase.regionserver.BaseRowProcessor;
 import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.InternalScanner;
-import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
+import org.apache.hadoop.hbase.wal.WALEdit;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import com.google.protobuf.Message;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 
 /**
  * Verifies ProcessEndpoint works.
@@ -86,7 +86,7 @@ import org.apache.commons.logging.LogFactory;
 @Category({CoprocessorTests.class, MediumTests.class})
 public class TestRowProcessorEndpoint {
 
-  private static final Log LOG = LogFactory.getLog(TestRowProcessorEndpoint.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestRowProcessorEndpoint.class);
 
   private static final TableName TABLE = TableName.valueOf("testtable");
   private final static byte[] ROW = Bytes.toBytes("testrow");
@@ -132,8 +132,8 @@ public class TestRowProcessorEndpoint {
 
   public void prepareTestData() throws Exception {
     try {
-      util.getHBaseAdmin().disableTable(TABLE);
-      util.getHBaseAdmin().deleteTable(TABLE);
+      util.getAdmin().disableTable(TABLE);
+      util.getAdmin().deleteTable(TABLE);
     } catch (Exception e) {
       // ignore table not found
     }
@@ -166,10 +166,9 @@ public class TestRowProcessorEndpoint {
     ProcessResponse protoResult = service.process(null, request);
     FriendsOfFriendsProcessorResponse response =
         FriendsOfFriendsProcessorResponse.parseFrom(protoResult.getRowProcessorResult());
-    Set<String> result = new HashSet<String>();
+    Set<String> result = new HashSet<>();
     result.addAll(response.getResultList());
-    Set<String> expected =
-      new HashSet<String>(Arrays.asList(new String[]{"d", "e", "f", "g"}));
+    Set<String> expected = new HashSet<>(Arrays.asList(new String[]{"d", "e", "f", "g"}));
     Get get = new Get(ROW);
     LOG.debug("row keyvalues:" + stringifyKvs(table.get(get).listCells()));
     assertEquals(expected, result);
@@ -311,7 +310,7 @@ public class TestRowProcessorEndpoint {
    * So they can be loaded with the endpoint on the coprocessor.
    */
   public static class RowProcessorEndpoint<S extends Message,T extends Message>
-  extends BaseRowProcessorEndpoint<S,T> implements CoprocessorService {
+  extends BaseRowProcessorEndpoint<S,T> {
     public static class IncrementCounterProcessor extends
         BaseRowProcessor<IncrementCounterProcessorTestProtos.IncCounterProcessorRequest,
         IncrementCounterProcessorTestProtos.IncCounterProcessorResponse> {
@@ -349,11 +348,11 @@ public class TestRowProcessorEndpoint {
       public void process(long now, HRegion region,
           List<Mutation> mutations, WALEdit walEdit) throws IOException {
         // Scan current counter
-        List<Cell> kvs = new ArrayList<Cell>();
+        List<Cell> kvs = new ArrayList<>();
         Scan scan = new Scan(row, row);
         scan.addColumn(FAM, COUNTER);
         doScan(region, scan, kvs);
-        counter = kvs.size() == 0 ? 0 :
+        counter = kvs.isEmpty() ? 0 :
           Bytes.toInt(CellUtil.cloneValue(kvs.iterator().next()));
 
         // Assert counter value
@@ -398,7 +397,7 @@ public class TestRowProcessorEndpoint {
         BaseRowProcessor<FriendsOfFriendsProcessorRequest, FriendsOfFriendsProcessorResponse> {
       byte[] row = null;
       byte[] person = null;
-      final Set<String> result = new HashSet<String>();
+      final Set<String> result = new HashSet<>();
 
       /**
        * Empty constructor for Writable
@@ -418,7 +417,7 @@ public class TestRowProcessorEndpoint {
 
       @Override
       public FriendsOfFriendsProcessorResponse getResult() {
-        FriendsOfFriendsProcessorResponse.Builder builder = 
+        FriendsOfFriendsProcessorResponse.Builder builder =
             FriendsOfFriendsProcessorResponse.newBuilder();
         builder.addAllResult(result);
         return builder.build();
@@ -432,7 +431,7 @@ public class TestRowProcessorEndpoint {
       @Override
       public void process(long now, HRegion region,
           List<Mutation> mutations, WALEdit walEdit) throws IOException {
-        List<Cell> kvs = new ArrayList<Cell>();
+        List<Cell> kvs = new ArrayList<>();
         { // First scan to get friends of the person
           Scan scan = new Scan(row, row);
           scan.addColumn(FAM, person);
@@ -470,7 +469,7 @@ public class TestRowProcessorEndpoint {
       }
 
       @Override
-      public void initialize(FriendsOfFriendsProcessorRequest request) 
+      public void initialize(FriendsOfFriendsProcessorRequest request)
           throws IOException {
         this.person = request.getPerson().toByteArray();
         this.row = request.getRow().toByteArray();
@@ -497,7 +496,7 @@ public class TestRowProcessorEndpoint {
 
       @Override
       public Collection<byte[]> getRowsToLock() {
-        List<byte[]> rows = new ArrayList<byte[]>();
+        List<byte[]> rows = new ArrayList<>(2);
         rows.add(row1);
         rows.add(row2);
         return rows;
@@ -522,8 +521,8 @@ public class TestRowProcessorEndpoint {
         now = myTimer.getAndIncrement();
 
         // Scan both rows
-        List<Cell> kvs1 = new ArrayList<Cell>();
-        List<Cell> kvs2 = new ArrayList<Cell>();
+        List<Cell> kvs1 = new ArrayList<>();
+        List<Cell> kvs2 = new ArrayList<>();
         doScan(region, new Scan(row1, row1), kvs1);
         doScan(region, new Scan(row2, row2), kvs2);
 
@@ -538,7 +537,7 @@ public class TestRowProcessorEndpoint {
         swapped = !swapped;
 
         // Add and delete keyvalues
-        List<List<Cell>> kvs = new ArrayList<List<Cell>>();
+        List<List<Cell>> kvs = new ArrayList<>(2);
         kvs.add(kvs1);
         kvs.add(kvs2);
         byte[][] rows = new byte[][]{row1, row2};
@@ -547,9 +546,9 @@ public class TestRowProcessorEndpoint {
             // Delete from the current row and add to the other row
             Delete d = new Delete(rows[i]);
             KeyValue kvDelete =
-                new KeyValue(rows[i], CellUtil.cloneFamily(kv), CellUtil.cloneQualifier(kv), 
+                new KeyValue(rows[i], CellUtil.cloneFamily(kv), CellUtil.cloneQualifier(kv),
                     kv.getTimestamp(), KeyValue.Type.Delete);
-            d.addDeleteMarker(kvDelete);
+            d.add(kvDelete);
             Put p = new Put(rows[1 - i]);
             KeyValue kvAdd =
                 new KeyValue(rows[1 - i], CellUtil.cloneFamily(kv), CellUtil.cloneQualifier(kv),

@@ -28,11 +28,10 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellComparator;
 import org.apache.hadoop.hbase.CellUtil;
+import org.apache.hadoop.hbase.CompareOperator;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HConstants;
@@ -44,11 +43,9 @@ import org.apache.hadoop.hbase.client.Delete;
 import org.apache.hadoop.hbase.client.Durability;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Scan;
-import org.apache.hadoop.hbase.filter.CompareFilter.CompareOp;
 import org.apache.hadoop.hbase.filter.FilterList.Operator;
 import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.InternalScanner;
-import org.apache.hadoop.hbase.regionserver.Region;
 import org.apache.hadoop.hbase.regionserver.RegionScanner;
 import org.apache.hadoop.hbase.testclassification.FilterTests;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
@@ -57,19 +54,27 @@ import org.apache.hadoop.hbase.wal.WAL;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
+import org.junit.Ignore;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 
-import com.google.common.base.Throwables;
+import org.apache.hbase.thirdparty.com.google.common.base.Throwables;
+import org.junit.rules.TestName;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Test filters at the HRegion doorstep.
  */
 @Category({FilterTests.class, SmallTests.class})
 public class TestFilter {
-  private final static Log LOG = LogFactory.getLog(TestFilter.class);
-  private Region region;
+  private final static Logger LOG = LoggerFactory.getLogger(TestFilter.class);
+  private HRegion region;
   private final static HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
+
+  @Rule
+  public TestName name = new TestName();
 
   //
   // Rows, Qualifiers, and Values are in two groups, One and Two.
@@ -270,17 +275,17 @@ public class TestFilter {
 
     // reseek to row three.
     scanner.reseek(ROWS_THREE[1]);
-    List<Cell> results = new ArrayList<Cell>();
+    List<Cell> results = new ArrayList<>();
 
     // the results should belong to ROWS_THREE[1]
     scanner.next(results);
     for (Cell keyValue : results) {
       assertTrue("The rows with ROWS_TWO as row key should be appearing.",
-          CellUtil.matchingRow(keyValue, ROWS_THREE[1]));
+          CellUtil.matchingRows(keyValue, ROWS_THREE[1]));
     }
     // again try to reseek to a value before ROWS_THREE[1]
     scanner.reseek(ROWS_ONE[1]);
-    results = new ArrayList<Cell>();
+    results = new ArrayList<>();
     // This time no seek would have been done to ROWS_ONE[1]
     scanner.next(results);
     for (Cell keyValue : results) {
@@ -506,7 +511,7 @@ public class TestFilter {
     InternalScanner scanner = this.region.getScanner(s);
     int scannerCounter = 0;
     while (true) {
-      boolean isMoreResults = scanner.next(new ArrayList<Cell>());
+      boolean isMoreResults = scanner.next(new ArrayList<>());
       scannerCounter++;
 
       if (scannerCounter >= pageSize) {
@@ -535,7 +540,7 @@ public class TestFilter {
 
     InternalScanner scanner = this.region.getScanner(s);
     while (true) {
-      ArrayList<Cell> values = new ArrayList<Cell>();
+      ArrayList<Cell> values = new ArrayList<>();
       boolean isMoreResults = scanner.next(values);
       if (!isMoreResults
           || !Bytes.toString(CellUtil.cloneRow(values.get(0))).startsWith(prefix)) {
@@ -570,7 +575,7 @@ public class TestFilter {
     InternalScanner scanner = this.region.getScanner(s);
     int scannerCounter = 0;
     while (true) {
-      boolean isMoreResults = scanner.next(new ArrayList<Cell>());
+      boolean isMoreResults = scanner.next(new ArrayList<>());
       scannerCounter++;
 
       if (scannerCounter >= pageSize) {
@@ -604,7 +609,7 @@ public class TestFilter {
     }
 
     @Override
-    public ReturnCode filterKeyValue(Cell ignored) throws IOException {
+    public ReturnCode filterCell(final Cell ignored) throws IOException {
       return ReturnCode.INCLUDE;
     }
   }
@@ -618,13 +623,13 @@ public class TestFilter {
    * @throws Exception
    */
   @Test
-  public void tes94FilterRowCompatibility() throws Exception {
+  public void test94FilterRowCompatibility() throws Exception {
     Scan s = new Scan();
     OldTestFilter filter = new OldTestFilter();
     s.setFilter(filter);
 
     InternalScanner scanner = this.region.getScanner(s);
-    ArrayList<Cell> values = new ArrayList<Cell>();
+    ArrayList<Cell> values = new ArrayList<>();
     scanner.next(values);
     assertTrue("All rows should be filtered out", values.isEmpty());
   }
@@ -647,7 +652,7 @@ public class TestFilter {
 
     InternalScanner scanner = this.region.getScanner(s);
     while (true) {
-      ArrayList<Cell> values = new ArrayList<Cell>();
+      ArrayList<Cell> values = new ArrayList<>();
       boolean isMoreResults = scanner.next(values);
       if (!isMoreResults || !Bytes.toString(CellUtil.cloneRow(values.get(0))).startsWith(prefix)) {
         assertTrue("The WhileMatchFilter should now filter all remaining", filter.filterAllRemaining());
@@ -660,23 +665,23 @@ public class TestFilter {
 
   /**
    * Tests the the {@link WhileMatchFilter} works in combination with a
-   * {@link Filter} that uses the {@link Filter#filterKeyValue(Cell)} method.
+   * {@link Filter} that uses the {@link Filter#filterCell(Cell)} method.
    *
    * See HBASE-2258.
    *
    * @throws Exception
    */
   @Test
-  public void testWhileMatchFilterWithFilterKeyValue() throws Exception {
+  public void testWhileMatchFilterWithFilterCell() throws Exception {
     Scan s = new Scan();
     WhileMatchFilter filter = new WhileMatchFilter(
-        new SingleColumnValueFilter(FAMILIES[0], QUALIFIERS_ONE[0], CompareOp.EQUAL, Bytes.toBytes("foo"))
+        new SingleColumnValueFilter(FAMILIES[0], QUALIFIERS_ONE[0], CompareOperator.EQUAL, Bytes.toBytes("foo"))
     );
     s.setFilter(filter);
 
     InternalScanner scanner = this.region.getScanner(s);
     while (true) {
-      ArrayList<Cell> values = new ArrayList<Cell>();
+      ArrayList<Cell> values = new ArrayList<>();
       boolean isMoreResults = scanner.next(values);
       assertTrue("The WhileMatchFilter should now filter all remaining", filter.filterAllRemaining());
       if (!isMoreResults) {
@@ -763,7 +768,7 @@ public class TestFilter {
     // Match two keys (one from each family) in half the rows
     long expectedRows = this.numRows / 2;
     long expectedKeys = 2;
-    Filter f = new QualifierFilter(CompareOp.EQUAL,
+    Filter f = new QualifierFilter(CompareOperator.EQUAL,
         new BinaryComparator(Bytes.toBytes("testQualifierOne-2")));
     Scan s = new Scan();
     s.setFilter(f);
@@ -773,7 +778,7 @@ public class TestFilter {
     // Expect only two keys (one from each family) in half the rows
     expectedRows = this.numRows / 2;
     expectedKeys = 2;
-    f = new QualifierFilter(CompareOp.LESS,
+    f = new QualifierFilter(CompareOperator.LESS,
         new BinaryComparator(Bytes.toBytes("testQualifierOne-2")));
     s = new Scan();
     s.setFilter(f);
@@ -783,7 +788,7 @@ public class TestFilter {
     // Expect four keys (two from each family) in half the rows
     expectedRows = this.numRows / 2;
     expectedKeys = 4;
-    f = new QualifierFilter(CompareOp.LESS_OR_EQUAL,
+    f = new QualifierFilter(CompareOperator.LESS_OR_EQUAL,
         new BinaryComparator(Bytes.toBytes("testQualifierOne-2")));
     s = new Scan();
     s.setFilter(f);
@@ -794,7 +799,7 @@ public class TestFilter {
     // Only look in first group of rows
     expectedRows = this.numRows / 2;
     expectedKeys = 4;
-    f = new QualifierFilter(CompareOp.NOT_EQUAL,
+    f = new QualifierFilter(CompareOperator.NOT_EQUAL,
         new BinaryComparator(Bytes.toBytes("testQualifierOne-2")));
     s = new Scan(HConstants.EMPTY_START_ROW, Bytes.toBytes("testRowTwo"));
     s.setFilter(f);
@@ -805,7 +810,7 @@ public class TestFilter {
     // Only look in first group of rows
     expectedRows = this.numRows / 2;
     expectedKeys = 4;
-    f = new QualifierFilter(CompareOp.GREATER_OR_EQUAL,
+    f = new QualifierFilter(CompareOperator.GREATER_OR_EQUAL,
         new BinaryComparator(Bytes.toBytes("testQualifierOne-2")));
     s = new Scan(HConstants.EMPTY_START_ROW, Bytes.toBytes("testRowTwo"));
     s.setFilter(f);
@@ -816,7 +821,7 @@ public class TestFilter {
     // Only look in first group of rows
     expectedRows = this.numRows / 2;
     expectedKeys = 2;
-    f = new QualifierFilter(CompareOp.GREATER,
+    f = new QualifierFilter(CompareOperator.GREATER,
         new BinaryComparator(Bytes.toBytes("testQualifierOne-2")));
     s = new Scan(HConstants.EMPTY_START_ROW, Bytes.toBytes("testRowTwo"));
     s.setFilter(f);
@@ -825,7 +830,7 @@ public class TestFilter {
     // Match keys not equal to
     // Look across rows and fully validate the keys and ordering
     // Expect varied numbers of keys, 4 per row in group one, 6 per row in group two
-    f = new QualifierFilter(CompareOp.NOT_EQUAL,
+    f = new QualifierFilter(CompareOperator.NOT_EQUAL,
         new BinaryComparator(QUALIFIERS_ONE[2]));
     s = new Scan();
     s.setFilter(f);
@@ -874,7 +879,7 @@ public class TestFilter {
     // Test across rows and groups with a regex
     // Filter out "test*-2"
     // Expect 4 keys per row across both groups
-    f = new QualifierFilter(CompareOp.NOT_EQUAL,
+    f = new QualifierFilter(CompareOperator.NOT_EQUAL,
         new RegexStringComparator("test.+-2"));
     s = new Scan();
     s.setFilter(f);
@@ -921,7 +926,7 @@ public class TestFilter {
       // Match family, only half of columns returned.
       long expectedRows = this.numRows;
       long expectedKeys = this.colsPerRow / 2;
-      Filter f = new FamilyFilter(CompareOp.EQUAL,
+      Filter f = new FamilyFilter(CompareOperator.EQUAL,
           new BinaryComparator(Bytes.toBytes("testFamilyOne")));
       Scan s = new Scan();
       s.setFilter(f);
@@ -930,7 +935,7 @@ public class TestFilter {
       // Match keys less than given family, should return nothing
       expectedRows = 0;
       expectedKeys = 0;
-      f = new FamilyFilter(CompareOp.LESS,
+      f = new FamilyFilter(CompareOperator.LESS,
           new BinaryComparator(Bytes.toBytes("testFamily")));
       s = new Scan();
       s.setFilter(f);
@@ -939,7 +944,7 @@ public class TestFilter {
       // Match keys less than or equal, should return half of columns
       expectedRows = this.numRows;
       expectedKeys = this.colsPerRow / 2;
-      f = new FamilyFilter(CompareOp.LESS_OR_EQUAL,
+      f = new FamilyFilter(CompareOperator.LESS_OR_EQUAL,
           new BinaryComparator(Bytes.toBytes("testFamilyOne")));
       s = new Scan();
       s.setFilter(f);
@@ -949,7 +954,7 @@ public class TestFilter {
       // look only in second group of rows
       expectedRows = this.numRows / 2;
       expectedKeys = this.colsPerRow / 2;
-      f = new FamilyFilter(CompareOp.NOT_EQUAL,
+      f = new FamilyFilter(CompareOperator.NOT_EQUAL,
           new BinaryComparator(Bytes.toBytes("testFamilyOne")));
       s = new Scan(HConstants.EMPTY_START_ROW, Bytes.toBytes("testRowTwo"));
       s.setFilter(f);
@@ -959,7 +964,7 @@ public class TestFilter {
       // look only in second group of rows
       expectedRows = this.numRows / 2;
       expectedKeys = this.colsPerRow;
-      f = new FamilyFilter(CompareOp.GREATER_OR_EQUAL,
+      f = new FamilyFilter(CompareOperator.GREATER_OR_EQUAL,
           new BinaryComparator(Bytes.toBytes("testFamilyOne")));
       s = new Scan(HConstants.EMPTY_START_ROW, Bytes.toBytes("testRowTwo"));
       s.setFilter(f);
@@ -969,7 +974,7 @@ public class TestFilter {
       // look only in second group of rows
       expectedRows = this.numRows / 2;
       expectedKeys = this.colsPerRow / 2;
-      f = new FamilyFilter(CompareOp.GREATER,
+      f = new FamilyFilter(CompareOperator.GREATER,
           new BinaryComparator(Bytes.toBytes("testFamilyOne")));
       s = new Scan(HConstants.EMPTY_START_ROW, Bytes.toBytes("testRowTwo"));
       s.setFilter(f);
@@ -977,7 +982,7 @@ public class TestFilter {
 
       // Match keys not equal to given family
       // Look across rows and fully validate the keys and ordering
-      f = new FamilyFilter(CompareOp.NOT_EQUAL,
+      f = new FamilyFilter(CompareOperator.NOT_EQUAL,
           new BinaryComparator(FAMILIES[1]));
       s = new Scan();
       s.setFilter(f);
@@ -1014,7 +1019,7 @@ public class TestFilter {
       // Test across rows and groups with a regex
       // Filter out "test*-2"
       // Expect 4 keys per row across both groups
-      f = new FamilyFilter(CompareOp.NOT_EQUAL,
+      f = new FamilyFilter(CompareOperator.NOT_EQUAL,
           new RegexStringComparator("test.*One"));
       s = new Scan();
       s.setFilter(f);
@@ -1056,7 +1061,7 @@ public class TestFilter {
     // Match a single row, all keys
     long expectedRows = 1;
     long expectedKeys = this.colsPerRow;
-    Filter f = new RowFilter(CompareOp.EQUAL,
+    Filter f = new RowFilter(CompareOperator.EQUAL,
         new BinaryComparator(Bytes.toBytes("testRowOne-2")));
     Scan s = new Scan();
     s.setFilter(f);
@@ -1065,7 +1070,7 @@ public class TestFilter {
     // Match a two rows, one from each group, using regex
     expectedRows = 2;
     expectedKeys = this.colsPerRow;
-    f = new RowFilter(CompareOp.EQUAL,
+    f = new RowFilter(CompareOperator.EQUAL,
         new RegexStringComparator("testRow.+-2"));
     s = new Scan();
     s.setFilter(f);
@@ -1075,7 +1080,7 @@ public class TestFilter {
     // Expect all keys in one row
     expectedRows = 1;
     expectedKeys = this.colsPerRow;
-    f = new RowFilter(CompareOp.LESS,
+    f = new RowFilter(CompareOperator.LESS,
         new BinaryComparator(Bytes.toBytes("testRowOne-2")));
     s = new Scan();
     s.setFilter(f);
@@ -1085,7 +1090,7 @@ public class TestFilter {
     // Expect all keys in two rows
     expectedRows = 2;
     expectedKeys = this.colsPerRow;
-    f = new RowFilter(CompareOp.LESS_OR_EQUAL,
+    f = new RowFilter(CompareOperator.LESS_OR_EQUAL,
         new BinaryComparator(Bytes.toBytes("testRowOne-2")));
     s = new Scan();
     s.setFilter(f);
@@ -1095,7 +1100,7 @@ public class TestFilter {
     // Expect all keys in all but one row
     expectedRows = this.numRows - 1;
     expectedKeys = this.colsPerRow;
-    f = new RowFilter(CompareOp.NOT_EQUAL,
+    f = new RowFilter(CompareOperator.NOT_EQUAL,
         new BinaryComparator(Bytes.toBytes("testRowOne-2")));
     s = new Scan();
     s.setFilter(f);
@@ -1105,7 +1110,7 @@ public class TestFilter {
     // Expect all keys in all but one row
     expectedRows = this.numRows - 1;
     expectedKeys = this.colsPerRow;
-    f = new RowFilter(CompareOp.GREATER_OR_EQUAL,
+    f = new RowFilter(CompareOperator.GREATER_OR_EQUAL,
         new BinaryComparator(Bytes.toBytes("testRowOne-2")));
     s = new Scan();
     s.setFilter(f);
@@ -1115,7 +1120,7 @@ public class TestFilter {
     // Expect all keys in all but two rows
     expectedRows = this.numRows - 2;
     expectedKeys = this.colsPerRow;
-    f = new RowFilter(CompareOp.GREATER,
+    f = new RowFilter(CompareOperator.GREATER,
         new BinaryComparator(Bytes.toBytes("testRowOne-2")));
     s = new Scan();
     s.setFilter(f);
@@ -1124,7 +1129,7 @@ public class TestFilter {
     // Match rows not equal to testRowTwo-2
     // Look across rows and fully validate the keys and ordering
     // Should see all keys in all rows but testRowTwo-2
-    f = new RowFilter(CompareOp.NOT_EQUAL,
+    f = new RowFilter(CompareOperator.NOT_EQUAL,
         new BinaryComparator(Bytes.toBytes("testRowOne-2")));
     s = new Scan();
     s.setFilter(f);
@@ -1172,7 +1177,7 @@ public class TestFilter {
     // Test across rows and groups with a regex
     // Filter out everything that doesn't match "*-2"
     // Expect all keys in two rows
-    f = new RowFilter(CompareOp.EQUAL,
+    f = new RowFilter(CompareOperator.EQUAL,
         new RegexStringComparator(".+-2"));
     s = new Scan();
     s.setFilter(f);
@@ -1203,7 +1208,7 @@ public class TestFilter {
     // Match group one rows
     long expectedRows = this.numRows / 2;
     long expectedKeys = this.colsPerRow;
-    Filter f = new ValueFilter(CompareOp.EQUAL,
+    Filter f = new ValueFilter(CompareOperator.EQUAL,
         new BinaryComparator(Bytes.toBytes("testValueOne")));
     Scan s = new Scan();
     s.setFilter(f);
@@ -1212,7 +1217,7 @@ public class TestFilter {
     // Match group two rows
     expectedRows = this.numRows / 2;
     expectedKeys = this.colsPerRow;
-    f = new ValueFilter(CompareOp.EQUAL,
+    f = new ValueFilter(CompareOperator.EQUAL,
         new BinaryComparator(Bytes.toBytes("testValueTwo")));
     s = new Scan();
     s.setFilter(f);
@@ -1221,7 +1226,7 @@ public class TestFilter {
     // Match all values using regex
     expectedRows = this.numRows;
     expectedKeys = this.colsPerRow;
-    f = new ValueFilter(CompareOp.EQUAL,
+    f = new ValueFilter(CompareOperator.EQUAL,
         new RegexStringComparator("testValue((One)|(Two))"));
     s = new Scan();
     s.setFilter(f);
@@ -1231,7 +1236,7 @@ public class TestFilter {
     // Expect group one rows
     expectedRows = this.numRows / 2;
     expectedKeys = this.colsPerRow;
-    f = new ValueFilter(CompareOp.LESS,
+    f = new ValueFilter(CompareOperator.LESS,
         new BinaryComparator(Bytes.toBytes("testValueTwo")));
     s = new Scan();
     s.setFilter(f);
@@ -1241,7 +1246,7 @@ public class TestFilter {
     // Expect all rows
     expectedRows = this.numRows;
     expectedKeys = this.colsPerRow;
-    f = new ValueFilter(CompareOp.LESS_OR_EQUAL,
+    f = new ValueFilter(CompareOperator.LESS_OR_EQUAL,
         new BinaryComparator(Bytes.toBytes("testValueTwo")));
     s = new Scan();
     s.setFilter(f);
@@ -1251,7 +1256,7 @@ public class TestFilter {
     // Expect group one rows
     expectedRows = this.numRows / 2;
     expectedKeys = this.colsPerRow;
-    f = new ValueFilter(CompareOp.LESS_OR_EQUAL,
+    f = new ValueFilter(CompareOperator.LESS_OR_EQUAL,
         new BinaryComparator(Bytes.toBytes("testValueOne")));
     s = new Scan();
     s.setFilter(f);
@@ -1261,7 +1266,7 @@ public class TestFilter {
     // Expect half the rows
     expectedRows = this.numRows / 2;
     expectedKeys = this.colsPerRow;
-    f = new ValueFilter(CompareOp.NOT_EQUAL,
+    f = new ValueFilter(CompareOperator.NOT_EQUAL,
         new BinaryComparator(Bytes.toBytes("testValueOne")));
     s = new Scan();
     s.setFilter(f);
@@ -1271,7 +1276,7 @@ public class TestFilter {
     // Expect all rows
     expectedRows = this.numRows;
     expectedKeys = this.colsPerRow;
-    f = new ValueFilter(CompareOp.GREATER_OR_EQUAL,
+    f = new ValueFilter(CompareOperator.GREATER_OR_EQUAL,
         new BinaryComparator(Bytes.toBytes("testValueOne")));
     s = new Scan();
     s.setFilter(f);
@@ -1281,7 +1286,7 @@ public class TestFilter {
     // Expect half rows
     expectedRows = this.numRows / 2;
     expectedKeys = this.colsPerRow;
-    f = new ValueFilter(CompareOp.GREATER,
+    f = new ValueFilter(CompareOperator.GREATER,
         new BinaryComparator(Bytes.toBytes("testValueOne")));
     s = new Scan();
     s.setFilter(f);
@@ -1290,7 +1295,7 @@ public class TestFilter {
     // Match values not equal to testValueOne
     // Look across rows and fully validate the keys and ordering
     // Should see all keys in all group two rows
-    f = new ValueFilter(CompareOp.NOT_EQUAL,
+    f = new ValueFilter(CompareOperator.NOT_EQUAL,
         new BinaryComparator(Bytes.toBytes("testValueOne")));
     s = new Scan();
     s.setFilter(f);
@@ -1326,7 +1331,7 @@ public class TestFilter {
 
     // Test for qualifier regex: "testQualifierOne-2"
     // Should only get rows from second group, and all keys
-    Filter f = new SkipFilter(new QualifierFilter(CompareOp.NOT_EQUAL,
+    Filter f = new SkipFilter(new QualifierFilter(CompareOperator.NOT_EQUAL,
         new BinaryComparator(Bytes.toBytes("testQualifierOne-2"))));
     Scan s = new Scan();
     s.setFilter(f);
@@ -1365,10 +1370,10 @@ public class TestFilter {
     // Test getting a single row, single key using Row, Qualifier, and Value
     // regular expression and substring filters
     // Use must pass all
-    List<Filter> filters = new ArrayList<Filter>();
-    filters.add(new RowFilter(CompareOp.EQUAL, new RegexStringComparator(".+-2")));
-    filters.add(new QualifierFilter(CompareOp.EQUAL, new RegexStringComparator(".+-2")));
-    filters.add(new ValueFilter(CompareOp.EQUAL, new SubstringComparator("One")));
+    List<Filter> filters = new ArrayList<>();
+    filters.add(new RowFilter(CompareOperator.EQUAL, new RegexStringComparator(".+-2")));
+    filters.add(new QualifierFilter(CompareOperator.EQUAL, new RegexStringComparator(".+-2")));
+    filters.add(new ValueFilter(CompareOperator.EQUAL, new SubstringComparator("One")));
     Filter f = new FilterList(Operator.MUST_PASS_ALL, filters);
     Scan s = new Scan();
     s.addFamily(FAMILIES[0]);
@@ -1381,9 +1386,9 @@ public class TestFilter {
     // Test getting everything with a MUST_PASS_ONE filter including row, qf, val
     // regular expression and substring filters
     filters.clear();
-    filters.add(new RowFilter(CompareOp.EQUAL, new RegexStringComparator(".+Two.+")));
-    filters.add(new QualifierFilter(CompareOp.EQUAL, new RegexStringComparator(".+-2")));
-    filters.add(new ValueFilter(CompareOp.EQUAL, new SubstringComparator("One")));
+    filters.add(new RowFilter(CompareOperator.EQUAL, new RegexStringComparator(".+Two.+")));
+    filters.add(new QualifierFilter(CompareOperator.EQUAL, new RegexStringComparator(".+-2")));
+    filters.add(new ValueFilter(CompareOperator.EQUAL, new SubstringComparator("One")));
     f = new FilterList(Operator.MUST_PASS_ONE, filters);
     s = new Scan();
     s.setFilter(f);
@@ -1414,7 +1419,7 @@ public class TestFilter {
 
     // Scan using SingleColumnValueFilter
     SingleColumnValueFilter f1 = new SingleColumnValueFilter(FAMILIES[0], QUALIFIERS_ONE[0],
-          CompareOp.EQUAL, VALUES[0]);
+    CompareOperator.EQUAL, VALUES[0]);
     f1.setFilterIfMissing( true );
     Scan s1 = new Scan();
     s1.addFamily(FAMILIES[0]);
@@ -1435,7 +1440,7 @@ public class TestFilter {
 
     // Scan using another SingleColumnValueFilter, expect disjoint result
     SingleColumnValueFilter f2 = new SingleColumnValueFilter(FAMILIES[0], QUALIFIERS_TWO[0],
-        CompareOp.EQUAL, VALUES[1]);
+    CompareOperator.EQUAL, VALUES[1]);
     f2.setFilterIfMissing( true );
     Scan s2 = new Scan();
     s2.addFamily(FAMILIES[0]);
@@ -1490,10 +1495,10 @@ public class TestFilter {
   public void testFilterListWithPrefixFilter() throws IOException {
     byte[] family = Bytes.toBytes("f1");
     byte[] qualifier = Bytes.toBytes("q1");
-    HTableDescriptor htd = new HTableDescriptor(TableName.valueOf("TestFilter"));
+    HTableDescriptor htd = new HTableDescriptor(TableName.valueOf(name.getMethodName()));
     htd.addFamily(new HColumnDescriptor(family));
     HRegionInfo info = new HRegionInfo(htd.getTableName(), null, null, false);
-    Region testRegion = HBaseTestingUtility.createRegionAndWAL(info, TEST_UTIL.getDataTestDir(),
+    HRegion testRegion = HBaseTestingUtility.createRegionAndWAL(info, TEST_UTIL.getDataTestDir(),
         TEST_UTIL.getConfiguration(), htd);
 
     for(int i=0; i<5; i++) {
@@ -1508,14 +1513,14 @@ public class TestFilter {
     PrefixFilter pf = new PrefixFilter(new byte[] {'b'}) ;
     // rows with value of column 'q1' set to '113'
     SingleColumnValueFilter scvf = new SingleColumnValueFilter(
-        family, qualifier, CompareOp.EQUAL, Bytes.toBytes("113"));
+        family, qualifier, CompareOperator.EQUAL, Bytes.toBytes("113"));
     // combine these two with OR in a FilterList
     FilterList filterList = new FilterList(Operator.MUST_PASS_ONE, pf, scvf);
 
     Scan s1 = new Scan();
     s1.setFilter(filterList);
     InternalScanner scanner = testRegion.getScanner(s1);
-    List<Cell> results = new ArrayList<Cell>();
+    List<Cell> results = new ArrayList<>();
     int resultCount = 0;
     while (scanner.next(results)) {
       resultCount++;
@@ -1548,11 +1553,11 @@ public class TestFilter {
     // Now let's grab rows that have Q_ONE[0](VALUES[0]) and Q_ONE[2](VALUES[1])
     // Since group two rows don't have these qualifiers, they will pass
     // so limiting scan to group one
-    List<Filter> filters = new ArrayList<Filter>();
+    List<Filter> filters = new ArrayList<>();
     filters.add(new SingleColumnValueFilter(FAMILIES[0], QUALIFIERS_ONE[0],
-        CompareOp.EQUAL, VALUES[0]));
+      CompareOperator.EQUAL, VALUES[0]));
     filters.add(new SingleColumnValueFilter(FAMILIES[0], QUALIFIERS_ONE[2],
-        CompareOp.EQUAL, VALUES[1]));
+      CompareOperator.EQUAL, VALUES[1]));
     Filter f = new FilterList(Operator.MUST_PASS_ALL, filters);
     Scan s = new Scan(ROWS_ONE[0], ROWS_TWO[0]);
     s.addFamily(FAMILIES[0]);
@@ -1568,11 +1573,11 @@ public class TestFilter {
 
     // In order to get expected behavior without limiting to group one
     // need to wrap SCVFs in SkipFilters
-    filters = new ArrayList<Filter>();
+    filters = new ArrayList<>();
     filters.add(new SkipFilter(new SingleColumnValueFilter(FAMILIES[0], QUALIFIERS_ONE[0],
-        CompareOp.EQUAL, VALUES[0])));
+      CompareOperator.EQUAL, VALUES[0])));
     filters.add(new SkipFilter(new SingleColumnValueFilter(FAMILIES[0], QUALIFIERS_ONE[2],
-        CompareOp.EQUAL, VALUES[1])));
+      CompareOperator.EQUAL, VALUES[1])));
     f = new FilterList(Operator.MUST_PASS_ALL, filters);
     s = new Scan(ROWS_ONE[0], ROWS_TWO[0]);
     s.addFamily(FAMILIES[0]);
@@ -1607,7 +1612,7 @@ public class TestFilter {
     // Match VALUES[0] against QUALIFIERS_ONE[0] with filterIfMissing = false
     // Expect 3 rows (0, 2, 3)
     SingleColumnValueFilter scvf = new SingleColumnValueFilter(FAMILIES[0],
-        QUALIFIERS_ONE[0], CompareOp.EQUAL, VALUES[0]);
+        QUALIFIERS_ONE[0], CompareOperator.EQUAL, VALUES[0]);
     s = new Scan(ROWS_THREE[0], Bytes.toBytes("rowThree-4"));
     s.addFamily(FAMILIES[0]);
     s.setFilter(scvf);
@@ -1617,7 +1622,7 @@ public class TestFilter {
     // Match VALUES[0] against QUALIFIERS_ONE[0] with filterIfMissing = true
     // Expect 1 row (0)
     scvf = new SingleColumnValueFilter(FAMILIES[0], QUALIFIERS_ONE[0],
-        CompareOp.EQUAL, VALUES[0]);
+    CompareOperator.EQUAL, VALUES[0]);
     scvf.setFilterIfMissing(true);
     s = new Scan(ROWS_THREE[0], Bytes.toBytes("rowThree-4"));
     s.addFamily(FAMILIES[0]);
@@ -1628,7 +1633,7 @@ public class TestFilter {
     // Match VALUES[1] against QUALIFIERS_ONE[1] with filterIfMissing = true
     // Expect 1 row (3)
     scvf = new SingleColumnValueFilter(FAMILIES[0],
-        QUALIFIERS_ONE[1], CompareOp.EQUAL, VALUES[1]);
+        QUALIFIERS_ONE[1], CompareOperator.EQUAL, VALUES[1]);
     scvf.setFilterIfMissing(true);
     s = new Scan(ROWS_THREE[0], Bytes.toBytes("rowThree-4"));
     s.addFamily(FAMILIES[0]);
@@ -1643,7 +1648,7 @@ public class TestFilter {
     // Match VALUES[1] against QUALIFIERS_ONE[1] with filterIfMissing = true
     // Expect 1 row (3)
     scvf = new SingleColumnValueFilter(FAMILIES[0],
-        QUALIFIERS_ONE[1], CompareOp.EQUAL, VALUES[1]);
+        QUALIFIERS_ONE[1], CompareOperator.EQUAL, VALUES[1]);
     scvf.setFilterIfMissing(true);
     s = new Scan(ROWS_THREE[0], Bytes.toBytes("rowThree-4"));
     s.addFamily(FAMILIES[0]);
@@ -1656,12 +1661,11 @@ public class TestFilter {
   private void verifyScan(Scan s, long expectedRows, long expectedKeys)
   throws IOException {
     InternalScanner scanner = this.region.getScanner(s);
-    List<Cell> results = new ArrayList<Cell>();
+    List<Cell> results = new ArrayList<>();
     int i = 0;
     for (boolean done = true; done; i++) {
       done = scanner.next(results);
-      Arrays.sort(results.toArray(new Cell[results.size()]),
-          CellComparator.COMPARATOR);
+      Arrays.sort(results.toArray(new Cell[results.size()]), CellComparator.getInstance());
       LOG.info("counter=" + i + ", " + results);
       if (results.isEmpty()) break;
       assertTrue("Scanned too many rows! Only expected " + expectedRows +
@@ -1678,12 +1682,12 @@ public class TestFilter {
       long expectedKeys)
   throws IOException {
     InternalScanner scanner = this.region.getScanner(s);
-    List<Cell> results = new ArrayList<Cell>();
+    List<Cell> results = new ArrayList<>();
     int i = 0;
     for (boolean done = true; done; i++) {
       done = scanner.next(results);
       Arrays.sort(results.toArray(new Cell[results.size()]),
-          CellComparator.COMPARATOR);
+          CellComparator.getInstance());
       LOG.info("counter=" + i + ", " + results);
       if(results.isEmpty()) break;
       assertTrue("Scanned too many rows! Only expected " + expectedRows +
@@ -1699,13 +1703,13 @@ public class TestFilter {
   private void verifyScanFull(Scan s, KeyValue [] kvs)
   throws IOException {
     InternalScanner scanner = this.region.getScanner(s);
-    List<Cell> results = new ArrayList<Cell>();
+    List<Cell> results = new ArrayList<>();
     int row = 0;
     int idx = 0;
     for (boolean done = true; done; row++) {
       done = scanner.next(results);
       Arrays.sort(results.toArray(new Cell[results.size()]),
-          CellComparator.COMPARATOR);
+          CellComparator.getInstance());
       if(results.isEmpty()) break;
       assertTrue("Scanned too many keys! Only expected " + kvs.length +
           " total but already scanned " + (results.size() + idx) +
@@ -1714,7 +1718,7 @@ public class TestFilter {
       for (Cell kv : results) {
         LOG.info("row=" + row + ", result=" + kv.toString() +
             ", match=" + kvs[idx].toString());
-        assertTrue("Row mismatch", CellUtil.matchingRow(kv, kvs[idx]));
+        assertTrue("Row mismatch", CellUtil.matchingRows(kv, kvs[idx]));
         assertTrue("Family mismatch", CellUtil.matchingFamily(kv, kvs[idx]));
         assertTrue("Qualifier mismatch", CellUtil.matchingQualifier(kv, kvs[idx]));
         assertTrue("Value mismatch", CellUtil.matchingValue(kv, kvs[idx]));
@@ -1730,13 +1734,13 @@ public class TestFilter {
   private void verifyScanFullNoValues(Scan s, KeyValue [] kvs, boolean useLen)
   throws IOException {
     InternalScanner scanner = this.region.getScanner(s);
-    List<Cell> results = new ArrayList<Cell>();
+    List<Cell> results = new ArrayList<>();
     int row = 0;
     int idx = 0;
     for (boolean more = true; more; row++) {
       more = scanner.next(results);
       Arrays.sort(results.toArray(new Cell[results.size()]),
-          CellComparator.COMPARATOR);
+          CellComparator.getInstance());
       if(results.isEmpty()) break;
       assertTrue("Scanned too many keys! Only expected " + kvs.length +
           " total but already scanned " + (results.size() + idx) +
@@ -1746,7 +1750,7 @@ public class TestFilter {
         LOG.info("row=" + row + ", result=" + kv.toString() +
             ", match=" + kvs[idx].toString());
 
-        assertTrue("Row mismatch", CellUtil.matchingRow(kv, kvs[idx]));
+        assertTrue("Row mismatch", CellUtil.matchingRows(kv, kvs[idx]));
         assertTrue("Family mismatch", CellUtil.matchingFamily(kv, kvs[idx]));
         assertTrue("Qualifier mismatch", CellUtil.matchingQualifier(kv, kvs[idx]));
         assertFalse("Should not have returned whole value", CellUtil.matchingValue(kv, kvs[idx]));
@@ -2031,7 +2035,7 @@ public class TestFilter {
     public byte [] toByteArray() {return null;}
 
     @Override
-    public ReturnCode filterKeyValue(Cell ignored) throws IOException {
+    public ReturnCode filterCell(final Cell ignored) throws IOException {
       return ReturnCode.INCLUDE;
     }
 
@@ -2048,13 +2052,14 @@ public class TestFilter {
     }
   }
 
-  // TODO: intentionally disabled?
+  @Test
+  @Ignore("TODO: intentionally disabled?")
   public void testNestedFilterListWithSCVF() throws IOException {
     byte[] columnStatus = Bytes.toBytes("S");
-    HTableDescriptor htd = new HTableDescriptor(TableName.valueOf("testNestedFilterListWithSCVF"));
+    HTableDescriptor htd = new HTableDescriptor(TableName.valueOf(name.getMethodName()));
     htd.addFamily(new HColumnDescriptor(FAMILIES[0]));
     HRegionInfo info = new HRegionInfo(htd.getTableName(), null, null, false);
-    Region testRegion = HBaseTestingUtility.createRegionAndWAL(info, TEST_UTIL.getDataTestDir(),
+    HRegion testRegion = HBaseTestingUtility.createRegionAndWAL(info, TEST_UTIL.getDataTestDir(),
         TEST_UTIL.getConfiguration(), htd);
     for(int i=0; i<10; i++) {
       Put p = new Put(Bytes.toBytes("row" + i));
@@ -2064,33 +2069,33 @@ public class TestFilter {
     }
     testRegion.flush(true);
     // 1. got rows > "row4"
-    Filter rowFilter = new RowFilter(CompareOp.GREATER,new BinaryComparator(Bytes.toBytes("row4")));
+    Filter rowFilter = new RowFilter(CompareOperator.GREATER,new BinaryComparator(Bytes.toBytes("row4")));
     Scan s1 = new Scan();
     s1.setFilter(rowFilter);
     InternalScanner scanner = testRegion.getScanner(s1);
-    List<Cell> results = new ArrayList<Cell>();
+    List<Cell> results = new ArrayList<>();
     int i = 5;
     for (boolean done = true; done; i++) {
       done = scanner.next(results);
-      assertTrue(CellUtil.matchingRow(results.get(0), Bytes.toBytes("row" + i)));
+      assertTrue(CellUtil.matchingRows(results.get(0), Bytes.toBytes("row" + i)));
       assertEquals(Bytes.toInt(CellUtil.cloneValue(results.get(0))), i%2);
       results.clear();
     }
     // 2. got rows <= "row4" and S=
     FilterList subFilterList = new FilterList(FilterList.Operator.MUST_PASS_ALL);
-    Filter subFilter1 = new RowFilter(CompareOp.LESS_OR_EQUAL,
+    Filter subFilter1 = new RowFilter(CompareOperator.LESS_OR_EQUAL,
       new BinaryComparator(Bytes.toBytes("row4")));
     subFilterList.addFilter(subFilter1);
-    Filter subFilter2 = new SingleColumnValueFilter(FAMILIES[0], columnStatus, CompareOp.EQUAL,
+    Filter subFilter2 = new SingleColumnValueFilter(FAMILIES[0], columnStatus, CompareOperator.EQUAL,
       Bytes.toBytes(0));
     subFilterList.addFilter(subFilter2);
     s1 = new Scan();
     s1.setFilter(subFilterList);
     scanner = testRegion.getScanner(s1);
-    results = new ArrayList<Cell>();
+    results = new ArrayList<>();
     for (i=0; i<=4; i+=2) {
       scanner.next(results);
-      assertTrue(CellUtil.matchingRow(results.get(0), Bytes.toBytes("row" + i)));
+      assertTrue(CellUtil.matchingRows(results.get(0), Bytes.toBytes("row" + i)));
       assertEquals(Bytes.toInt(CellUtil.cloneValue(results.get(0))), i%2);
       results.clear();
     }
@@ -2103,16 +2108,16 @@ public class TestFilter {
     s1 = new Scan();
     s1.setFilter(filterList);
     scanner = testRegion.getScanner(s1);
-    results = new ArrayList<Cell>();
+    results = new ArrayList<>();
     for (i=0; i<=4; i+=2) {
       scanner.next(results);
-      assertTrue(CellUtil.matchingRow(results.get(0), Bytes.toBytes("row" + i)));
+      assertTrue(CellUtil.matchingRows(results.get(0), Bytes.toBytes("row" + i)));
       assertEquals(Bytes.toInt(CellUtil.cloneValue(results.get(0))), i%2);
       results.clear();
     }
     for (i=5; i<=9; i++) {
       scanner.next(results);
-      assertTrue(CellUtil.matchingRow(results.get(0), Bytes.toBytes("row" + i)));
+      assertTrue(CellUtil.matchingRows(results.get(0), Bytes.toBytes("row" + i)));
       assertEquals(Bytes.toInt(CellUtil.cloneValue(results.get(0))), i%2);
       results.clear();
     }
@@ -2124,16 +2129,16 @@ public class TestFilter {
     s1 = new Scan();
     s1.setFilter(filterList);
     scanner = testRegion.getScanner(s1);
-    results = new ArrayList<Cell>();
+    results = new ArrayList<>();
     for (i=0; i<=4; i+=2) {
       scanner.next(results);
-      assertTrue(CellUtil.matchingRow(results.get(0), Bytes.toBytes("row" + i)));
+      assertTrue(CellUtil.matchingRows(results.get(0), Bytes.toBytes("row" + i)));
       assertEquals(Bytes.toInt(CellUtil.cloneValue(results.get(0))), i%2);
       results.clear();
     }
     for (i=5; i<=9; i++) {
       scanner.next(results);
-      assertTrue(CellUtil.matchingRow(results.get(0), Bytes.toBytes("row" + i)));
+      assertTrue(CellUtil.matchingRows(results.get(0), Bytes.toBytes("row" + i)));
       assertEquals(Bytes.toInt(CellUtil.cloneValue(results.get(0))), i%2);
       results.clear();
     }

@@ -17,15 +17,6 @@
  */
 package org.apache.hadoop.hbase.filter;
 
-import static org.junit.Assert.assertEquals;
-
-import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.util.ArrayList;
-import java.util.List;
-
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellUtil;
@@ -42,6 +33,7 @@ import org.apache.hadoop.hbase.filter.FilterList.Operator;
 import org.apache.hadoop.hbase.regionserver.ConstantSizeRegionSplitPolicy;
 import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.RegionScanner;
+import org.apache.hbase.thirdparty.com.google.common.collect.Lists;
 import org.apache.hadoop.hbase.testclassification.FilterTests;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.util.Bytes;
@@ -50,10 +42,20 @@ import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.Before;
 import org.junit.BeforeClass;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.junit.rules.TestName;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-import com.google.common.collect.Lists;
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+
+import static org.junit.Assert.assertEquals;
 
 /**
  */
@@ -61,7 +63,7 @@ import com.google.common.collect.Lists;
 public class TestFuzzyRowFilterEndToEnd {
   private final static HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
   private final static byte fuzzyValue = (byte) 63;
-  private static final Log LOG = LogFactory.getLog(TestFuzzyRowFilterEndToEnd.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestFuzzyRowFilterEndToEnd.class);
 
   private static int firstPartCardinality = 50;
   private static int secondPartCardinality = 50;
@@ -70,6 +72,9 @@ public class TestFuzzyRowFilterEndToEnd {
   private static int totalFuzzyKeys = thirdPartCardinality / 2;
 
   private static String table = "TestFuzzyRowFilterEndToEnd";
+
+  @Rule
+  public TestName name = new TestName();
 
   /**
    * @throws java.lang.Exception
@@ -115,10 +120,9 @@ public class TestFuzzyRowFilterEndToEnd {
   public void testAllFixedBits() throws IOException {
     String cf = "f";
     String cq = "q";
-    String table = "testAllFixedBits";
 
     Table ht =
-        TEST_UTIL.createTable(TableName.valueOf(table), Bytes.toBytes(cf), Integer.MAX_VALUE);
+        TEST_UTIL.createTable(TableName.valueOf(name.getMethodName()), Bytes.toBytes(cf), Integer.MAX_VALUE);
     // Load data
     String[] rows = new String[] { "\\x9C\\x00\\x044\\x00\\x00\\x00\\x00",
         "\\x9C\\x00\\x044\\x01\\x00\\x00\\x00", "\\x9C\\x00\\x044\\x00\\x01\\x00\\x00",
@@ -133,10 +137,15 @@ public class TestFuzzyRowFilterEndToEnd {
 
     TEST_UTIL.flush();
 
-    List<Pair<byte[], byte[]>> data = new ArrayList<Pair<byte[], byte[]>>();
+    List<Pair<byte[], byte[]>> data = new ArrayList<>();
     byte[] fuzzyKey = Bytes.toBytesBinary("\\x9B\\x00\\x044e");
     byte[] mask = new byte[] { 0, 0, 0, 0, 0 };
-    data.add(new Pair<byte[], byte[]>(fuzzyKey, mask));
+
+    // copy the fuzzy key and mask to test HBASE-18617
+    byte[] copyFuzzyKey = Arrays.copyOf(fuzzyKey, fuzzyKey.length);
+    byte[] copyMask = Arrays.copyOf(mask, mask.length);
+
+    data.add(new Pair<>(fuzzyKey, mask));
     FuzzyRowFilter filter = new FuzzyRowFilter(data);
 
     Scan scan = new Scan();
@@ -148,7 +157,11 @@ public class TestFuzzyRowFilterEndToEnd {
       total++;
     }
     assertEquals(2, total);
-    TEST_UTIL.deleteTable(TableName.valueOf(table));
+
+    assertEquals(true, Arrays.equals(copyFuzzyKey, fuzzyKey));
+    assertEquals(true, Arrays.equals(copyMask, mask));
+
+    TEST_UTIL.deleteTable(TableName.valueOf(name.getMethodName()));
   }
 
   @Test
@@ -156,10 +169,9 @@ public class TestFuzzyRowFilterEndToEnd {
   {
     String cf = "f";
     String cq = "q";
-    String table = "HBASE14872";
 
     Table ht =
-        TEST_UTIL.createTable(TableName.valueOf(table), Bytes.toBytes(cf), Integer.MAX_VALUE);
+        TEST_UTIL.createTable(TableName.valueOf(name.getMethodName()), Bytes.toBytes(cf), Integer.MAX_VALUE);
     // Load data
     String[] rows = new String[]{
         "\\x9C\\x00\\x044\\x00\\x00\\x00\\x00",
@@ -184,10 +196,10 @@ public class TestFuzzyRowFilterEndToEnd {
 
     TEST_UTIL.flush();
 
-    List<Pair<byte[], byte[]>> data =  new ArrayList<Pair<byte[], byte[]>>();
+    List<Pair<byte[], byte[]>> data =  new ArrayList<>();
     byte[] fuzzyKey = Bytes.toBytesBinary("\\x00\\x00\\x044");
     byte[] mask = new byte[] { 1,0,0,0};
-    data.add(new Pair<byte[], byte[]>(fuzzyKey, mask));
+    data.add(new Pair<>(fuzzyKey, mask));
     FuzzyRowFilter filter = new FuzzyRowFilter(data);
     
     Scan scan = new Scan();
@@ -199,7 +211,7 @@ public class TestFuzzyRowFilterEndToEnd {
       total++;
     }    
     assertEquals(rows.length, total);
-    TEST_UTIL.deleteTable(TableName.valueOf(table));
+    TEST_UTIL.deleteTable(TableName.valueOf(name.getMethodName()));
   }
   
   @Test
@@ -251,7 +263,7 @@ public class TestFuzzyRowFilterEndToEnd {
 
     byte[] mask = new byte[] { 0, 0, 1, 1, 1, 1, 0, 0, 0, 0 };
 
-    List<Pair<byte[], byte[]>> list = new ArrayList<Pair<byte[], byte[]>>();
+    List<Pair<byte[], byte[]>> list = new ArrayList<>();
     for (int i = 0; i < totalFuzzyKeys; i++) {
       byte[] fuzzyKey = new byte[10];
       ByteBuffer buf = ByteBuffer.wrap(fuzzyKey);
@@ -262,7 +274,7 @@ public class TestFuzzyRowFilterEndToEnd {
       }
       buf.putInt(i);
 
-      Pair<byte[], byte[]> pair = new Pair<byte[], byte[]>(fuzzyKey, mask);
+      Pair<byte[], byte[]> pair = new Pair<>(fuzzyKey, mask);
       list.add(pair);
     }
 
@@ -283,7 +295,7 @@ public class TestFuzzyRowFilterEndToEnd {
 
     byte[] mask = new byte[] { 0, 0, 1, 1, 1, 1, 0, 0, 0, 0 };
 
-    List<Pair<byte[], byte[]>> list = new ArrayList<Pair<byte[], byte[]>>();
+    List<Pair<byte[], byte[]>> list = new ArrayList<>();
 
     for (int i = 0; i < totalFuzzyKeys; i++) {
       byte[] fuzzyKey = new byte[10];
@@ -295,7 +307,7 @@ public class TestFuzzyRowFilterEndToEnd {
       }
       buf.putInt(i * 2);
 
-      Pair<byte[], byte[]> pair = new Pair<byte[], byte[]>(fuzzyKey, mask);
+      Pair<byte[], byte[]> pair = new Pair<>(fuzzyKey, mask);
       list.add(pair);
     }
 
@@ -322,7 +334,7 @@ public class TestFuzzyRowFilterEndToEnd {
     HRegion first = regions.get(0);
     first.getScanner(scan);
     RegionScanner scanner = first.getScanner(scan);
-    List<Cell> results = new ArrayList<Cell>();
+    List<Cell> results = new ArrayList<>();
     // Result result;
     long timeBeforeScan = System.currentTimeMillis();
     int found = 0;
@@ -344,9 +356,8 @@ public class TestFuzzyRowFilterEndToEnd {
   @Test
   public void testFilterList() throws Exception {
     String cf = "f";
-    String table = "TestFuzzyRowFiltersInFilterList";
     Table ht =
-        TEST_UTIL.createTable(TableName.valueOf(table), Bytes.toBytes(cf), Integer.MAX_VALUE);
+        TEST_UTIL.createTable(TableName.valueOf(name.getMethodName()), Bytes.toBytes(cf), Integer.MAX_VALUE);
 
     // 10 byte row key - (2 bytes 4 bytes 4 bytes)
     // 4 byte qualifier
@@ -406,8 +417,8 @@ public class TestFuzzyRowFilterEndToEnd {
 
     byte[] mask2 = new byte[] { 0, 0, 0, 0, 0, 0, 1, 1, 1, 1 };
 
-    Pair<byte[], byte[]> pair1 = new Pair<byte[], byte[]>(fuzzyKey1, mask1);
-    Pair<byte[], byte[]> pair2 = new Pair<byte[], byte[]>(fuzzyKey2, mask2);
+    Pair<byte[], byte[]> pair1 = new Pair<>(fuzzyKey1, mask1);
+    Pair<byte[], byte[]> pair2 = new Pair<>(fuzzyKey2, mask2);
 
     FuzzyRowFilter fuzzyRowFilter1 = new FuzzyRowFilter(Lists.newArrayList(pair1));
     FuzzyRowFilter fuzzyRowFilter2 = new FuzzyRowFilter(Lists.newArrayList(pair2));
@@ -424,7 +435,7 @@ public class TestFuzzyRowFilterEndToEnd {
     scan.setFilter(filterList);
 
     ResultScanner scanner = hTable.getScanner(scan);
-    List<Cell> results = new ArrayList<Cell>();
+    List<Cell> results = new ArrayList<>();
     Result result;
     long timeBeforeScan = System.currentTimeMillis();
     while ((result = scanner.next()) != null) {

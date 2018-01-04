@@ -23,9 +23,12 @@ import java.util.List;
 
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellUtil;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.hadoop.hbase.HConstants;
+import org.apache.hadoop.hbase.PrivateCellUtil;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.regionserver.HRegion.RegionScannerImpl;
+import org.apache.hadoop.hbase.util.Bytes;
 
 /**
  * ReversibleRegionScannerImpl extends from RegionScannerImpl, and is used to
@@ -56,17 +59,22 @@ class ReversedRegionScannerImpl extends RegionScannerImpl {
   }
 
   @Override
-  protected boolean isStopRow(Cell currentRowCell) {
-    return currentRowCell == null
-        || (super.stopRow != null && comparator.compareRows(currentRowCell, stopRow, 0,
-            stopRow.length) <= super.isScan);
+  protected boolean shouldStop(Cell currentRowCell) {
+    if (currentRowCell == null) {
+      return true;
+    }
+    if (stopRow == null || Bytes.equals(stopRow, HConstants.EMPTY_START_ROW)) {
+      return false;
+    }
+    int c = comparator.compareRows(currentRowCell, stopRow, 0, stopRow.length);
+    return c < 0 || (c == 0 && !includeStopRow);
   }
 
   @Override
   protected boolean nextRow(ScannerContext scannerContext, Cell curRowCell)
       throws IOException {
     assert super.joinedContinuationRow == null : "Trying to go to next row during joinedHeap read.";
-    this.storeHeap.seekToPreviousRow(CellUtil.createFirstOnRow(curRowCell));
+    this.storeHeap.seekToPreviousRow(PrivateCellUtil.createFirstOnRow(curRowCell));
     resetFilters();
     // Calling the hook in CP which allows it to do a fast forward
     if (this.region.getCoprocessorHost() != null) {

@@ -39,8 +39,6 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import org.apache.commons.io.FileUtils;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HConstants;
@@ -51,6 +49,8 @@ import org.apache.hadoop.hbase.testclassification.MiscTests;
 import org.apache.hadoop.hbase.zookeeper.ZKUtil;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * A helper class for process-based mini-cluster tests. Unlike
@@ -69,7 +69,7 @@ public class ProcessBasedLocalHBaseCluster {
 
   private static final int MAX_FILE_SIZE_OVERRIDE = 10 * 1000 * 1000;
 
-  private static final Log LOG = LogFactory.getLog(
+  private static final Logger LOG = LoggerFactory.getLogger(
       ProcessBasedLocalHBaseCluster.class);
 
   private List<String> daemonPidFiles =
@@ -140,7 +140,7 @@ public class ProcessBasedLocalHBaseCluster {
    * in the returned array, e.g. server #0, #1, etc.
    */
   private static List<Integer> sortedPorts(int n) {
-    List<Integer> ports = new ArrayList<Integer>(n);
+    List<Integer> ports = new ArrayList<>(n);
     for (int i = 0; i < n; ++i) {
       ports.add(HBaseTestingUtility.randomFreePort());
     }
@@ -216,8 +216,7 @@ public class ProcessBasedLocalHBaseCluster {
     try {
       String [] envp = null;
       if (envOverrides != null) {
-        Map<String, String> map = new HashMap<String, String>(
-            System.getenv());
+        Map<String, String> map = new HashMap<>(System.getenv());
         map.putAll(envOverrides);
         envp = new String[map.size()];
         int idx = 0;
@@ -250,7 +249,7 @@ public class ProcessBasedLocalHBaseCluster {
 
   private void shutdownAllProcesses() {
     LOG.info("Killing daemons using pid files");
-    final List<String> pidFiles = new ArrayList<String>(daemonPidFiles);
+    final List<String> pidFiles = new ArrayList<>(daemonPidFiles);
     for (String pidFile : pidFiles) {
       int pid = 0;
       try {
@@ -359,7 +358,7 @@ public class ProcessBasedLocalHBaseCluster {
         "HBASE_ZOOKEEPER_JMX_OPTS=' '\n",
         dir + "/hbase-env.sh");
 
-    Map<String, String> envOverrides = new HashMap<String, String>();
+    Map<String, String> envOverrides = new HashMap<>();
     envOverrides.put("HBASE_LOG_DIR", dir);
     envOverrides.put("HBASE_PID_DIR", dir);
     try {
@@ -379,7 +378,7 @@ public class ProcessBasedLocalHBaseCluster {
   private final String generateConfig(ServerType serverType, int rpcPort,
       String daemonDir) {
     StringBuilder sb = new StringBuilder();
-    Map<String, Object> confMap = new TreeMap<String, Object>();
+    Map<String, Object> confMap = new TreeMap<>();
     confMap.put(HConstants.CLUSTER_DISTRIBUTED, true);
 
     if (serverType == ServerType.MASTER) {
@@ -446,8 +445,8 @@ public class ProcessBasedLocalHBaseCluster {
   }
 
   private final class LocalDaemonLogTailer implements Runnable {
-    private final Set<String> tailedFiles = new HashSet<String>();
-    private final List<String> dirList = new ArrayList<String>();
+    private final Set<String> tailedFiles = new HashSet<>();
+    private final List<String> dirList = new ArrayList<>();
     private final Object printLock = new Object();
 
     private final FilenameFilter LOG_FILES = new FilenameFilter() {
@@ -462,7 +461,7 @@ public class ProcessBasedLocalHBaseCluster {
       try {
         runInternal();
       } catch (IOException ex) {
-        LOG.error(ex);
+        LOG.error(ex.toString(), ex);
       }
     }
 

@@ -22,13 +22,14 @@ import java.util
 import java.util.UUID
 import javax.management.openmbean.KeyAlreadyExistsException
 
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.hbase.fs.HFileSystem
 import org.apache.hadoop.hbase._
 import org.apache.hadoop.hbase.io.compress.Compression
 import org.apache.hadoop.hbase.io.compress.Compression.Algorithm
 import org.apache.hadoop.hbase.io.encoding.DataBlockEncoding
 import org.apache.hadoop.hbase.io.hfile.{HFile, CacheConfig, HFileContextBuilder, HFileWriterImpl}
-import org.apache.hadoop.hbase.regionserver.{HStore, StoreFile, StoreFileWriter, BloomType}
+import org.apache.hadoop.hbase.regionserver.{HStore, HStoreFile, StoreFileWriter, BloomType}
 import org.apache.hadoop.hbase.util.Bytes
 import org.apache.hadoop.mapred.JobConf
 import org.apache.spark.broadcast.Broadcast
@@ -47,7 +48,7 @@ import org.apache.spark.streaming.dstream.DStream
 import java.io._
 import org.apache.hadoop.security.UserGroupInformation
 import org.apache.hadoop.security.UserGroupInformation.AuthenticationMethod
-import org.apache.hadoop.fs.{Path, FileSystem}
+import org.apache.hadoop.fs.{Path, FileAlreadyExistsException, FileSystem}
 import scala.collection.mutable
 
 /**
@@ -58,6 +59,7 @@ import scala.collection.mutable
   * of disseminating the configuration information
   * to the working and managing the life cycle of Connections.
  */
+@InterfaceAudience.Public
 class HBaseContext(@transient sc: SparkContext,
                    @transient val config: Configuration,
                    val tmpHdfsConfgFile: String = null)
@@ -618,9 +620,17 @@ class HBaseContext(@transient sc: SparkContext,
                   compactionExclude: Boolean = false,
                   maxSize:Long = HConstants.DEFAULT_MAX_FILE_SIZE):
   Unit = {
+    val stagingPath = new Path(stagingDir)
+    val fs = stagingPath.getFileSystem(config)
+    if (fs.exists(stagingPath)) {
+      throw new FileAlreadyExistsException("Path " + stagingDir + " already exists")
+    }
     val conn = HBaseConnectionCache.getConnection(config)
     val regionLocator = conn.getRegionLocator(tableName)
     val startKeys = regionLocator.getStartKeys
+    if (startKeys.length == 0) {
+      logInfo("Table " + tableName.toString + " was not found")
+    }
     val defaultCompressionStr = config.get("hfile.compression",
       Compression.Algorithm.NONE.getName)
     val hfileCompression = HFileWriterImpl
@@ -741,9 +751,17 @@ class HBaseContext(@transient sc: SparkContext,
                   compactionExclude: Boolean = false,
                   maxSize:Long = HConstants.DEFAULT_MAX_FILE_SIZE):
   Unit = {
+    val stagingPath = new Path(stagingDir)
+    val fs = stagingPath.getFileSystem(config)
+    if (fs.exists(stagingPath)) {
+      throw new FileAlreadyExistsException("Path " + stagingDir + " already exists")
+    }
     val conn = HBaseConnectionCache.getConnection(config)
     val regionLocator = conn.getRegionLocator(tableName)
     val startKeys = regionLocator.getStartKeys
+    if (startKeys.length == 0) {
+      logInfo("Table " + tableName.toString + " was not found")
+    }
     val defaultCompressionStr = config.get("hfile.compression",
       Compression.Algorithm.NONE.getName)
     val defaultCompression = HFileWriterImpl
@@ -899,7 +917,7 @@ class HBaseContext(@transient sc: SparkContext,
     new WriterLength(0,
       new StoreFileWriter.Builder(conf, new CacheConfig(tempConf), new HFileSystem(fs))
         .withBloomType(BloomType.valueOf(familyOptions.bloomType))
-        .withComparator(CellComparator.COMPARATOR).withFileContext(hFileContext)
+        .withComparator(CellComparator.getInstance()).withFileContext(hFileContext)
         .withFilePath(new Path(familydir, "_" + UUID.randomUUID.toString.replaceAll("-", "")))
         .withFavoredNodes(favoredNodes).build())
 
@@ -1057,13 +1075,13 @@ class HBaseContext(@transient sc: SparkContext,
                                previousRow: Array[Byte],
                                compactionExclude: Boolean): Unit = {
     if (w != null) {
-      w.appendFileInfo(StoreFile.BULKLOAD_TIME_KEY,
+      w.appendFileInfo(HStoreFile.BULKLOAD_TIME_KEY,
         Bytes.toBytes(System.currentTimeMillis()))
-      w.appendFileInfo(StoreFile.BULKLOAD_TASK_KEY,
+      w.appendFileInfo(HStoreFile.BULKLOAD_TASK_KEY,
         Bytes.toBytes(regionSplitPartitioner.getPartition(previousRow)))
-      w.appendFileInfo(StoreFile.MAJOR_COMPACTION_KEY,
+      w.appendFileInfo(HStoreFile.MAJOR_COMPACTION_KEY,
         Bytes.toBytes(true))
-      w.appendFileInfo(StoreFile.EXCLUDE_FROM_MINOR_COMPACTION_KEY,
+      w.appendFileInfo(HStoreFile.EXCLUDE_FROM_MINOR_COMPACTION_KEY,
         Bytes.toBytes(compactionExclude))
       w.appendTrackedTimestampsToMetadata()
       w.close()

@@ -23,8 +23,6 @@ import static org.junit.Assert.fail;
 
 import java.io.IOException;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.CoprocessorEnvironment;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
@@ -36,13 +34,15 @@ import org.apache.hadoop.hbase.client.Durability;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.regionserver.HRegionServer;
-import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
+import org.apache.hadoop.hbase.wal.WALEdit;
 import org.apache.hadoop.hbase.testclassification.CoprocessorTests;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.junit.Assert;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Tests unhandled exceptions thrown by coprocessors running on a regionserver..
@@ -52,7 +52,7 @@ import org.junit.experimental.categories.Category;
  */
 @Category({CoprocessorTests.class, MediumTests.class})
 public class TestRegionServerCoprocessorExceptionWithAbort {
-  private static final Log LOG = LogFactory.getLog(
+  private static final Logger LOG = LoggerFactory.getLogger(
     TestRegionServerCoprocessorExceptionWithAbort.class);
   private static final HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
   private static final TableName TABLE_NAME = TableName.valueOf("observed_table");
@@ -119,7 +119,7 @@ public class TestRegionServerCoprocessorExceptionWithAbort {
       // it will abort.
       boolean aborted = false;
       for (int i = 0; i < 10; i++) {
-        aborted = regionServer.isAborted(); 
+        aborted = regionServer.isAborted();
         if (aborted) {
           break;
         }
@@ -137,7 +137,7 @@ public class TestRegionServerCoprocessorExceptionWithAbort {
     }
   }
 
-  public static class FailedInitializationObserver extends SimpleRegionObserver {
+  public static class FailedInitializationObserver implements RegionServerCoprocessor {
     @SuppressWarnings("null")
     @Override
     public void start(CoprocessorEnvironment e) throws IOException {

@@ -1,6 +1,3 @@
-#
-# Copyright The Apache Software Foundation
-#
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements.  See the NOTICE file
 # distributed with this work for additional information
@@ -22,19 +19,21 @@ module Shell
   module Commands
     class GetTableRsgroup < Command
       def help
-        return <<-EOF
-Get the group name the given table is a member of.
+        <<-EOF
+Get the RegionServer group name the given table is a member of.
+
+Example:
 
   hbase> get_table_rsgroup 'myTable'
+
 EOF
       end
 
       def command(table)
-        now = Time.now
         group_name =
-            rsgroup_admin.get_rsgroup_of_table(table).getName
+          rsgroup_admin.get_rsgroup_of_table(table).getName
         formatter.row([group_name])
-        formatter.footer(now, 1)
+        formatter.footer(1)
       end
     end
   end

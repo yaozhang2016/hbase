@@ -17,10 +17,9 @@
  */
 package org.apache.hadoop.hbase.types;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
 import org.apache.hadoop.hbase.util.Order;
 import org.apache.hadoop.hbase.util.PositionedByteRange;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * The {@code Union} family of {@link DataType}s encode one of a fixed
@@ -29,7 +28,6 @@ import org.apache.hadoop.hbase.util.PositionedByteRange;
  */
 @SuppressWarnings("unchecked")
 @InterfaceAudience.Public
-@InterfaceStability.Evolving
 public abstract class Union4<A, B, C, D> extends Union3<A, B, C> {
 
   protected final DataType<D> typeD;
@@ -49,7 +47,9 @@ public abstract class Union4<A, B, C, D> extends Union3<A, B, C> {
   }
 
   @Override
-  public Order getOrder() { return null; }
+  public Order getOrder() {
+    return null;
+  }
 
   @Override
   public boolean isNullable() {

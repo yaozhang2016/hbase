@@ -25,9 +25,9 @@ import java.util.List;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.TimeUnit;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * A BlockingQueue reports waiting time in queue and queue length to
@@ -35,7 +35,7 @@ import org.apache.hadoop.hbase.classification.InterfaceAudience;
  */
 @InterfaceAudience.Private
 public class CallQueue implements BlockingQueue<Runnable> {
-  private static final Log LOG = LogFactory.getLog(CallQueue.class);
+  private static final Logger LOG = LoggerFactory.getLogger(CallQueue.class);
 
   private final BlockingQueue<Call> underlyingQueue;
   private final ThriftMetrics metrics;
@@ -133,7 +133,7 @@ public class CallQueue implements BlockingQueue<Runnable> {
       throw new IllegalArgumentException(
           "A BlockingQueue cannot drain to itself.");
     }
-    List<Call> drained = new ArrayList<Call>();
+    List<Call> drained = new ArrayList<>();
     underlyingQueue.drainTo(drained, maxElements);
     for (Call r : drained) {
       updateMetrics(r);

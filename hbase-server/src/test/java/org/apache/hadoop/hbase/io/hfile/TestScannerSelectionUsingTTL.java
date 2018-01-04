@@ -24,8 +24,6 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Set;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
@@ -35,9 +33,9 @@ import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Scan;
+import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.HStore;
 import org.apache.hadoop.hbase.regionserver.InternalScanner;
-import org.apache.hadoop.hbase.regionserver.Region;
 import org.apache.hadoop.hbase.testclassification.IOTests;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.util.Bytes;
@@ -48,6 +46,8 @@ import org.junit.experimental.categories.Category;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 import org.junit.runners.Parameterized.Parameters;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Test the optimization that does not scan files where all timestamps are
@@ -57,8 +57,8 @@ import org.junit.runners.Parameterized.Parameters;
 @Category({IOTests.class, MediumTests.class})
 public class TestScannerSelectionUsingTTL {
 
-  private static final Log LOG =
-      LogFactory.getLog(TestScannerSelectionUsingTTL.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(TestScannerSelectionUsingTTL.class);
 
   private static final HBaseTestingUtility TEST_UTIL = HBaseTestingUtility.createLocalHTU();
   private static TableName TABLE = TableName.valueOf("myTable");
@@ -79,7 +79,7 @@ public class TestScannerSelectionUsingTTL {
 
   @Parameters
   public static Collection<Object[]> parameters() {
-    List<Object[]> params = new ArrayList<Object[]>();
+    List<Object[]> params = new ArrayList<>();
     for (int numFreshFiles = 1; numFreshFiles <= 3; ++numFreshFiles) {
       for (boolean explicitCompaction : new boolean[] { false, true }) {
         params.add(new Object[] { numFreshFiles, explicitCompaction });
@@ -106,7 +106,7 @@ public class TestScannerSelectionUsingTTL {
     HTableDescriptor htd = new HTableDescriptor(TABLE);
     htd.addFamily(hcd);
     HRegionInfo info = new HRegionInfo(TABLE);
-    Region region = HBaseTestingUtility.createRegionAndWAL(info,
+    HRegion region = HBaseTestingUtility.createRegionAndWAL(info,
       TEST_UTIL.getDataTestDir(info.getEncodedName()), conf, htd);
 
     long ts = EnvironmentEdgeManager.currentTime();
@@ -135,7 +135,7 @@ public class TestScannerSelectionUsingTTL {
     LruBlockCache cache = (LruBlockCache) cacheConf.getBlockCache();
     cache.clearCache();
     InternalScanner scanner = region.getScanner(scan);
-    List<Cell> results = new ArrayList<Cell>();
+    List<Cell> results = new ArrayList<>();
     final int expectedKVsPerRow = numFreshFiles * NUM_COLS_PER_ROW;
     int numReturnedRows = 0;
     LOG.info("Scanning the entire table");
@@ -150,7 +150,7 @@ public class TestScannerSelectionUsingTTL {
 
     // Exercise both compaction codepaths.
     if (explicitCompaction) {
-      HStore store = (HStore)region.getStore(FAMILY_BYTES);
+      HStore store = region.getStore(FAMILY_BYTES);
       store.compactRecentForTestingAssumingDefaultPolicy(totalNumFiles);
     } else {
       region.compact(false);

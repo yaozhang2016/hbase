@@ -18,8 +18,7 @@
 package org.apache.hadoop.hbase.regionserver;
 
 import java.util.Collection;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
@@ -36,12 +35,14 @@ import org.junit.BeforeClass;
 import org.junit.Test;
 
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import static org.junit.Assert.assertEquals;
 
 @Category(MediumTests.class)
 public class TestCompactSplitThread {
-  private static final Log LOG = LogFactory.getLog(TestCompactSplitThread.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestCompactSplitThread.class);
   private static final HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
   private final TableName tableName = TableName.valueOf(getClass().getSimpleName());
   private final byte[] family = Bytes.toBytes("f");
@@ -77,10 +78,9 @@ public class TestCompactSplitThread {
     // block writes if we get to blockingStoreFiles store files
     conf.setInt("hbase.hstore.blockingStoreFiles", blockingStoreFiles);
     // Ensure no extra cleaners on by default (e.g. TimeToLiveHFileCleaner)
-    conf.setInt(CompactSplitThread.LARGE_COMPACTION_THREADS, 3);
-    conf.setInt(CompactSplitThread.SMALL_COMPACTION_THREADS, 4);
-    conf.setInt(CompactSplitThread.SPLIT_THREADS, 5);
-    conf.setInt(CompactSplitThread.MERGE_THREADS, 6);
+    conf.setInt(CompactSplit.LARGE_COMPACTION_THREADS, 3);
+    conf.setInt(CompactSplit.SMALL_COMPACTION_THREADS, 4);
+    conf.setInt(CompactSplit.SPLIT_THREADS, 5);
   }
 
   @After
@@ -105,7 +105,7 @@ public class TestCompactSplitThread {
       HTableDescriptor htd = new HTableDescriptor(tableName);
       htd.addFamily(new HColumnDescriptor(family));
       htd.setCompactionEnabled(false);
-      TEST_UTIL.getHBaseAdmin().createTable(htd);
+      TEST_UTIL.getAdmin().createTable(htd);
       TEST_UTIL.waitTableAvailable(tableName);
       HRegionServer regionServer = TEST_UTIL.getRSForFirstRegionInTable(tableName);
 
@@ -113,13 +113,11 @@ public class TestCompactSplitThread {
       assertEquals(3, regionServer.compactSplitThread.getLargeCompactionThreadNum());
       assertEquals(4, regionServer.compactSplitThread.getSmallCompactionThreadNum());
       assertEquals(5, regionServer.compactSplitThread.getSplitThreadNum());
-      assertEquals(6, regionServer.compactSplitThread.getMergeThreadNum());
 
       // change bigger configurations and do online update
-      conf.setInt(CompactSplitThread.LARGE_COMPACTION_THREADS, 4);
-      conf.setInt(CompactSplitThread.SMALL_COMPACTION_THREADS, 5);
-      conf.setInt(CompactSplitThread.SPLIT_THREADS, 6);
-      conf.setInt(CompactSplitThread.MERGE_THREADS, 7);
+      conf.setInt(CompactSplit.LARGE_COMPACTION_THREADS, 4);
+      conf.setInt(CompactSplit.SMALL_COMPACTION_THREADS, 5);
+      conf.setInt(CompactSplit.SPLIT_THREADS, 6);
       try {
         regionServer.compactSplitThread.onConfigurationChange(conf);
       } catch (IllegalArgumentException iae) {
@@ -130,13 +128,11 @@ public class TestCompactSplitThread {
       assertEquals(4, regionServer.compactSplitThread.getLargeCompactionThreadNum());
       assertEquals(5, regionServer.compactSplitThread.getSmallCompactionThreadNum());
       assertEquals(6, regionServer.compactSplitThread.getSplitThreadNum());
-      assertEquals(7, regionServer.compactSplitThread.getMergeThreadNum());
 
       // change smaller configurations and do online update
-      conf.setInt(CompactSplitThread.LARGE_COMPACTION_THREADS, 2);
-      conf.setInt(CompactSplitThread.SMALL_COMPACTION_THREADS, 3);
-      conf.setInt(CompactSplitThread.SPLIT_THREADS, 4);
-      conf.setInt(CompactSplitThread.MERGE_THREADS, 5);
+      conf.setInt(CompactSplit.LARGE_COMPACTION_THREADS, 2);
+      conf.setInt(CompactSplit.SMALL_COMPACTION_THREADS, 3);
+      conf.setInt(CompactSplit.SPLIT_THREADS, 4);
       try {
         regionServer.compactSplitThread.onConfigurationChange(conf);
       } catch (IllegalArgumentException iae) {
@@ -147,7 +143,6 @@ public class TestCompactSplitThread {
       assertEquals(2, regionServer.compactSplitThread.getLargeCompactionThreadNum());
       assertEquals(3, regionServer.compactSplitThread.getSmallCompactionThreadNum());
       assertEquals(4, regionServer.compactSplitThread.getSplitThreadNum());
-      assertEquals(5, regionServer.compactSplitThread.getMergeThreadNum());
     } finally {
       conn.close();
     }
@@ -155,8 +150,6 @@ public class TestCompactSplitThread {
 
   @Test(timeout = 60000)
   public void testFlushWithTableCompactionDisabled() throws Exception {
-    Admin admin = TEST_UTIL.getHBaseAdmin();
-
     HTableDescriptor htd = new HTableDescriptor(tableName);
     htd.setCompactionEnabled(false);
     TEST_UTIL.createTable(htd, new byte[][] { family }, null);

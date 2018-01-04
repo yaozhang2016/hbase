@@ -17,20 +17,21 @@
 package org.apache.hadoop.hbase.io.encoding;
 
 import java.io.DataInputStream;
+import java.io.DataOutput;
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellComparator;
-import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.KeyValueUtil;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.hadoop.hbase.PrivateCellUtil;
 import org.apache.hadoop.hbase.nio.ByteBuff;
 import org.apache.hadoop.hbase.util.ByteBufferUtils;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.ObjectIntPair;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * Encoder similar to {@link DiffKeyDeltaEncoder} but supposedly faster.
@@ -59,12 +60,12 @@ import org.apache.hadoop.hbase.util.ObjectIntPair;
  */
 @InterfaceAudience.Private
 public class FastDiffDeltaEncoder extends BufferedDataBlockEncoder {
-  final int MASK_TIMESTAMP_LENGTH = (1 << 0) | (1 << 1) | (1 << 2);
-  final int SHIFT_TIMESTAMP_LENGTH = 0;
-  final int FLAG_SAME_KEY_LENGTH = 1 << 3;
-  final int FLAG_SAME_VALUE_LENGTH = 1 << 4;
-  final int FLAG_SAME_TYPE = 1 << 5;
-  final int FLAG_SAME_VALUE = 1 << 6;
+  static final int MASK_TIMESTAMP_LENGTH = (1 << 0) | (1 << 1) | (1 << 2);
+  static final int SHIFT_TIMESTAMP_LENGTH = 0;
+  static final int FLAG_SAME_KEY_LENGTH = 1 << 3;
+  static final int FLAG_SAME_VALUE_LENGTH = 1 << 4;
+  static final int FLAG_SAME_TYPE = 1 << 5;
+  static final int FLAG_SAME_VALUE = 1 << 6;
 
   private static class FastDiffCompressionState extends CompressionState {
     byte[] timestamp = new byte[KeyValue.TIMESTAMP_SIZE];
@@ -252,7 +253,7 @@ public class FastDiffDeltaEncoder extends BufferedDataBlockEncoder {
 
   private int compressSingleKeyValue(DataOutputStream out, Cell cell, Cell prevCell)
       throws IOException {
-    byte flag = 0;
+    int flag = 0; // Do not use more bits than will fit into a byte
     int kLength = KeyValueUtil.keyLength(cell);
     int vLength = cell.getValueLength();
 
@@ -262,14 +263,14 @@ public class FastDiffDeltaEncoder extends BufferedDataBlockEncoder {
       ByteBufferUtils.putCompressedInt(out, kLength);
       ByteBufferUtils.putCompressedInt(out, vLength);
       ByteBufferUtils.putCompressedInt(out, 0);
-      CellUtil.writeFlatKey(cell, out);
+      PrivateCellUtil.writeFlatKey(cell, (DataOutput)out);
       // Write the value part
-      CellUtil.writeValue(out, cell, cell.getValueLength());
+      PrivateCellUtil.writeValue(out, cell, cell.getValueLength());
     } else {
       int preKeyLength = KeyValueUtil.keyLength(prevCell);
       int preValLength = prevCell.getValueLength();
       // find a common prefix and skip it
-      int commonPrefix = CellUtil.findCommonPrefixInFlatKey(cell, prevCell, true, false);
+      int commonPrefix = PrivateCellUtil.findCommonPrefixInFlatKey(cell, prevCell, true, false);
 
       if (kLength == preKeyLength) {
         flag |= FLAG_SAME_KEY_LENGTH;
@@ -290,7 +291,7 @@ public class FastDiffDeltaEncoder extends BufferedDataBlockEncoder {
       // Check if current and previous values are the same. Compare value
       // length first as an optimization.
       if (vLength == preValLength
-          && CellUtil.matchingValue(cell, prevCell, vLength, preValLength)) {
+          && PrivateCellUtil.matchingValue(cell, prevCell, vLength, preValLength)) {
         flag |= FLAG_SAME_VALUE;
       }
 
@@ -306,8 +307,8 @@ public class FastDiffDeltaEncoder extends BufferedDataBlockEncoder {
       if (commonPrefix < rLen + KeyValue.ROW_LENGTH_SIZE) {
         // Previous and current rows are different. Copy the differing part of
         // the row, skip the column family, and copy the qualifier.
-        CellUtil.writeRowKeyExcludingCommon(cell, rLen, commonPrefix, out);
-        CellUtil.writeQualifier(out, cell, cell.getQualifierLength());
+        PrivateCellUtil.writeRowKeyExcludingCommon(cell, rLen, commonPrefix, out);
+        PrivateCellUtil.writeQualifier(out, cell, cell.getQualifierLength());
       } else {
         // The common part includes the whole row. As the column family is the
         // same across the whole file, it will automatically be included in the
@@ -315,7 +316,7 @@ public class FastDiffDeltaEncoder extends BufferedDataBlockEncoder {
         // What we write here is the non common part of the qualifier
         int commonQualPrefix = commonPrefix - (rLen + KeyValue.ROW_LENGTH_SIZE)
             - (cell.getFamilyLength() + KeyValue.FAMILY_LENGTH_SIZE);
-        CellUtil.writeQualifierSkippingBytes(out, cell, cell.getQualifierLength(),
+        PrivateCellUtil.writeQualifierSkippingBytes(out, cell, cell.getQualifierLength(),
           commonQualPrefix);
       }
       // Write non common ts part
@@ -328,7 +329,7 @@ public class FastDiffDeltaEncoder extends BufferedDataBlockEncoder {
 
       // Write the value if it is not the same as before.
       if ((flag & FLAG_SAME_VALUE) == 0) {
-        CellUtil.writeValue(out, cell, vLength);
+        PrivateCellUtil.writeValue(out, cell, vLength);
       }
     }
     return kLength + vLength + KeyValue.KEYVALUE_INFRASTRUCTURE_SIZE;

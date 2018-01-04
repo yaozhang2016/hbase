@@ -19,33 +19,37 @@
 package org.apache.hadoop.hbase.master;
 
 import org.apache.hadoop.hbase.CompatibilitySingletonFactory;
+import org.apache.hadoop.hbase.procedure2.ProcedureMetrics;
+
+import static org.apache.hadoop.hbase.master.MetricsMaster.convertToProcedureMetrics;
 
 public class MetricsAssignmentManager {
-
   private final MetricsAssignmentManagerSource assignmentManagerSource;
+
+  private final ProcedureMetrics assignProcMetrics;
+  private final ProcedureMetrics unassignProcMetrics;
+  private final ProcedureMetrics splitProcMetrics;
+  private final ProcedureMetrics mergeProcMetrics;
 
   public MetricsAssignmentManager() {
     assignmentManagerSource = CompatibilitySingletonFactory.getInstance(
         MetricsAssignmentManagerSource.class);
+
+    assignProcMetrics = convertToProcedureMetrics(assignmentManagerSource.getAssignMetrics());
+    unassignProcMetrics = convertToProcedureMetrics(assignmentManagerSource.getUnassignMetrics());
+    splitProcMetrics = convertToProcedureMetrics(assignmentManagerSource.getSplitMetrics());
+    mergeProcMetrics = convertToProcedureMetrics(assignmentManagerSource.getMergeMetrics());
   }
 
   public MetricsAssignmentManagerSource getMetricsProcSource() {
     return assignmentManagerSource;
   }
 
-  public void updateAssignmentTime(long time) {
-    assignmentManagerSource.updateAssignmentTime(time);
-  }
-
-  public void updateBulkAssignTime(long time) {
-    assignmentManagerSource.updateBulkAssignTime(time);
-  }
-
   /**
    * set new value for number of regions in transition.
    * @param ritCount
    */
-  public void updateRITCount(int ritCount) {
+  public void updateRITCount(final int ritCount) {
     assignmentManagerSource.setRIT(ritCount);
   }
 
@@ -54,14 +58,59 @@ public class MetricsAssignmentManager {
    * as defined by the property rit.metrics.threshold.time.
    * @param ritCountOverThreshold
    */
-  public void updateRITCountOverThreshold(int ritCountOverThreshold) {
+  public void updateRITCountOverThreshold(final int ritCountOverThreshold) {
     assignmentManagerSource.setRITCountOverThreshold(ritCountOverThreshold);
   }
+
   /**
    * update the timestamp for oldest region in transition metrics.
    * @param timestamp
    */
-  public void updateRITOldestAge(long timestamp) {
+  public void updateRITOldestAge(final long timestamp) {
     assignmentManagerSource.setRITOldestAge(timestamp);
+  }
+
+  /**
+   * update the duration metrics of region is transition
+   * @param duration
+   */
+  public void updateRitDuration(long duration) {
+    assignmentManagerSource.updateRitDuration(duration);
+  }
+
+  /*
+   * TODO: Remove. This may not be required as assign and unassign operations are tracked separately
+   * Increment the count of assignment operation (assign/unassign).
+   */
+  public void incrementOperationCounter() {
+    assignmentManagerSource.incrementOperationCounter();
+  }
+
+  /**
+   * @return Set of common metrics for assign procedure
+   */
+  public ProcedureMetrics getAssignProcMetrics() {
+    return assignProcMetrics;
+  }
+
+  /**
+   * @return Set of common metrics for unassign procedure
+   */
+  public ProcedureMetrics getUnassignProcMetrics() {
+    return unassignProcMetrics;
+  }
+
+  /**
+   * @return Set of common metrics for split procedure
+   */
+  public ProcedureMetrics getSplitProcMetrics() {
+    return splitProcMetrics;
+  }
+
+  /**
+   * @return Set of common metrics for merge procedure
+   */
+  public ProcedureMetrics getMergeProcMetrics() {
+    return mergeProcMetrics;
   }
 }

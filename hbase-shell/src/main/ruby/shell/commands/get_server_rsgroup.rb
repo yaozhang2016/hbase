@@ -1,6 +1,3 @@
-#
-# Copyright The Apache Software Foundation
-#
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements.  See the NOTICE file
 # distributed with this work for additional information
@@ -22,18 +19,20 @@ module Shell
   module Commands
     class GetServerRsgroup < Command
       def help
-        return <<-EOF
-Get the group name the given region server is a member of.
+        <<-EOF
+Get the group name the given RegionServer is a member of.
+
+Example:
 
   hbase> get_server_rsgroup 'server1:port1'
+
 EOF
       end
 
       def command(server)
-        now = Time.now
-        group_name = rsgroup_admin.getRSGroupOfServer(server).getName
+        group_name = rsgroup_admin.get_rsgroup_of_server(server).getName
         formatter.row([group_name])
-        formatter.footer(now, 1)
+        formatter.footer(1)
       end
     end
   end

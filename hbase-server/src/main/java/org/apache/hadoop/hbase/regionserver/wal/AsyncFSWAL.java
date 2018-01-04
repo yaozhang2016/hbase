@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -19,13 +19,9 @@ package org.apache.hadoop.hbase.regionserver.wal;
 
 import static org.apache.hadoop.hbase.io.asyncfs.FanOutOneBlockAsyncDFSOutputHelper.shouldRetryCreate;
 
-import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import com.lmax.disruptor.RingBuffer;
 import com.lmax.disruptor.Sequence;
 import com.lmax.disruptor.Sequencer;
-
-import io.netty.channel.EventLoop;
-import io.netty.util.concurrent.SingleThreadEventExecutor;
 
 import java.io.IOException;
 import java.io.InterruptedIOException;
@@ -35,36 +31,44 @@ import java.util.Comparator;
 import java.util.Deque;
 import java.util.Iterator;
 import java.util.List;
-import java.util.PriorityQueue;
 import java.util.Queue;
+import java.util.SortedSet;
+import java.util.TreeSet;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.HBaseInterfaceAudience;
-import org.apache.hadoop.hbase.HRegionInfo;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.client.ConnectionUtils;
+import org.apache.hadoop.hbase.client.RegionInfo;
 import org.apache.hadoop.hbase.io.asyncfs.AsyncFSOutput;
 import org.apache.hadoop.hbase.io.asyncfs.FanOutOneBlockAsyncDFSOutputHelper.NameNodeException;
+import org.apache.hadoop.hbase.trace.TraceUtil;
 import org.apache.hadoop.hbase.wal.AsyncFSWALProvider;
-import org.apache.hadoop.hbase.wal.WALKey;
+import org.apache.hadoop.hbase.wal.WALEdit;
+import org.apache.hadoop.hbase.wal.WALKeyImpl;
 import org.apache.hadoop.hbase.wal.WALProvider.AsyncWriter;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.ipc.RemoteException;
-import org.apache.htrace.NullScope;
-import org.apache.htrace.Span;
-import org.apache.htrace.Trace;
-import org.apache.htrace.TraceScope;
+import org.apache.htrace.core.TraceScope;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.apache.hbase.thirdparty.com.google.common.util.concurrent.ThreadFactoryBuilder;
+import org.apache.hbase.thirdparty.io.netty.channel.Channel;
+import org.apache.hbase.thirdparty.io.netty.channel.EventLoop;
+import org.apache.hbase.thirdparty.io.netty.channel.EventLoopGroup;
+import org.apache.hbase.thirdparty.io.netty.util.concurrent.SingleThreadEventExecutor;
 
 /**
  * An asynchronous implementation of FSWAL.
@@ -80,7 +84,7 @@ import org.apache.htrace.TraceScope;
  * </li>
  * </ol>
  * </li>
- * <li>In the consumer task(in the EventLoop thread)
+ * <li>In the consumer task(executed in a single threaded thread pool)
  * <ol>
  * <li>Poll the entry from {@link #waitingConsumePayloads} and insert it into
  * {@link #toWriteAppends}</li>
@@ -109,26 +113,24 @@ import org.apache.htrace.TraceScope;
  * {@link #readyForRolling} to false, and then wait on {@link #readyForRolling}(see
  * {@link #waitForSafePoint()}).</li>
  * <li>In the consumer thread, we will stop polling entries from {@link #waitingConsumePayloads} if
- * {@link #waitingRoll} is true, and also stop writing the entries in {@link #toWriteAppends}
- * out.</li>
+ * {@link #waitingRoll} is true, and also stop writing the entries in {@link #toWriteAppends} out.
+ * </li>
  * <li>If there are unflush data in the writer, sync them.</li>
  * <li>When all out-going sync request is finished, i.e, the {@link #unackedAppends} is empty,
  * signal the {@link #readyForRollingCond}.</li>
  * <li>Back to the log roller thread, now we can confirm that there are no out-going entries, i.e.,
  * we reach a safe point. So it is safe to replace old writer with new writer now.</li>
- * <li>Set {@link #writerBroken} and {@link #waitingRoll} to false, cancel log roller exit checker
- * if any(see the comments in the {@link #syncFailed(Throwable)} method to see why we need a checker
- * here).</li>
+ * <li>Set {@link #writerBroken} and {@link #waitingRoll} to false.</li>
  * <li>Schedule the consumer task.</li>
  * <li>Schedule a background task to close the old writer.</li>
  * </ol>
  * For a broken writer roll request, the only difference is that we can bypass the wait for safe
- * point stage. See the comments in the {@link #syncFailed(Throwable)} method for more details.
+ * point stage.
  */
 @InterfaceAudience.LimitedPrivate(HBaseInterfaceAudience.CONFIG)
 public class AsyncFSWAL extends AbstractFSWAL<AsyncWriter> {
 
-  private static final Log LOG = LogFactory.getLog(AsyncFSWAL.class);
+  private static final Logger LOG = LoggerFactory.getLogger(AsyncFSWAL.class);
 
   private static final Comparator<SyncFuture> SEQ_COMPARATOR = (o1, o2) -> {
     int c = Long.compare(o1.getTxid(), o2.getTxid());
@@ -141,7 +143,19 @@ public class AsyncFSWAL extends AbstractFSWAL<AsyncWriter> {
   public static final String ASYNC_WAL_CREATE_MAX_RETRIES = "hbase.wal.async.create.retries";
   public static final int DEFAULT_ASYNC_WAL_CREATE_MAX_RETRIES = 10;
 
-  private final EventLoop eventLoop;
+  public static final String ASYNC_WAL_USE_SHARED_EVENT_LOOP =
+    "hbase.wal.async.use-shared-event-loop";
+  public static final boolean DEFAULT_ASYNC_WAL_USE_SHARED_EVENT_LOOP = false;
+
+  public static final String ASYNC_WAL_WAIT_ON_SHUTDOWN_IN_SECONDS =
+    "hbase.wal.async.wait.on.shutdown.seconds";
+  public static final int DEFAULT_ASYNC_WAL_WAIT_ON_SHUTDOWN_IN_SECONDS = 5;
+
+  private final EventLoopGroup eventLoopGroup;
+
+  private final ExecutorService consumeExecutor;
+
+  private final Class<? extends Channel> channelClass;
 
   private final Lock consumeLock = new ReentrantLock();
 
@@ -150,8 +164,18 @@ public class AsyncFSWAL extends AbstractFSWAL<AsyncWriter> {
   // check if there is already a consumer task in the event loop's task queue
   private final Supplier<Boolean> hasConsumerTask;
 
-  // new writer is created and we are waiting for old writer to be closed.
-  private volatile boolean waitingRoll;
+  private static final int MAX_EPOCH = 0x3FFFFFFF;
+  // the lowest bit is waitingRoll, which means new writer is created and we are waiting for old
+  // writer to be closed.
+  // the second lowest bit is writerBorken which means the current writer is broken and rollWriter
+  // is needed.
+  // all other bits are the epoch number of the current writer, this is used to detect whether the
+  // writer is still the one when you issue the sync.
+  // notice that, modification to this field is only allowed under the protection of consumeLock.
+  private volatile int epochAndState;
+
+  // used to guard the log roll request when we exceed the log roll size.
+  private boolean rollRequested;
 
   private boolean readyForRolling;
 
@@ -162,9 +186,6 @@ public class AsyncFSWAL extends AbstractFSWAL<AsyncWriter> {
   private final Sequence waitingConsumePayloadsGatingSequence;
 
   private final AtomicBoolean consumerScheduled = new AtomicBoolean(false);
-
-  // writer is broken and rollWriter is needed.
-  private volatile boolean writerBroken;
 
   private final long batchSize;
 
@@ -179,8 +200,7 @@ public class AsyncFSWAL extends AbstractFSWAL<AsyncWriter> {
 
   private final Deque<FSWALEntry> unackedAppends = new ArrayDeque<>();
 
-  private final PriorityQueue<SyncFuture> syncFutures =
-      new PriorityQueue<SyncFuture>(11, SEQ_COMPARATOR);
+  private final SortedSet<SyncFuture> syncFutures = new TreeSet<>(SEQ_COMPARATOR);
 
   // the highest txid of WAL entries being processed
   private long highestProcessedAppendTxid;
@@ -188,33 +208,47 @@ public class AsyncFSWAL extends AbstractFSWAL<AsyncWriter> {
   // file length when we issue last sync request on the writer
   private long fileLengthAtLastSync;
 
+  private long highestProcessedAppendTxidAtLastSync;
+
+  private final int waitOnShutdownInSeconds;
+
   public AsyncFSWAL(FileSystem fs, Path rootDir, String logDir, String archiveDir,
       Configuration conf, List<WALActionsListener> listeners, boolean failIfWALExists,
-      String prefix, String suffix, EventLoop eventLoop)
-      throws FailedLogCloseException, IOException {
+      String prefix, String suffix, EventLoopGroup eventLoopGroup,
+      Class<? extends Channel> channelClass) throws FailedLogCloseException, IOException {
     super(fs, rootDir, logDir, archiveDir, conf, listeners, failIfWALExists, prefix, suffix);
-    this.eventLoop = eventLoop;
+    this.eventLoopGroup = eventLoopGroup;
+    this.channelClass = channelClass;
     Supplier<Boolean> hasConsumerTask;
-    if (eventLoop instanceof SingleThreadEventExecutor) {
-
-      try {
-        Field field = SingleThreadEventExecutor.class.getDeclaredField("taskQueue");
-        field.setAccessible(true);
-        Queue<?> queue = (Queue<?>) field.get(eventLoop);
-        hasConsumerTask = () -> queue.peek() == consumer;
-      } catch (Exception e) {
-        LOG.warn("Can not get task queue of " + eventLoop + ", this is not necessary, just give up",
-          e);
+    if (conf.getBoolean(ASYNC_WAL_USE_SHARED_EVENT_LOOP, DEFAULT_ASYNC_WAL_USE_SHARED_EVENT_LOOP)) {
+      this.consumeExecutor = eventLoopGroup.next();
+      if (consumeExecutor instanceof SingleThreadEventExecutor) {
+        try {
+          Field field = SingleThreadEventExecutor.class.getDeclaredField("taskQueue");
+          field.setAccessible(true);
+          Queue<?> queue = (Queue<?>) field.get(consumeExecutor);
+          hasConsumerTask = () -> queue.peek() == consumer;
+        } catch (Exception e) {
+          LOG.warn("Can not get task queue of " + consumeExecutor +
+            ", this is not necessary, just give up", e);
+          hasConsumerTask = () -> false;
+        }
+      } else {
         hasConsumerTask = () -> false;
       }
     } else {
-      hasConsumerTask = () -> false;
+      ThreadPoolExecutor threadPool =
+        new ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<Runnable>(),
+            new ThreadFactoryBuilder().setNameFormat("AsyncFSWAL-%d").setDaemon(true).build());
+      hasConsumerTask = () -> threadPool.getQueue().peek() == consumer;
+      this.consumeExecutor = threadPool;
     }
+
     this.hasConsumerTask = hasConsumerTask;
     int preallocatedEventCount =
-        this.conf.getInt("hbase.regionserver.wal.disruptor.event.count", 1024 * 16);
+      conf.getInt("hbase.regionserver.wal.disruptor.event.count", 1024 * 16);
     waitingConsumePayloads =
-        RingBuffer.createMultiProducer(RingBufferTruck::new, preallocatedEventCount);
+      RingBuffer.createMultiProducer(RingBufferTruck::new, preallocatedEventCount);
     waitingConsumePayloadsGatingSequence = new Sequence(Sequencer.INITIAL_CURSOR_VALUE);
     waitingConsumePayloads.addGatingSequences(waitingConsumePayloadsGatingSequence);
 
@@ -224,8 +258,22 @@ public class AsyncFSWAL extends AbstractFSWAL<AsyncWriter> {
 
     batchSize = conf.getLong(WAL_BATCH_SIZE, DEFAULT_WAL_BATCH_SIZE);
     createMaxRetries =
-        conf.getInt(ASYNC_WAL_CREATE_MAX_RETRIES, DEFAULT_ASYNC_WAL_CREATE_MAX_RETRIES);
+      conf.getInt(ASYNC_WAL_CREATE_MAX_RETRIES, DEFAULT_ASYNC_WAL_CREATE_MAX_RETRIES);
+    waitOnShutdownInSeconds = conf.getInt(ASYNC_WAL_WAIT_ON_SHUTDOWN_IN_SECONDS,
+      DEFAULT_ASYNC_WAL_WAIT_ON_SHUTDOWN_IN_SECONDS);
     rollWriter();
+  }
+
+  private static boolean waitingRoll(int epochAndState) {
+    return (epochAndState & 1) != 0;
+  }
+
+  private static boolean writerBroken(int epochAndState) {
+    return ((epochAndState >>> 1) & 1) != 0;
+  }
+
+  private static int epoch(int epochAndState) {
+    return epochAndState >>> 2;
   }
 
   // return whether we have successfully set readyForRolling to true.
@@ -233,14 +281,14 @@ public class AsyncFSWAL extends AbstractFSWAL<AsyncWriter> {
     // Check without holding lock first. Usually we will just return here.
     // waitingRoll is volatile and unacedEntries is only accessed inside event loop so it is safe to
     // check them outside the consumeLock.
-    if (!waitingRoll || !unackedAppends.isEmpty()) {
+    if (!waitingRoll(epochAndState) || !unackedAppends.isEmpty()) {
       return false;
     }
     consumeLock.lock();
     try {
       // 1. a roll is requested
       // 2. all out-going entries have been acked(we have confirmed above).
-      if (waitingRoll) {
+      if (waitingRoll(epochAndState)) {
         readyForRolling = true;
         readyForRollingCond.signalAll();
         return true;
@@ -252,26 +300,25 @@ public class AsyncFSWAL extends AbstractFSWAL<AsyncWriter> {
     }
   }
 
-  private void syncFailed(Throwable error) {
+  private void syncFailed(long epochWhenSync, Throwable error) {
     LOG.warn("sync failed", error);
-    // Here we depends on the implementation of FanOutOneBlockAsyncDFSOutput and netty.
-    // When error occur, FanOutOneBlockAsyncDFSOutput will fail all pending flush requests. It
-    // is execute inside EventLoop. And in DefaultPromise in netty, it will notifyListener
-    // directly if it is already in the EventLoop thread. And in the listener method, it will
-    // call us. So here we know that all failed flush request will call us continuously, and
-    // before the last one finish, no other task can be executed in EventLoop. So here we are
-    // safe to use writerBroken as a guard.
-    // Do not forget to revisit this if we change the implementation of
-    // FanOutOneBlockAsyncDFSOutput!
+    boolean shouldRequestLogRoll = true;
     consumeLock.lock();
     try {
-      if (writerBroken) {
+      int currentEpochAndState = epochAndState;
+      if (epoch(currentEpochAndState) != epochWhenSync || writerBroken(currentEpochAndState)) {
+        // this is not the previous writer which means we have already rolled the writer.
+        // or this is still the current writer, but we have already marked it as broken and request
+        // a roll.
         return;
       }
-      writerBroken = true;
-      if (waitingRoll) {
+      this.epochAndState = currentEpochAndState | 0b10;
+      if (waitingRoll(currentEpochAndState)) {
         readyForRolling = true;
         readyForRollingCond.signalAll();
+        // this means we have already in the middle of a rollWriter so just tell the roller thread
+        // that you can continue without requesting an extra log roll.
+        shouldRequestLogRoll = false;
       }
     } finally {
       consumeLock.unlock();
@@ -280,13 +327,14 @@ public class AsyncFSWAL extends AbstractFSWAL<AsyncWriter> {
       toWriteAppends.addFirst(iter.next());
     }
     highestUnsyncedTxid = highestSyncedTxid.get();
-    // request a roll.
-    requestLogRoll();
+    if (shouldRequestLogRoll) {
+      // request a roll.
+      requestLogRoll();
+    }
   }
 
   private void syncCompleted(AsyncWriter writer, long processedTxid, long startTimeNs) {
     highestSyncedTxid.set(processedTxid);
-    int syncCount = finishSync(true);
     for (Iterator<FSWALEntry> iter = unackedAppends.iterator(); iter.hasNext();) {
       if (iter.next().getTxid() <= processedTxid) {
         iter.remove();
@@ -294,57 +342,47 @@ public class AsyncFSWAL extends AbstractFSWAL<AsyncWriter> {
         break;
       }
     }
-    postSync(System.nanoTime() - startTimeNs, syncCount);
-    // Ideally, we should set a flag to indicate that the log roll has already been requested for
-    // the current writer and give up here, and reset the flag when roll is finished. But we
-    // finish roll in the log roller thread so the flag need to be set by different thread which
-    // typically means we need to use a lock to protect it and do fencing. As the log roller will
-    // aggregate the roll requests of the same WAL, so it is safe to call requestLogRoll multiple
-    // times before the roll actual happens. But we need to stop if we set readyForRolling to true
-    // and wake up the log roller thread waiting in waitForSafePoint as the rollWriter call may
-    // return firstly and then we run the code below and request a roll on the new writer.
+    postSync(System.nanoTime() - startTimeNs, finishSync(true));
     if (trySetReadyForRolling()) {
       // we have just finished a roll, then do not need to check for log rolling, the writer will be
       // closed soon.
       return;
     }
-    if (writer.getLength() < logrollsize) {
+    if (writer.getLength() < logrollsize || rollRequested) {
       return;
     }
-    if (!rollWriterLock.tryLock()) {
-      return;
-    }
-    try {
-      requestLogRoll();
-    } finally {
-      rollWriterLock.unlock();
-    }
+    rollRequested = true;
+    requestLogRoll();
   }
 
-  private void sync(final AsyncWriter writer, final long processedTxid) {
+  private void sync(AsyncWriter writer) {
     fileLengthAtLastSync = writer.getLength();
+    long currentHighestProcessedAppendTxid = highestProcessedAppendTxid;
+    highestProcessedAppendTxidAtLastSync = currentHighestProcessedAppendTxid;
     final long startTimeNs = System.nanoTime();
-    writer.sync().whenComplete((result, error) -> {
+    final long epoch = epochAndState >>> 2;
+    writer.sync().whenCompleteAsync((result, error) -> {
       if (error != null) {
-        syncFailed(error);
+        syncFailed(epoch, error);
       } else {
-        syncCompleted(writer, processedTxid, startTimeNs);
+        syncCompleted(writer, currentHighestProcessedAppendTxid, startTimeNs);
       }
-    });
+    }, consumeExecutor);
   }
 
   private void addTimeAnnotation(SyncFuture future, String annotation) {
-    TraceScope scope = Trace.continueSpan(future.getSpan());
-    Trace.addTimelineAnnotation(annotation);
-    future.setSpan(scope.detach());
+    TraceUtil.addTimelineAnnotation(annotation);
+    // TODO handle htrace API change, see HBASE-18895
+    // future.setSpan(scope.getSpan());
   }
 
   private int finishSyncLowerThanTxid(long txid, boolean addSyncTrace) {
     int finished = 0;
-    for (SyncFuture sync; (sync = syncFutures.peek()) != null;) {
+    for (Iterator<SyncFuture> iter = syncFutures.iterator(); iter.hasNext();) {
+      SyncFuture sync = iter.next();
       if (sync.getTxid() <= txid) {
         sync.done(txid, null);
-        syncFutures.remove();
+        iter.remove();
         finished++;
         if (addSyncTrace) {
           addTimeAnnotation(sync, "writer synced");
@@ -356,12 +394,13 @@ public class AsyncFSWAL extends AbstractFSWAL<AsyncWriter> {
     return finished;
   }
 
+  // try advancing the highestSyncedTxid as much as possible
   private int finishSync(boolean addSyncTrace) {
-    long doneTxid = highestSyncedTxid.get();
-    if (doneTxid >= highestProcessedAppendTxid) {
+    if (unackedAppends.isEmpty()) {
+      // All outstanding appends have been acked.
       if (toWriteAppends.isEmpty()) {
-        // all outstanding appends have been acked, just finish all syncs.
-        long maxSyncTxid = doneTxid;
+        // Also no appends that wait to be written out, then just finished all pending syncs.
+        long maxSyncTxid = highestSyncedTxid.get();
         for (SyncFuture sync : syncFutures) {
           maxSyncTxid = Math.max(maxSyncTxid, sync.getTxid());
           sync.done(maxSyncTxid, null);
@@ -379,10 +418,16 @@ public class AsyncFSWAL extends AbstractFSWAL<AsyncWriter> {
         // highestProcessedAppendTxid and lowestUnprocessedAppendTxid can be finished.
         long lowestUnprocessedAppendTxid = toWriteAppends.peek().getTxid();
         assert lowestUnprocessedAppendTxid > highestProcessedAppendTxid;
-        highestSyncedTxid.set(lowestUnprocessedAppendTxid - 1);
-        return finishSyncLowerThanTxid(lowestUnprocessedAppendTxid - 1, addSyncTrace);
+        long doneTxid = lowestUnprocessedAppendTxid - 1;
+        highestSyncedTxid.set(doneTxid);
+        return finishSyncLowerThanTxid(doneTxid, addSyncTrace);
       }
     } else {
+      // There are still unacked appends. So let's move the highestSyncedTxid to the txid of the
+      // first unacked append minus 1.
+      long lowestUnackedAppendTxid = unackedAppends.peek().getTxid();
+      long doneTxid = Math.max(lowestUnackedAppendTxid - 1, highestSyncedTxid.get());
+      highestSyncedTxid.set(doneTxid);
       return finishSyncLowerThanTxid(doneTxid, addSyncTrace);
     }
   }
@@ -392,30 +437,16 @@ public class AsyncFSWAL extends AbstractFSWAL<AsyncWriter> {
     // maybe a sync request is not queued when we issue a sync, so check here to see if we could
     // finish some.
     finishSync(false);
-    long newHighestProcessedTxid = -1L;
+    long newHighestProcessedAppendTxid = -1L;
     for (Iterator<FSWALEntry> iter = toWriteAppends.iterator(); iter.hasNext();) {
       FSWALEntry entry = iter.next();
       boolean appended;
-      Span span = entry.detachSpan();
-      // the span maybe null if this is a retry after rolling.
-      if (span != null) {
-        TraceScope scope = Trace.continueSpan(span);
-        try {
-          appended = append(writer, entry);
-        } catch (IOException e) {
-          throw new AssertionError("should not happen", e);
-        } finally {
-          assert scope == NullScope.INSTANCE || !scope.isDetached();
-          scope.close(); // append scope is complete
-        }
-      } else {
-        try {
-          appended = append(writer, entry);
-        } catch (IOException e) {
-          throw new AssertionError("should not happen", e);
-        }
+      try {
+        appended = append(writer, entry);
+      } catch (IOException e) {
+        throw new AssertionError("should not happen", e);
       }
-      newHighestProcessedTxid = entry.getTxid();
+      newHighestProcessedAppendTxid = entry.getTxid();
       iter.remove();
       if (appended) {
         unackedAppends.addLast(entry);
@@ -426,55 +457,44 @@ public class AsyncFSWAL extends AbstractFSWAL<AsyncWriter> {
     }
     // if we have a newer transaction id, update it.
     // otherwise, use the previous transaction id.
-    if (newHighestProcessedTxid > 0) {
-      highestProcessedAppendTxid = newHighestProcessedTxid;
+    if (newHighestProcessedAppendTxid > 0) {
+      highestProcessedAppendTxid = newHighestProcessedAppendTxid;
     } else {
-      newHighestProcessedTxid = highestProcessedAppendTxid;
+      newHighestProcessedAppendTxid = highestProcessedAppendTxid;
     }
 
     if (writer.getLength() - fileLengthAtLastSync >= batchSize) {
       // sync because buffer size limit.
-      sync(writer, newHighestProcessedTxid);
+      sync(writer);
       return;
     }
     if (writer.getLength() == fileLengthAtLastSync) {
       // we haven't written anything out, just advance the highestSyncedSequence since we may only
       // stamped some region sequence id.
-      highestSyncedTxid.set(newHighestProcessedTxid);
-      finishSync(false);
-      trySetReadyForRolling();
-      return;
-    }
-    // we have some unsynced data but haven't reached the batch size yet
-    if (!syncFutures.isEmpty()) {
-      // we have at least one sync request
-      sync(writer, newHighestProcessedTxid);
-      return;
-    }
-    // usually waitingRoll is false so we check it without lock first.
-    if (waitingRoll) {
-      consumeLock.lock();
-      try {
-        if (waitingRoll) {
-          // there is a roll request
-          sync(writer, newHighestProcessedTxid);
-        }
-      } finally {
-        consumeLock.unlock();
+      if (unackedAppends.isEmpty()) {
+        highestSyncedTxid.set(highestProcessedAppendTxid);
+        finishSync(false);
+        trySetReadyForRolling();
       }
+      return;
     }
+    // reach here means that we have some unsynced data but haven't reached the batch size yet
+    // but we will not issue a sync directly here even if there are sync requests because we may
+    // have some new data in the ringbuffer, so let's just return here and delay the decision of
+    // whether to issue a sync in the caller method.
   }
 
   private void consume() {
     consumeLock.lock();
     try {
-      if (writerBroken) {
+      int currentEpochAndState = epochAndState;
+      if (writerBroken(currentEpochAndState)) {
         return;
       }
-      if (waitingRoll) {
+      if (waitingRoll(currentEpochAndState)) {
         if (writer.getLength() > fileLengthAtLastSync) {
           // issue a sync
-          sync(writer, highestProcessedAppendTxid);
+          sync(writer);
         } else {
           if (unackedAppends.isEmpty()) {
             readyForRolling = true;
@@ -487,8 +507,8 @@ public class AsyncFSWAL extends AbstractFSWAL<AsyncWriter> {
       consumeLock.unlock();
     }
     long nextCursor = waitingConsumePayloadsGatingSequence.get() + 1;
-    for (long cursorBound =
-        waitingConsumePayloads.getCursor(); nextCursor <= cursorBound; nextCursor++) {
+    for (long cursorBound = waitingConsumePayloads.getCursor(); nextCursor <= cursorBound;
+      nextCursor++) {
       if (!waitingConsumePayloads.isPublished(nextCursor)) {
         break;
       }
@@ -520,6 +540,12 @@ public class AsyncFSWAL extends AbstractFSWAL<AsyncWriter> {
         // give up scheduling the consumer task.
         // 3. we set consumerScheduled to false and also give up scheduling consumer task.
         if (waitingConsumePayloadsGatingSequence.get() == waitingConsumePayloads.getCursor()) {
+          // we will give up consuming so if there are some unsynced data we need to issue a sync.
+          if (writer.getLength() > fileLengthAtLastSync && !syncFutures.isEmpty() &&
+            syncFutures.last().getTxid() > highestProcessedAppendTxidAtLastSync) {
+            // no new data in the ringbuffer and we have at least one sync request
+            sync(writer);
+          }
           return;
         } else {
           // maybe someone has grabbed this before us
@@ -530,56 +556,44 @@ public class AsyncFSWAL extends AbstractFSWAL<AsyncWriter> {
       }
     }
     // reschedule if we still have something to write.
-    eventLoop.execute(consumer);
+    consumeExecutor.execute(consumer);
   }
 
   private boolean shouldScheduleConsumer() {
-    if (writerBroken || waitingRoll) {
+    int currentEpochAndState = epochAndState;
+    if (writerBroken(currentEpochAndState) || waitingRoll(currentEpochAndState)) {
       return false;
     }
     return consumerScheduled.compareAndSet(false, true);
   }
 
   @Override
-  public long append(HRegionInfo hri, WALKey key, WALEdit edits, boolean inMemstore)
+  public long append(RegionInfo hri, WALKeyImpl key, WALEdit edits, boolean inMemstore)
       throws IOException {
-    if (closed) {
-      throw new IOException("Cannot append; log is closed");
-    }
-    TraceScope scope = Trace.startSpan("AsyncFSWAL.append");
-    long txid = waitingConsumePayloads.next();
-    try {
-      RingBufferTruck truck = waitingConsumePayloads.get(txid);
-      truck.load(new FSWALEntry(txid, key, edits, hri, inMemstore), scope.detach());
-    } finally {
-      waitingConsumePayloads.publish(txid);
-    }
+    long txid =
+      stampSequenceIdAndPublishToRingBuffer(hri, key, edits, inMemstore, waitingConsumePayloads);
     if (shouldScheduleConsumer()) {
-      eventLoop.execute(consumer);
+      consumeExecutor.execute(consumer);
     }
     return txid;
   }
 
   @Override
   public void sync() throws IOException {
-    TraceScope scope = Trace.startSpan("AsyncFSWAL.sync");
-    try {
+    try (TraceScope scope = TraceUtil.createTrace("AsyncFSWAL.sync")) {
       long txid = waitingConsumePayloads.next();
       SyncFuture future;
       try {
-        future = getSyncFuture(txid, scope.detach());
+        future = getSyncFuture(txid);
         RingBufferTruck truck = waitingConsumePayloads.get(txid);
         truck.load(future);
       } finally {
         waitingConsumePayloads.publish(txid);
       }
       if (shouldScheduleConsumer()) {
-        eventLoop.execute(consumer);
+        consumeExecutor.execute(consumer);
       }
-      scope = Trace.continueSpan(blockOnSync(future));
-    } finally {
-      assert scope == NullScope.INSTANCE || !scope.isDetached();
-      scope.close();
+      blockOnSync(future);
     }
   }
 
@@ -588,25 +602,21 @@ public class AsyncFSWAL extends AbstractFSWAL<AsyncWriter> {
     if (highestSyncedTxid.get() >= txid) {
       return;
     }
-    TraceScope scope = Trace.startSpan("AsyncFSWAL.sync");
-    try {
+    try (TraceScope scope = TraceUtil.createTrace("AsyncFSWAL.sync")) {
       // here we do not use ring buffer sequence as txid
       long sequence = waitingConsumePayloads.next();
       SyncFuture future;
       try {
-        future = getSyncFuture(txid, scope.detach());
+        future = getSyncFuture(txid);
         RingBufferTruck truck = waitingConsumePayloads.get(sequence);
         truck.load(future);
       } finally {
         waitingConsumePayloads.publish(sequence);
       }
       if (shouldScheduleConsumer()) {
-        eventLoop.execute(consumer);
+        consumeExecutor.execute(consumer);
       }
-      scope = Trace.continueSpan(blockOnSync(future));
-    } finally {
-      assert scope == NullScope.INSTANCE || !scope.isDetached();
-      scope.close();
+      blockOnSync(future);
     }
   }
 
@@ -615,7 +625,8 @@ public class AsyncFSWAL extends AbstractFSWAL<AsyncWriter> {
     boolean overwrite = false;
     for (int retry = 0;; retry++) {
       try {
-        return AsyncFSWALProvider.createAsyncWriter(conf, fs, path, overwrite, eventLoop);
+        return AsyncFSWALProvider.createAsyncWriter(conf, fs, path, overwrite, eventLoopGroup,
+          channelClass);
       } catch (RemoteException e) {
         LOG.warn("create wal log writer " + path + " failed, retry = " + retry, e);
         if (shouldRetryCreate(e)) {
@@ -623,7 +634,15 @@ public class AsyncFSWAL extends AbstractFSWAL<AsyncWriter> {
             break;
           }
         } else {
-          throw e.unwrapRemoteException();
+          IOException ioe = e.unwrapRemoteException();
+          // this usually means master already think we are dead so let's fail all the pending
+          // syncs. The shutdown process of RS will wait for all regions to be closed before calling
+          // WAL.close so if we do not wake up the thread blocked by sync here it will cause dead
+          // lock.
+          if (e.getMessage().contains("Parent directory doesn't exist:")) {
+            syncFutures.forEach(f -> f.done(f.getTxid(), ioe));
+          }
+          throw ioe;
         }
       } catch (NameNodeException e) {
         throw e;
@@ -641,20 +660,21 @@ public class AsyncFSWAL extends AbstractFSWAL<AsyncWriter> {
         }
       }
     }
-    throw new IOException("Failed to create wal log writer " + path + " after retrying "
-        + createMaxRetries + " time(s)");
+    throw new IOException("Failed to create wal log writer " + path + " after retrying " +
+      createMaxRetries + " time(s)");
   }
 
   private void waitForSafePoint() {
     consumeLock.lock();
     try {
-      if (writerBroken || this.writer == null) {
+      int currentEpochAndState = epochAndState;
+      if (writerBroken(currentEpochAndState) || this.writer == null) {
         return;
       }
       consumerScheduled.set(true);
-      waitingRoll = true;
+      epochAndState = currentEpochAndState | 1;
       readyForRolling = false;
-      eventLoop.execute(consumer);
+      consumeExecutor.execute(consumer);
       while (!readyForRolling) {
         readyForRollingCond.awaitUninterruptibly();
       }
@@ -672,37 +692,62 @@ public class AsyncFSWAL extends AbstractFSWAL<AsyncWriter> {
     if (nextWriter != null && nextWriter instanceof AsyncProtobufLogWriter) {
       this.fsOut = ((AsyncProtobufLogWriter) nextWriter).getOutput();
     }
-    this.fileLengthAtLastSync = 0L;
+    this.fileLengthAtLastSync = nextWriter.getLength();
+    this.rollRequested = false;
+    this.highestProcessedAppendTxidAtLastSync = 0L;
     consumeLock.lock();
     try {
       consumerScheduled.set(true);
-      writerBroken = waitingRoll = false;
-      eventLoop.execute(consumer);
+      int currentEpoch = epochAndState >>> 2;
+      int nextEpoch = currentEpoch == MAX_EPOCH ? 0 : currentEpoch + 1;
+      // set a new epoch and also clear waitingRoll and writerBroken
+      this.epochAndState = nextEpoch << 2;
+      consumeExecutor.execute(consumer);
     } finally {
       consumeLock.unlock();
     }
-    long oldFileLen;
-    if (oldWriter != null) {
-      oldFileLen = oldWriter.getLength();
-      closeExecutor.execute(() -> {
-        try {
-          oldWriter.close();
-        } catch (IOException e) {
-          LOG.warn("close old writer failed", e);
-        }
-      });
-    } else {
-      oldFileLen = 0L;
-    }
-    return oldFileLen;
+    return executeClose(closeExecutor, oldWriter);
   }
 
   @Override
   protected void doShutdown() throws IOException {
     waitForSafePoint();
-    this.writer.close();
-    this.writer = null;
+    executeClose(closeExecutor, writer);
     closeExecutor.shutdown();
+    try {
+      if (!closeExecutor.awaitTermination(waitOnShutdownInSeconds, TimeUnit.SECONDS)) {
+        LOG.error("We have waited " + waitOnShutdownInSeconds + " seconds but"
+          + " the close of async writer doesn't complete."
+          + "Please check the status of underlying filesystem"
+          + " or increase the wait time by the config \""
+          + ASYNC_WAL_WAIT_ON_SHUTDOWN_IN_SECONDS + "\"");
+      }
+    } catch (InterruptedException e) {
+      LOG.error("The wait for close of async writer is interrupted");
+      Thread.currentThread().interrupt();
+    }
+    IOException error = new IOException("WAL has been closed");
+    syncFutures.forEach(f -> f.done(f.getTxid(), error));
+    if (!(consumeExecutor instanceof EventLoop)) {
+      consumeExecutor.shutdown();
+    }
+  }
+
+  private static long executeClose(ExecutorService closeExecutor, AsyncWriter writer) {
+    long fileLength;
+    if (writer != null) {
+      fileLength = writer.getLength();
+      closeExecutor.execute(() -> {
+        try {
+          writer.close();
+        } catch (IOException e) {
+          LOG.warn("close old writer failed", e);
+        }
+      });
+    } else {
+      fileLength = 0L;
+    }
+    return fileLength;
   }
 
   @Override
@@ -719,5 +764,13 @@ public class AsyncFSWAL extends AbstractFSWAL<AsyncWriter> {
   @Override
   int getLogReplication() {
     return getPipeline().length;
+  }
+
+  @Override
+  protected boolean doCheckLogLowReplication() {
+    // not like FSHLog, AsyncFSOutput will fail immediately if there are errors writing to DNs, so
+    // typically there is no 'low replication' state, only a 'broken' state.
+    AsyncFSOutput output = this.fsOut;
+    return output != null && output.isBroken();
   }
 }

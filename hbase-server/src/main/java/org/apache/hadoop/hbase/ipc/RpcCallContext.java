@@ -18,11 +18,16 @@
 package org.apache.hadoop.hbase.ipc;
 
 import java.net.InetAddress;
+import java.util.Optional;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos.VersionInfo;
 import org.apache.hadoop.hbase.security.User;
 
+/**
+ * Interface of all necessary to carry out a RPC service invocation on the server. This interface
+ * focus on the information needed or obtained during the actual execution of the service method.
+ */
 @InterfaceAudience.Private
 public interface RpcCallContext {
   /**
@@ -44,19 +49,21 @@ public interface RpcCallContext {
   boolean isClientCellBlockSupported();
 
   /**
-   * Returns the user credentials associated with the current RPC request or
-   * <code>null</code> if no credentials were provided.
+   * Returns the user credentials associated with the current RPC request or not present if no
+   * credentials were provided.
    * @return A User
    */
-  User getRequestUser();
+  Optional<User> getRequestUser();
 
   /**
-   * @return Current request's user name or null if none ongoing.
+   * @return Current request's user name or not present if none ongoing.
    */
-  String getRequestUserName();
+  default Optional<String> getRequestUserName() {
+    return getRequestUser().map(User::getShortName);
+  }
 
   /**
-   * @return Address of remote client if a request is ongoing, else null
+   * @return Address of remote client in this call
    */
   InetAddress getRemoteAddress();
 
@@ -92,12 +99,9 @@ public interface RpcCallContext {
   void incrementResponseCellSize(long cellSize);
 
   long getResponseBlockSize();
+
   void incrementResponseBlockSize(long blockSize);
 
-  /**
-   * Return the deadline of this call. If we can not complete this call in time, we can throw a
-   * TimeoutIOException and RPCServer will drop it.
-   * @return The system timestamp of deadline.
-   */
-  long getDeadline();
+  long getResponseExceptionSize();
+  void incrementResponseExceptionSize(long exceptionSize);
 }

@@ -17,34 +17,39 @@
  */
 package org.apache.hadoop.hbase.types;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
 import org.apache.hadoop.hbase.util.Order;
 import org.apache.hadoop.hbase.util.OrderedBytes;
 import org.apache.hadoop.hbase.util.PositionedByteRange;
-
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * A {@code short} of 16-bits using a fixed-length encoding. Built on
  * {@link OrderedBytes#encodeInt16(PositionedByteRange, short, Order)}.
  */
 @InterfaceAudience.Public
-@InterfaceStability.Evolving
 public class OrderedInt16 extends OrderedBytesBase<Short> {
 
   public static final OrderedInt16 ASCENDING = new OrderedInt16(Order.ASCENDING);
   public static final OrderedInt16 DESCENDING = new OrderedInt16(Order.DESCENDING);
 
-  protected OrderedInt16(Order order) { super(order); }
+  protected OrderedInt16(Order order) {
+    super(order);
+  }
 
   @Override
-  public boolean isNullable() { return false; }
+  public boolean isNullable() {
+    return false;
+  }
 
   @Override
-  public int encodedLength(Short val) { return 3; }
+  public int encodedLength(Short val) {
+    return 3;
+  }
 
   @Override
-  public Class<Short> encodedClass() { return Short.class; }
+  public Class<Short> encodedClass() {
+    return Short.class;
+  }
 
   @Override
   public Short decode(PositionedByteRange src) {
@@ -53,7 +58,9 @@ public class OrderedInt16 extends OrderedBytesBase<Short> {
 
   @Override
   public int encode(PositionedByteRange dst, Short val) {
-    if (null == val) throw new IllegalArgumentException("Null values not supported.");
+    if (null == val) {
+      throw new IllegalArgumentException("Null values not supported.");
+    }
     return OrderedBytes.encodeInt16(dst, val, order);
   }
 

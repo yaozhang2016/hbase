@@ -24,10 +24,10 @@ import static org.junit.Assert.fail;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hbase.ArrayBackedTag;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.HBaseConfiguration;
@@ -37,10 +37,9 @@ import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.KeyValueUtil;
+import org.apache.hadoop.hbase.PrivateCellUtil;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.Tag;
-import org.apache.hadoop.hbase.TagUtil;
-import org.apache.hadoop.hbase.ArrayBackedTag;
 import org.apache.hadoop.hbase.client.Admin;
 import org.apache.hadoop.hbase.client.Connection;
 import org.apache.hadoop.hbase.client.ConnectionFactory;
@@ -51,24 +50,27 @@ import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.client.replication.ReplicationAdmin;
 import org.apache.hadoop.hbase.codec.KeyValueCodecWithTags;
-import org.apache.hadoop.hbase.coprocessor.BaseRegionObserver;
 import org.apache.hadoop.hbase.coprocessor.CoprocessorHost;
 import org.apache.hadoop.hbase.coprocessor.ObserverContext;
+import org.apache.hadoop.hbase.coprocessor.RegionCoprocessor;
 import org.apache.hadoop.hbase.coprocessor.RegionCoprocessorEnvironment;
-import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
+import org.apache.hadoop.hbase.coprocessor.RegionObserver;
 import org.apache.hadoop.hbase.testclassification.LargeTests;
 import org.apache.hadoop.hbase.testclassification.ReplicationTests;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.hadoop.hbase.wal.WALEdit;
 import org.apache.hadoop.hbase.zookeeper.MiniZooKeeperCluster;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Category({ReplicationTests.class, LargeTests.class})
 public class TestReplicationWithTags {
 
-  private static final Log LOG = LogFactory.getLog(TestReplicationWithTags.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestReplicationWithTags.class);
   private static final byte TAG_TYPE = 1;
 
   private static Configuration conf1 = HBaseConfiguration.create();
@@ -130,13 +132,13 @@ public class TestReplicationWithTags {
     utility2 = new HBaseTestingUtility(conf2);
     utility2.setZkCluster(miniZK);
 
-    ReplicationPeerConfig rpc = new ReplicationPeerConfig();
-    rpc.setClusterKey(utility2.getClusterKey());
-    replicationAdmin.addPeer("2", rpc, null);
-
     LOG.info("Setup second Zk");
     utility1.startMiniCluster(2);
     utility2.startMiniCluster(2);
+
+    ReplicationPeerConfig rpc = new ReplicationPeerConfig();
+    rpc.setClusterKey(utility2.getClusterKey());
+    replicationAdmin.addPeer("2", rpc, null);
 
     HTableDescriptor table = new HTableDescriptor(TABLE_NAME);
     HColumnDescriptor fam = new HColumnDescriptor(FAMILY);
@@ -181,7 +183,7 @@ public class TestReplicationWithTags {
           fail("Waited too much time for put replication");
         }
         Result res = htable2.get(get);
-        if (res.size() == 0) {
+        if (res.isEmpty()) {
           LOG.info("Row not available");
           Thread.sleep(SLEEP_TIME);
         } else {
@@ -197,13 +199,18 @@ public class TestReplicationWithTags {
     }
   }
 
-  public static class TestCoprocessorForTagsAtSource extends BaseRegionObserver {
+  public static class TestCoprocessorForTagsAtSource implements RegionCoprocessor, RegionObserver {
+    @Override
+    public Optional<RegionObserver> getRegionObserver() {
+      return Optional.of(this);
+    }
+
     @Override
     public void prePut(final ObserverContext<RegionCoprocessorEnvironment> e, final Put put,
         final WALEdit edit, final Durability durability) throws IOException {
       byte[] attribute = put.getAttribute("visibility");
       byte[] cf = null;
-      List<Cell> updatedCells = new ArrayList<Cell>();
+      List<Cell> updatedCells = new ArrayList<>();
       if (attribute != null) {
         for (List<? extends Cell> edits : put.getFamilyCellMap().values()) {
           for (Cell cell : edits) {
@@ -212,7 +219,7 @@ public class TestReplicationWithTags {
               cf = CellUtil.cloneFamily(kv);
             }
             Tag tag = new ArrayBackedTag(TAG_TYPE, attribute);
-            List<Tag> tagList = new ArrayList<Tag>();
+            List<Tag> tagList = new ArrayList<>(1);
             tagList.add(tag);
 
             KeyValue newKV = new KeyValue(CellUtil.cloneRow(kv), 0, kv.getRowLength(),
@@ -230,8 +237,13 @@ public class TestReplicationWithTags {
     }
   }
 
-  public static class TestCoprocessorForTagsAtSink extends BaseRegionObserver {
+  public static class TestCoprocessorForTagsAtSink implements RegionCoprocessor, RegionObserver {
     public static List<Tag> tags = null;
+
+    @Override
+    public Optional<RegionObserver> getRegionObserver() {
+      return Optional.of(this);
+    }
 
     @Override
     public void postGetOp(ObserverContext<RegionCoprocessorEnvironment> e, Get get,
@@ -240,7 +252,7 @@ public class TestReplicationWithTags {
         // Check tag presence in the 1st cell in 1st Result
         if (!results.isEmpty()) {
           Cell cell = results.get(0);
-          tags = TagUtil.asList(cell.getTagsArray(), cell.getTagsOffset(), cell.getTagsLength());
+          tags = PrivateCellUtil.getTags(cell);
         }
       }
     }

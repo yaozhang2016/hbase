@@ -20,6 +20,7 @@ package org.apache.hadoop.hbase.regionserver;
 
 import java.io.IOException;
 
+import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.regionserver.KeyValueScanner;
@@ -68,7 +69,7 @@ public class DelegatingKeyValueScanner implements KeyValueScanner {
   }
 
   @Override
-  public boolean shouldUseScanner(Scan scan, Store store, long oldestUnexpiredTS) {
+  public boolean shouldUseScanner(Scan scan, HStore store, long oldestUnexpiredTS) {
     return delegate.shouldUseScanner(scan, store, oldestUnexpiredTS);
   }
 
@@ -90,6 +91,11 @@ public class DelegatingKeyValueScanner implements KeyValueScanner {
   @Override
   public boolean isFileScanner() {
     return delegate.isFileScanner();
+  }
+
+  @Override
+  public Path getFilePath() {
+    return delegate.getFilePath();
   }
 
   @Override

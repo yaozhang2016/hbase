@@ -50,7 +50,7 @@ public class TestMetricsRegionServer {
   @Before
   public void setUp() {
     wrapper = new MetricsRegionServerWrapperStub();
-    rsm = new MetricsRegionServer(wrapper);
+    rsm = new MetricsRegionServer(wrapper, new Configuration(false));
     serverSource = rsm.getMetricsSource();
   }
 
@@ -72,6 +72,10 @@ public class TestMetricsRegionServer {
     HELPER.assertGauge("memstoreSize", 1025, serverSource);
     HELPER.assertGauge("storeFileSize", 1900, serverSource);
     HELPER.assertCounter("totalRequestCount", 899, serverSource);
+    HELPER.assertCounter("totalRowActionRequestCount",
+      HELPER.getCounter("readRequestCount", serverSource)
+          + HELPER.getCounter("writeRequestCount", serverSource),
+      serverSource);
     HELPER.assertCounter("readRequestCount", 997, serverSource);
     HELPER.assertCounter("filteredReadRequestCount", 1997, serverSource);
     HELPER.assertCounter("writeRequestCount", 707, serverSource);
@@ -95,6 +99,14 @@ public class TestMetricsRegionServer {
     HELPER.assertGauge("blockCacheCountHitPercent", 98, serverSource);
     HELPER.assertGauge("blockCacheExpressHitPercent", 97, serverSource);
     HELPER.assertCounter("blockCacheFailedInsertionCount", 36, serverSource);
+    HELPER.assertGauge("l1CacheHitCount", 200, serverSource);
+    HELPER.assertGauge("l1CacheMissCount", 100, serverSource);
+    HELPER.assertGauge("l1CacheHitRatio", 80, serverSource);
+    HELPER.assertGauge("l1CacheMissRatio", 20, serverSource);
+    HELPER.assertGauge("l2CacheHitCount", 800, serverSource);
+    HELPER.assertGauge("l2CacheMissCount", 200, serverSource);
+    HELPER.assertGauge("l2CacheHitRatio", 90, serverSource);
+    HELPER.assertGauge("l2CacheMissRatio", 10, serverSource);
     HELPER.assertCounter("updatesBlockedTime", 419, serverSource);
   }
 
@@ -107,31 +119,42 @@ public class TestMetricsRegionServer {
   @Test
   public void testSlowCount() {
     for (int i=0; i < 12; i ++) {
-      rsm.updateAppend(12);
-      rsm.updateAppend(1002);
+      rsm.updateAppend(null, 12);
+      rsm.updateAppend(null, 1002);
     }
     for (int i=0; i < 13; i ++) {
-      rsm.updateDelete(13);
-      rsm.updateDelete(1003);
+      rsm.updateDeleteBatch(null, 13);
+      rsm.updateDeleteBatch(null, 1003);
     }
     for (int i=0; i < 14; i ++) {
-      rsm.updateGet(14);
-      rsm.updateGet(1004);
+      rsm.updateGet(null, 14);
+      rsm.updateGet(null, 1004);
     }
     for (int i=0; i < 15; i ++) {
-      rsm.updateIncrement(15);
-      rsm.updateIncrement(1005);
+      rsm.updateIncrement(null, 15);
+      rsm.updateIncrement(null, 1005);
     }
     for (int i=0; i < 16; i ++) {
-      rsm.updatePut(16);
-      rsm.updatePut(1006);
+      rsm.updatePutBatch(null, 16);
+      rsm.updatePutBatch(null, 1006);
+    }
+
+    for (int i=0; i < 17; i ++) {
+      rsm.updatePut(null, 17);
+      rsm.updateDelete(null, 17);
+      rsm.updateCheckAndDelete(17);
+      rsm.updateCheckAndPut(17);
     }
 
     HELPER.assertCounter("appendNumOps", 24, serverSource);
-    HELPER.assertCounter("deleteNumOps", 26, serverSource);
+    HELPER.assertCounter("deleteBatchNumOps", 26, serverSource);
     HELPER.assertCounter("getNumOps", 28, serverSource);
     HELPER.assertCounter("incrementNumOps", 30, serverSource);
-    HELPER.assertCounter("mutateNumOps", 32, serverSource);
+    HELPER.assertCounter("putBatchNumOps", 32, serverSource);
+    HELPER.assertCounter("putNumOps", 17, serverSource);
+    HELPER.assertCounter("deleteNumOps", 17, serverSource);
+    HELPER.assertCounter("checkAndDeleteNumOps", 17, serverSource);
+    HELPER.assertCounter("checkAndPutNumOps", 17, serverSource);
 
 
     HELPER.assertCounter("slowAppendCount", 12, serverSource);

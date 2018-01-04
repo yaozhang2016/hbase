@@ -26,6 +26,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
+import org.apache.hadoop.hbase.CellComparatorImpl;
 import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.regionserver.querymatcher.ScanQueryMatcher.MatchCode;
 import org.apache.hadoop.hbase.testclassification.RegionServerTests;
@@ -41,23 +42,24 @@ public class TestScanWildcardColumnTracker {
 
   @Test
   public void testCheckColumnOk() throws IOException {
-    ScanWildcardColumnTracker tracker = new ScanWildcardColumnTracker(0, VERSIONS, Long.MIN_VALUE);
+    ScanWildcardColumnTracker tracker = new ScanWildcardColumnTracker(
+        0, VERSIONS, Long.MIN_VALUE, CellComparatorImpl.COMPARATOR);
 
     // Create list of qualifiers
-    List<byte[]> qualifiers = new ArrayList<byte[]>();
+    List<byte[]> qualifiers = new ArrayList<>(4);
     qualifiers.add(Bytes.toBytes("qualifier1"));
     qualifiers.add(Bytes.toBytes("qualifier2"));
     qualifiers.add(Bytes.toBytes("qualifier3"));
     qualifiers.add(Bytes.toBytes("qualifier4"));
 
     // Setting up expected result
-    List<MatchCode> expected = new ArrayList<MatchCode>();
+    List<MatchCode> expected = new ArrayList<>(4);
     expected.add(ScanQueryMatcher.MatchCode.INCLUDE);
     expected.add(ScanQueryMatcher.MatchCode.INCLUDE);
     expected.add(ScanQueryMatcher.MatchCode.INCLUDE);
     expected.add(ScanQueryMatcher.MatchCode.INCLUDE);
 
-    List<ScanQueryMatcher.MatchCode> actual = new ArrayList<MatchCode>();
+    List<ScanQueryMatcher.MatchCode> actual = new ArrayList<>(qualifiers.size());
 
     for (byte[] qualifier : qualifiers) {
       ScanQueryMatcher.MatchCode mc = ScanQueryMatcher.checkColumn(tracker, qualifier, 0,
@@ -73,23 +75,24 @@ public class TestScanWildcardColumnTracker {
 
   @Test
   public void testCheckColumnEnforceVersions() throws IOException {
-    ScanWildcardColumnTracker tracker = new ScanWildcardColumnTracker(0, VERSIONS, Long.MIN_VALUE);
+    ScanWildcardColumnTracker tracker = new ScanWildcardColumnTracker(
+        0, VERSIONS, Long.MIN_VALUE, CellComparatorImpl.COMPARATOR);
 
     // Create list of qualifiers
-    List<byte[]> qualifiers = new ArrayList<byte[]>();
+    List<byte[]> qualifiers = new ArrayList<>(4);
     qualifiers.add(Bytes.toBytes("qualifier1"));
     qualifiers.add(Bytes.toBytes("qualifier1"));
     qualifiers.add(Bytes.toBytes("qualifier1"));
     qualifiers.add(Bytes.toBytes("qualifier2"));
 
     // Setting up expected result
-    List<ScanQueryMatcher.MatchCode> expected = new ArrayList<MatchCode>();
+    List<ScanQueryMatcher.MatchCode> expected = new ArrayList<>(4);
     expected.add(ScanQueryMatcher.MatchCode.INCLUDE);
     expected.add(ScanQueryMatcher.MatchCode.INCLUDE);
     expected.add(ScanQueryMatcher.MatchCode.SEEK_NEXT_COL);
     expected.add(ScanQueryMatcher.MatchCode.INCLUDE);
 
-    List<MatchCode> actual = new ArrayList<ScanQueryMatcher.MatchCode>();
+    List<MatchCode> actual = new ArrayList<>(qualifiers.size());
 
     long timestamp = 0;
     for (byte[] qualifier : qualifiers) {
@@ -106,10 +109,11 @@ public class TestScanWildcardColumnTracker {
 
   @Test
   public void DisabledTestCheckColumnWrongOrder() {
-    ScanWildcardColumnTracker tracker = new ScanWildcardColumnTracker(0, VERSIONS, Long.MIN_VALUE);
+    ScanWildcardColumnTracker tracker = new ScanWildcardColumnTracker(
+        0, VERSIONS, Long.MIN_VALUE, CellComparatorImpl.COMPARATOR);
 
     // Create list of qualifiers
-    List<byte[]> qualifiers = new ArrayList<byte[]>();
+    List<byte[]> qualifiers = new ArrayList<>(2);
     qualifiers.add(Bytes.toBytes("qualifier2"));
     qualifiers.add(Bytes.toBytes("qualifier1"));
 

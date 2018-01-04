@@ -19,7 +19,6 @@
 package org.apache.hadoop.hbase.regionserver.wal;
 
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import java.io.IOException;
@@ -32,12 +31,15 @@ import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.HTableDescriptor;
+import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Durability;
 import org.apache.hadoop.hbase.client.Increment;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Result;
+import org.apache.hadoop.hbase.regionserver.ChunkCreator;
 import org.apache.hadoop.hbase.regionserver.HRegion;
+import org.apache.hadoop.hbase.regionserver.MemStoreLABImpl;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.testclassification.RegionServerTests;
 import org.apache.hadoop.hbase.util.Bytes;
@@ -109,7 +111,8 @@ public class TestDurability {
 
   @Test
   public void testDurability() throws Exception {
-    final WALFactory wals = new WALFactory(CONF, null, "TestDurability");
+    final WALFactory wals = new WALFactory(CONF, null, ServerName.valueOf("TestDurability",
+        16010, System.currentTimeMillis()).toString());
     byte[] tableName = Bytes.toBytes("TestDurability");
     final WAL wal = wals.getWAL(tableName, null);
     HRegion region = createHRegion(tableName, "region", wal, Durability.USE_DEFAULT);
@@ -172,18 +175,27 @@ public class TestDurability {
     byte[] col3 = Bytes.toBytes("col3");
 
     // Setting up region
-    final WALFactory wals = new WALFactory(CONF, null, "TestIncrement");
+    final WALFactory wals = new WALFactory(CONF, null,
+        ServerName.valueOf("TestIncrement", 16010, System.currentTimeMillis()).toString());
     byte[] tableName = Bytes.toBytes("TestIncrement");
     final WAL wal = wals.getWAL(tableName, null);
     HRegion region = createHRegion(tableName, "increment", wal, Durability.USE_DEFAULT);
 
-    // col1: amount = 1, 1 write back to WAL
+    // col1: amount = 0, 1 write back to WAL
     Increment inc1 = new Increment(row1);
-    inc1.addColumn(FAMILY, col1, 1);
+    inc1.addColumn(FAMILY, col1, 0);
     Result res = region.increment(inc1);
     assertEquals(1, res.size());
-    assertEquals(1, Bytes.toLong(res.getValue(FAMILY, col1)));
+    assertEquals(0, Bytes.toLong(res.getValue(FAMILY, col1)));
     verifyWALCount(wals, wal, 1);
+
+    // col1: amount = 1, 1 write back to WAL
+    inc1 = new Increment(row1);
+    inc1.addColumn(FAMILY, col1, 1);
+    res = region.increment(inc1);
+    assertEquals(1, res.size());
+    assertEquals(1, Bytes.toLong(res.getValue(FAMILY, col1)));
+    verifyWALCount(wals, wal, 2);
 
     // col1: amount = 0, 0 write back to WAL
     inc1 = new Increment(row1);
@@ -191,10 +203,10 @@ public class TestDurability {
     res = region.increment(inc1);
     assertEquals(1, res.size());
     assertEquals(1, Bytes.toLong(res.getValue(FAMILY, col1)));
-    verifyWALCount(wals, wal, 1);
+    verifyWALCount(wals, wal, 2);
 
     // col1: amount = 0, col2: amount = 0, col3: amount = 0
-    // 0 write back to WAL
+    // 1 write back to WAL
     inc1 = new Increment(row1);
     inc1.addColumn(FAMILY, col1, 0);
     inc1.addColumn(FAMILY, col2, 0);
@@ -204,7 +216,7 @@ public class TestDurability {
     assertEquals(1, Bytes.toLong(res.getValue(FAMILY, col1)));
     assertEquals(0, Bytes.toLong(res.getValue(FAMILY, col2)));
     assertEquals(0, Bytes.toLong(res.getValue(FAMILY, col3)));
-    verifyWALCount(wals, wal, 1);
+    verifyWALCount(wals, wal, 3);
 
     // col1: amount = 5, col2: amount = 4, col3: amount = 3
     // 1 write back to WAL
@@ -217,7 +229,7 @@ public class TestDurability {
     assertEquals(6, Bytes.toLong(res.getValue(FAMILY, col1)));
     assertEquals(4, Bytes.toLong(res.getValue(FAMILY, col2)));
     assertEquals(3, Bytes.toLong(res.getValue(FAMILY, col3)));
-    verifyWALCount(wals, wal, 2);
+    verifyWALCount(wals, wal, 4);
   }
   
   /*
@@ -230,7 +242,9 @@ public class TestDurability {
     byte[] col1 = Bytes.toBytes("col1");
 
     // Setting up region
-    final WALFactory wals = new WALFactory(CONF, null, "testIncrementWithReturnResultsSetToFalse");
+    final WALFactory wals = new WALFactory(CONF, null,
+        ServerName.valueOf("testIncrementWithReturnResultsSetToFalse", 16010,
+            System.currentTimeMillis()).toString());
     byte[] tableName = Bytes.toBytes("testIncrementWithReturnResultsSetToFalse");
     final WAL wal = wals.getWAL(tableName, null);
     HRegion region = createHRegion(tableName, "increment", wal, Durability.USE_DEFAULT);
@@ -276,6 +290,7 @@ public class TestDurability {
           throw new IOException("Failed delete of " + path);
         }
       }
+      ChunkCreator.initialize(MemStoreLABImpl.CHUNK_SIZE_DEFAULT, false, 0, 0, 0, null);
       return HRegion.createHRegion(info, path, CONF, htd, log);
     }
 

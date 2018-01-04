@@ -22,7 +22,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.hbase.metrics.Interns;
 import org.apache.hadoop.metrics2.MetricsCollector;
 import org.apache.hadoop.metrics2.MetricsRecordBuilder;
@@ -46,7 +46,7 @@ public class MetricsStochasticBalancerSourceImpl extends MetricsBalancerSourceIm
           return size() > mruCap;
         }
       };
-  private Map<String, String> costFunctionDescs = new ConcurrentHashMap<String, String>();
+  private Map<String, String> costFunctionDescs = new ConcurrentHashMap<>();
 
   /**
    * Calculates the mru cache capacity from the metrics size
@@ -79,7 +79,7 @@ public class MetricsStochasticBalancerSourceImpl extends MetricsBalancerSourceIm
     synchronized (stochasticCosts) {
       Map<String, Double> costs = stochasticCosts.get(tableName);
       if (costs == null) {
-        costs = new ConcurrentHashMap<String, Double>();
+        costs = new ConcurrentHashMap<>();
       }
 
       costs.put(costFunctionName, cost);

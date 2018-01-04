@@ -25,21 +25,21 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.MetaTableAccessor;
 import org.apache.hadoop.hbase.ScheduledChore;
 import org.apache.hadoop.hbase.Stoppable;
 import org.apache.hadoop.hbase.TableName;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.apache.hadoop.hbase.client.Admin;
+import org.apache.hadoop.hbase.client.ColumnFamilyDescriptor;
 import org.apache.hadoop.hbase.client.Delete;
 import org.apache.hadoop.hbase.client.Table;
-import org.apache.hadoop.hbase.client.replication.ReplicationAdmin;
+import org.apache.hadoop.hbase.client.TableDescriptor;
 import org.apache.hadoop.hbase.master.MasterServices;
-import org.apache.hadoop.hbase.replication.ReplicationPeerConfig;
+import org.apache.hadoop.hbase.replication.ReplicationPeerDescription;
 import org.apache.hadoop.hbase.util.Bytes;
 
 /**
@@ -48,45 +48,49 @@ import org.apache.hadoop.hbase.util.Bytes;
 @InterfaceAudience.Private
 public class ReplicationMetaCleaner extends ScheduledChore {
 
-  private static final Log LOG = LogFactory.getLog(ReplicationMetaCleaner.class);
+  private static final Logger LOG = LoggerFactory.getLogger(ReplicationMetaCleaner.class);
 
-  private ReplicationAdmin replicationAdmin;
-  private MasterServices master;
+  private final Admin admin;
+  private final MasterServices master;
 
   public ReplicationMetaCleaner(MasterServices master, Stoppable stoppable, int period)
       throws IOException {
     super("ReplicationMetaCleaner", stoppable, period);
     this.master = master;
-    replicationAdmin = new ReplicationAdmin(master.getConfiguration());
+    admin = master.getConnection().getAdmin();
   }
 
   @Override
   protected void chore() {
     try {
-      Map<String, HTableDescriptor> tables = master.getTableDescriptors().getAllDescriptors();
+      Map<String, TableDescriptor> tables = master.getTableDescriptors().getAllDescriptors();
       Map<String, Set<String>> serialTables = new HashMap<>();
-      for (Map.Entry<String, HTableDescriptor> entry : tables.entrySet()) {
+      for (Map.Entry<String, TableDescriptor> entry : tables.entrySet()) {
         boolean hasSerialScope = false;
-        for (HColumnDescriptor column : entry.getValue().getFamilies()) {
+        for (ColumnFamilyDescriptor column : entry.getValue().getColumnFamilies()) {
           if (column.getScope() == HConstants.REPLICATION_SCOPE_SERIAL) {
             hasSerialScope = true;
             break;
           }
         }
         if (hasSerialScope) {
-          serialTables.put(entry.getValue().getTableName().getNameAsString(), new HashSet<String>());
+          serialTables.put(entry.getValue().getTableName().getNameAsString(), new HashSet<>());
         }
       }
       if (serialTables.isEmpty()){
         return;
       }
 
-      Map<String, ReplicationPeerConfig> peers = replicationAdmin.listPeerConfigs();
-      for (Map.Entry<String, ReplicationPeerConfig> entry : peers.entrySet()) {
-        for (Map.Entry<TableName, List<String>> map : entry.getValue().getTableCFsMap()
-            .entrySet()) {
+      List<ReplicationPeerDescription> peers = admin.listReplicationPeers();
+      for (ReplicationPeerDescription peerDesc : peers) {
+        Map<TableName, List<String>> tableCFsMap = peerDesc.getPeerConfig().getTableCFsMap();
+        if (tableCFsMap ==null) {
+          continue;
+        }
+
+        for (Map.Entry<TableName, List<String>> map : tableCFsMap.entrySet()) {
           if (serialTables.containsKey(map.getKey().getNameAsString())) {
-            serialTables.get(map.getKey().getNameAsString()).add(entry.getKey());
+            serialTables.get(map.getKey().getNameAsString()).add(peerDesc.getPeerId());
             break;
           }
         }

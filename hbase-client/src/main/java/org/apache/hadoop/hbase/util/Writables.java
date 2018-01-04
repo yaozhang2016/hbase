@@ -26,7 +26,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.io.DataInputBuffer;
 import org.apache.hadoop.io.Writable;
 
@@ -68,7 +68,7 @@ public class Writables {
    * @throws IOException e
    */
   public static byte [] getBytes(final Writable... ws) throws IOException {
-    List<byte []> bytes = new ArrayList<byte []>();
+    List<byte []> bytes = new ArrayList<>(ws.length);
     int size = 0;
     for (Writable w: ws) {
       byte [] b = getBytes(w);

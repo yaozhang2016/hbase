@@ -126,8 +126,8 @@ public class TestClientExponentialBackoff {
 
     update(stats, 0, 98, 0);
     backoffTime = backoff.getBackoffTime(server, regionname, stats);
-    assertEquals("We should be using max backoff when at high watermark", backoffTime,
-      ExponentialClientBackoffPolicy.DEFAULT_MAX_BACKOFF);
+    assertEquals("We should be using max backoff when at high watermark",
+      ExponentialClientBackoffPolicy.DEFAULT_MAX_BACKOFF, backoffTime);
   }
 
   @Test
@@ -150,13 +150,13 @@ public class TestClientExponentialBackoff {
 
     update(stats, 0, 0, 100);
     backoffTime = backoff.getBackoffTime(server, regionname, stats);
-    assertEquals("under heavy compaction pressure", backoffTime,
-            ExponentialClientBackoffPolicy.DEFAULT_MAX_BACKOFF);
+    assertEquals("under heavy compaction pressure",
+      ExponentialClientBackoffPolicy.DEFAULT_MAX_BACKOFF, backoffTime);
   }
 
   private void update(ServerStatistics stats, int load) {
     ClientProtos.RegionLoadStats stat = ClientProtos.RegionLoadStats.newBuilder()
-        .setMemstoreLoad
+        .setMemStoreLoad
             (load).build();
     stats.update(regionname, ProtobufUtil.createRegionLoadStats(stat));
   }
@@ -164,7 +164,7 @@ public class TestClientExponentialBackoff {
   private void update(ServerStatistics stats, int memstoreLoad, int heapOccupancy,
                       int compactionPressure) {
     ClientProtos.RegionLoadStats stat = ClientProtos.RegionLoadStats.newBuilder()
-        .setMemstoreLoad(memstoreLoad)
+        .setMemStoreLoad(memstoreLoad)
         .setHeapOccupancy(heapOccupancy)
         .setCompactionPressure(compactionPressure)
             .build();

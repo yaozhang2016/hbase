@@ -1,4 +1,4 @@
-/*
+/**
  *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -18,26 +18,61 @@
  */
 package org.apache.hadoop.hbase.thrift2;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import static java.nio.ByteBuffer.wrap;
+
+import static org.apache.hadoop.hbase.thrift2.ThriftUtilities.deleteFromThrift;
+import static org.apache.hadoop.hbase.thrift2.ThriftUtilities.getFromThrift;
+import static org.apache.hadoop.hbase.thrift2.ThriftUtilities.incrementFromThrift;
+import static org.apache.hadoop.hbase.thrift2.ThriftUtilities.putFromThrift;
+import static org.apache.hadoop.hbase.thrift2.ThriftUtilities.scanFromThrift;
+
+import static org.junit.Assert.assertArrayEquals;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
+
+import java.io.IOException;
+import java.io.InterruptedIOException;
+import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.TimeUnit;
+
+import org.apache.commons.collections4.CollectionUtils;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CompatibilityFactory;
+import org.apache.hadoop.hbase.CoprocessorEnvironment;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Admin;
-import org.apache.hadoop.hbase.client.Get;
-import org.apache.hadoop.hbase.client.Put;
-import org.apache.hadoop.hbase.client.Scan;
-import org.apache.hadoop.hbase.client.Increment;
 import org.apache.hadoop.hbase.client.Delete;
 import org.apache.hadoop.hbase.client.Durability;
+import org.apache.hadoop.hbase.client.Get;
+import org.apache.hadoop.hbase.client.Increment;
+import org.apache.hadoop.hbase.client.Put;
+import org.apache.hadoop.hbase.client.Scan;
+import org.apache.hadoop.hbase.client.Table;
+import org.apache.hadoop.hbase.coprocessor.ObserverContext;
+import org.apache.hadoop.hbase.coprocessor.RegionCoprocessor;
+import org.apache.hadoop.hbase.coprocessor.RegionCoprocessorEnvironment;
+import org.apache.hadoop.hbase.coprocessor.RegionObserver;
 import org.apache.hadoop.hbase.filter.ParseFilter;
 import org.apache.hadoop.hbase.security.UserProvider;
 import org.apache.hadoop.hbase.test.MetricsAssertHelper;
 import org.apache.hadoop.hbase.testclassification.ClientTests;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
+import org.apache.hadoop.hbase.thrift.ErrorThrowingGetObserver;
 import org.apache.hadoop.hbase.thrift.ThriftMetrics;
 import org.apache.hadoop.hbase.thrift2.generated.TAppend;
 import org.apache.hadoop.hbase.thrift2.generated.TColumn;
@@ -46,42 +81,31 @@ import org.apache.hadoop.hbase.thrift2.generated.TColumnValue;
 import org.apache.hadoop.hbase.thrift2.generated.TCompareOp;
 import org.apache.hadoop.hbase.thrift2.generated.TDelete;
 import org.apache.hadoop.hbase.thrift2.generated.TDeleteType;
+import org.apache.hadoop.hbase.thrift2.generated.TDurability;
 import org.apache.hadoop.hbase.thrift2.generated.TGet;
 import org.apache.hadoop.hbase.thrift2.generated.THBaseService;
 import org.apache.hadoop.hbase.thrift2.generated.TIOError;
 import org.apache.hadoop.hbase.thrift2.generated.TIllegalArgument;
 import org.apache.hadoop.hbase.thrift2.generated.TIncrement;
-import org.apache.hadoop.hbase.thrift2.generated.TPut;
-import org.apache.hadoop.hbase.thrift2.generated.TResult;
-import org.apache.hadoop.hbase.thrift2.generated.TScan;
 import org.apache.hadoop.hbase.thrift2.generated.TMutation;
+import org.apache.hadoop.hbase.thrift2.generated.TPut;
+import org.apache.hadoop.hbase.thrift2.generated.TReadType;
+import org.apache.hadoop.hbase.thrift2.generated.TResult;
 import org.apache.hadoop.hbase.thrift2.generated.TRowMutations;
-import org.apache.hadoop.hbase.thrift2.generated.TDurability;
+import org.apache.hadoop.hbase.thrift2.generated.TScan;
+import org.apache.hadoop.hbase.thrift2.generated.TTimeRange;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.thrift.TException;
 import org.junit.AfterClass;
 import org.junit.Before;
 import org.junit.BeforeClass;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
-
-import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.Comparator;
-import java.util.List;
-import java.util.Map;
-import java.util.HashMap;
-
-import static org.apache.hadoop.hbase.thrift2.ThriftUtilities.getFromThrift;
-import static org.apache.hadoop.hbase.thrift2.ThriftUtilities.putFromThrift;
-import static org.apache.hadoop.hbase.thrift2.ThriftUtilities.scanFromThrift;
-import static org.apache.hadoop.hbase.thrift2.ThriftUtilities.incrementFromThrift;
-import static org.apache.hadoop.hbase.thrift2.ThriftUtilities.deleteFromThrift;
-import static org.junit.Assert.*;
-import static java.nio.ByteBuffer.wrap;
+import org.junit.rules.TestName;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.apache.hbase.thirdparty.com.google.common.collect.Lists;
 
 /**
  * Unit testing for ThriftServer.HBaseHandler, a part of the org.apache.hadoop.hbase.thrift2
@@ -90,7 +114,7 @@ import static java.nio.ByteBuffer.wrap;
 @Category({ClientTests.class, MediumTests.class})
 public class TestThriftHBaseServiceHandler {
 
-  private static final Log LOG = LogFactory.getLog(TestThriftHBaseServiceHandler.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestThriftHBaseServiceHandler.class);
   private static final HBaseTestingUtility UTIL = new HBaseTestingUtility();
 
   // Static names for tables, columns, rows, and values
@@ -109,6 +133,9 @@ public class TestThriftHBaseServiceHandler {
 
   private static final MetricsAssertHelper metricsHelper =
       CompatibilityFactory.getInstance(MetricsAssertHelper.class);
+
+  @Rule
+  public TestName name = new TestName();
 
 
   public void assertTColumnValuesEqual(List<TColumnValue> columnValuesA,
@@ -139,8 +166,9 @@ public class TestThriftHBaseServiceHandler {
 
   @BeforeClass
   public static void beforeClass() throws Exception {
+    UTIL.getConfiguration().set("hbase.client.retries.number", "3");
     UTIL.startMiniCluster();
-    Admin admin = UTIL.getHBaseAdmin();
+    Admin admin = UTIL.getAdmin();
     HTableDescriptor tableDescriptor = new HTableDescriptor(TableName.valueOf(tableAname));
     for (HColumnDescriptor family : families) {
       tableDescriptor.addFamily(family);
@@ -177,7 +205,7 @@ public class TestThriftHBaseServiceHandler {
     TGet get = new TGet(wrap(rowName));
     assertFalse(handler.exists(table, get));
 
-    List<TColumnValue> columnValues = new ArrayList<TColumnValue>();
+    List<TColumnValue> columnValues = new ArrayList<>(2);
     columnValues.add(new TColumnValue(wrap(familyAname), wrap(qualifierAname), wrap(valueAname)));
     columnValues.add(new TColumnValue(wrap(familyBname), wrap(qualifierBname), wrap(valueBname)));
     TPut put = new TPut(wrap(rowName), columnValues);
@@ -189,12 +217,40 @@ public class TestThriftHBaseServiceHandler {
   }
 
   @Test
+  public void testExistsAll() throws TIOError, TException {
+    ThriftHBaseServiceHandler handler = createHandler();
+    byte[] rowName1 = "testExistsAll1".getBytes();
+    byte[] rowName2 = "testExistsAll2".getBytes();
+    ByteBuffer table = wrap(tableAname);
+
+    List<TGet> gets = new ArrayList<>();
+    gets.add(new TGet(wrap(rowName2)));
+    gets.add(new TGet(wrap(rowName2)));
+    List<Boolean> existsResult1 = handler.existsAll(table, gets);
+    assertFalse(existsResult1.get(0));
+    assertFalse(existsResult1.get(1));
+
+    List<TColumnValue> columnValues = new ArrayList<TColumnValue>();
+    columnValues.add(new TColumnValue(wrap(familyAname), wrap(qualifierAname), wrap(valueAname)));
+    columnValues.add(new TColumnValue(wrap(familyBname), wrap(qualifierBname), wrap(valueBname)));
+    List<TPut> puts = new ArrayList<TPut>();
+    puts.add(new TPut(wrap(rowName1), columnValues));
+    puts.add(new TPut(wrap(rowName2), columnValues));
+
+    handler.putMultiple(table, puts);
+    List<Boolean> existsResult2 = handler.existsAll(table,gets );
+
+    assertTrue(existsResult2.get(0));
+    assertTrue(existsResult2.get(1));
+  }
+
+  @Test
   public void testPutGet() throws Exception {
     ThriftHBaseServiceHandler handler = createHandler();
     byte[] rowName = "testPutGet".getBytes();
     ByteBuffer table = wrap(tableAname);
 
-    List<TColumnValue> columnValues = new ArrayList<TColumnValue>();
+    List<TColumnValue> columnValues = new ArrayList<>(2);
     columnValues.add(new TColumnValue(wrap(familyAname), wrap(qualifierAname), wrap(valueAname)));
     columnValues.add(new TColumnValue(wrap(familyBname), wrap(qualifierBname), wrap(valueBname)));
     TPut put = new TPut(wrap(rowName), columnValues);
@@ -218,16 +274,16 @@ public class TestThriftHBaseServiceHandler {
     byte[] rowName1 = "testPutGetMultiple1".getBytes();
     byte[] rowName2 = "testPutGetMultiple2".getBytes();
 
-    List<TColumnValue> columnValues = new ArrayList<TColumnValue>();
+    List<TColumnValue> columnValues = new ArrayList<>(2);
     columnValues.add(new TColumnValue(wrap(familyAname), wrap(qualifierAname), wrap(valueAname)));
     columnValues.add(new TColumnValue(wrap(familyBname), wrap(qualifierBname), wrap(valueBname)));
-    List<TPut> puts = new ArrayList<TPut>();
+    List<TPut> puts = new ArrayList<>(2);
     puts.add(new TPut(wrap(rowName1), columnValues));
     puts.add(new TPut(wrap(rowName2), columnValues));
 
     handler.putMultiple(table, puts);
 
-    List<TGet> gets = new ArrayList<TGet>();
+    List<TGet> gets = new ArrayList<>(2);
     gets.add(new TGet(wrap(rowName1)));
     gets.add(new TGet(wrap(rowName2)));
 
@@ -248,16 +304,16 @@ public class TestThriftHBaseServiceHandler {
     byte[] rowName1 = "testDeleteMultiple1".getBytes();
     byte[] rowName2 = "testDeleteMultiple2".getBytes();
 
-    List<TColumnValue> columnValues = new ArrayList<TColumnValue>();
+    List<TColumnValue> columnValues = new ArrayList<>(2);
     columnValues.add(new TColumnValue(wrap(familyAname), wrap(qualifierAname), wrap(valueAname)));
     columnValues.add(new TColumnValue(wrap(familyBname), wrap(qualifierBname), wrap(valueBname)));
-    List<TPut> puts = new ArrayList<TPut>();
+    List<TPut> puts = new ArrayList<>(2);
     puts.add(new TPut(wrap(rowName1), columnValues));
     puts.add(new TPut(wrap(rowName2), columnValues));
 
     handler.putMultiple(table, puts);
 
-    List<TDelete> deletes = new ArrayList<TDelete>();
+    List<TDelete> deletes = new ArrayList<>(2);
     deletes.add(new TDelete(wrap(rowName1)));
     deletes.add(new TDelete(wrap(rowName2)));
 
@@ -275,7 +331,7 @@ public class TestThriftHBaseServiceHandler {
     byte[] rowName = "testDelete".getBytes();
     ByteBuffer table = wrap(tableAname);
 
-    List<TColumnValue> columnValues = new ArrayList<TColumnValue>();
+    List<TColumnValue> columnValues = new ArrayList<>(2);
     TColumnValue columnValueA = new TColumnValue(wrap(familyAname), wrap(qualifierAname),
       wrap(valueAname));
     TColumnValue columnValueB = new TColumnValue(wrap(familyBname), wrap(qualifierBname),
@@ -289,7 +345,7 @@ public class TestThriftHBaseServiceHandler {
     handler.put(table, put);
 
     TDelete delete = new TDelete(wrap(rowName));
-    List<TColumn> deleteColumns = new ArrayList<TColumn>();
+    List<TColumn> deleteColumns = new ArrayList<>(1);
     TColumn deleteColumn = new TColumn(wrap(familyAname));
     deleteColumn.setQualifier(qualifierAname);
     deleteColumns.add(deleteColumn);
@@ -301,7 +357,7 @@ public class TestThriftHBaseServiceHandler {
     TResult result = handler.get(table, get);
     assertArrayEquals(rowName, result.getRow());
     List<TColumnValue> returnedColumnValues = result.getColumnValues();
-    List<TColumnValue> expectedColumnValues = new ArrayList<TColumnValue>();
+    List<TColumnValue> expectedColumnValues = new ArrayList<>(1);
     expectedColumnValues.add(columnValueB);
     assertTColumnValuesEqual(expectedColumnValues, returnedColumnValues);
   }
@@ -312,7 +368,7 @@ public class TestThriftHBaseServiceHandler {
     byte[] rowName = "testDeleteAllTimestamps".getBytes();
     ByteBuffer table = wrap(tableAname);
 
-    List<TColumnValue> columnValues = new ArrayList<TColumnValue>();
+    List<TColumnValue> columnValues = new ArrayList<>(1);
     TColumnValue columnValueA = new TColumnValue(wrap(familyAname), wrap(qualifierAname),
       wrap(valueAname));
     columnValueA.setTimestamp(System.currentTimeMillis() - 10);
@@ -331,7 +387,7 @@ public class TestThriftHBaseServiceHandler {
     assertEquals(2, result.getColumnValuesSize());
 
     TDelete delete = new TDelete(wrap(rowName));
-    List<TColumn> deleteColumns = new ArrayList<TColumn>();
+    List<TColumn> deleteColumns = new ArrayList<>(1);
     TColumn deleteColumn = new TColumn(wrap(familyAname));
     deleteColumn.setQualifier(qualifierAname);
     deleteColumns.add(deleteColumn);
@@ -355,7 +411,7 @@ public class TestThriftHBaseServiceHandler {
     long timestamp1 = System.currentTimeMillis() - 10;
     long timestamp2 = System.currentTimeMillis();
 
-    List<TColumnValue> columnValues = new ArrayList<TColumnValue>();
+    List<TColumnValue> columnValues = new ArrayList<>(1);
     TColumnValue columnValueA = new TColumnValue(wrap(familyAname), wrap(qualifierAname),
       wrap(valueAname));
     columnValueA.setTimestamp(timestamp1);
@@ -374,7 +430,7 @@ public class TestThriftHBaseServiceHandler {
     assertEquals(2, result.getColumnValuesSize());
 
     TDelete delete = new TDelete(wrap(rowName));
-    List<TColumn> deleteColumns = new ArrayList<TColumn>();
+    List<TColumn> deleteColumns = new ArrayList<>(1);
     TColumn deleteColumn = new TColumn(wrap(familyAname));
     deleteColumn.setQualifier(qualifierAname);
     deleteColumns.add(deleteColumn);
@@ -392,19 +448,105 @@ public class TestThriftHBaseServiceHandler {
   }
 
   @Test
+  public void testDeleteFamily() throws Exception {
+    ThriftHBaseServiceHandler handler = createHandler();
+    byte[] rowName = "testDeleteFamily".getBytes();
+    ByteBuffer table = wrap(tableAname);
+
+    long timestamp1 = System.currentTimeMillis() - 10;
+    long timestamp2 = System.currentTimeMillis();
+
+    List<TColumnValue> columnValues = new ArrayList<TColumnValue>();
+    TColumnValue columnValueA =
+        new TColumnValue(wrap(familyAname), wrap(qualifierAname), wrap(valueAname));
+    columnValueA.setTimestamp(timestamp1);
+    columnValues.add(columnValueA);
+    TPut put = new TPut(wrap(rowName), columnValues);
+
+    put.setColumnValues(columnValues);
+
+    handler.put(table, put);
+    columnValueA.setTimestamp(timestamp2);
+    handler.put(table, put);
+
+    TGet get = new TGet(wrap(rowName));
+    get.setMaxVersions(2);
+    TResult result = handler.get(table, get);
+    assertEquals(2, result.getColumnValuesSize());
+
+    TDelete delete = new TDelete(wrap(rowName));
+    List<TColumn> deleteColumns = new ArrayList<TColumn>();
+    TColumn deleteColumn = new TColumn(wrap(familyAname));
+    deleteColumns.add(deleteColumn);
+    delete.setColumns(deleteColumns);
+    delete.setDeleteType(TDeleteType.DELETE_FAMILY);
+
+    handler.deleteSingle(table, delete);
+
+    get = new TGet(wrap(rowName));
+    result = handler.get(table, get);
+    assertArrayEquals(null, result.getRow());
+    assertEquals(0, result.getColumnValuesSize());
+  }
+
+  @Test
+  public void testDeleteFamilyVersion() throws Exception {
+    ThriftHBaseServiceHandler handler = createHandler();
+    byte[] rowName = "testDeleteFamilyVersion".getBytes();
+    ByteBuffer table = wrap(tableAname);
+
+    long timestamp1 = System.currentTimeMillis() - 10;
+    long timestamp2 = System.currentTimeMillis();
+
+    List<TColumnValue> columnValues = new ArrayList<TColumnValue>();
+    TColumnValue columnValueA =
+        new TColumnValue(wrap(familyAname), wrap(qualifierAname), wrap(valueAname));
+    columnValueA.setTimestamp(timestamp1);
+    columnValues.add(columnValueA);
+    TPut put = new TPut(wrap(rowName), columnValues);
+
+    put.setColumnValues(columnValues);
+
+    handler.put(table, put);
+    columnValueA.setTimestamp(timestamp2);
+    handler.put(table, put);
+
+    TGet get = new TGet(wrap(rowName));
+    get.setMaxVersions(2);
+    TResult result = handler.get(table, get);
+    assertEquals(2, result.getColumnValuesSize());
+
+    TDelete delete = new TDelete(wrap(rowName));
+    List<TColumn> deleteColumns = new ArrayList<TColumn>();
+    TColumn deleteColumn = new TColumn(wrap(familyAname));
+    deleteColumn.setTimestamp(timestamp1);
+    deleteColumns.add(deleteColumn);
+    delete.setColumns(deleteColumns);
+    delete.setDeleteType(TDeleteType.DELETE_FAMILY_VERSION);
+
+    handler.deleteSingle(table, delete);
+
+    get = new TGet(wrap(rowName));
+    result = handler.get(table, get);
+    assertArrayEquals(rowName, result.getRow());
+    assertEquals(1, result.getColumnValuesSize());
+    assertEquals(timestamp2, result.getColumnValues().get(0).getTimestamp());
+  }
+
+  @Test
   public void testIncrement() throws Exception {
     ThriftHBaseServiceHandler handler = createHandler();
     byte[] rowName = "testIncrement".getBytes();
     ByteBuffer table = wrap(tableAname);
 
-    List<TColumnValue> columnValues = new ArrayList<TColumnValue>();
+    List<TColumnValue> columnValues = new ArrayList<>(1);
     columnValues.add(new TColumnValue(wrap(familyAname), wrap(qualifierAname),
       wrap(Bytes.toBytes(1L))));
     TPut put = new TPut(wrap(rowName), columnValues);
     put.setColumnValues(columnValues);
     handler.put(table, put);
 
-    List<TColumnIncrement> incrementColumns = new ArrayList<TColumnIncrement>();
+    List<TColumnIncrement> incrementColumns = new ArrayList<>(1);
     incrementColumns.add(new TColumnIncrement(wrap(familyAname), wrap(qualifierAname)));
     TIncrement increment = new TIncrement(wrap(rowName), incrementColumns);
     handler.increment(table, increment);
@@ -425,13 +567,13 @@ public class TestThriftHBaseServiceHandler {
     ByteBuffer table = wrap(tableAname);
     byte[] v1 = Bytes.toBytes("42");
     byte[] v2 = Bytes.toBytes("23");
-    List<TColumnValue> columnValues = new ArrayList<TColumnValue>();
+    List<TColumnValue> columnValues = new ArrayList<>(1);
     columnValues.add(new TColumnValue(wrap(familyAname), wrap(qualifierAname), wrap(v1)));
     TPut put = new TPut(wrap(rowName), columnValues);
     put.setColumnValues(columnValues);
     handler.put(table, put);
 
-    List<TColumnValue> appendColumns = new ArrayList<TColumnValue>();
+    List<TColumnValue> appendColumns = new ArrayList<>(1);
     appendColumns.add(new TColumnValue(wrap(familyAname), wrap(qualifierAname), wrap(v2)));
     TAppend append = new TAppend(wrap(rowName), appendColumns);
     handler.append(table, append);
@@ -457,14 +599,14 @@ public class TestThriftHBaseServiceHandler {
     byte[] rowName = "testCheckAndPut".getBytes();
     ByteBuffer table = wrap(tableAname);
 
-    List<TColumnValue> columnValuesA = new ArrayList<TColumnValue>();
+    List<TColumnValue> columnValuesA = new ArrayList<>(1);
     TColumnValue columnValueA = new TColumnValue(wrap(familyAname), wrap(qualifierAname),
       wrap(valueAname));
     columnValuesA.add(columnValueA);
     TPut putA = new TPut(wrap(rowName), columnValuesA);
     putA.setColumnValues(columnValuesA);
 
-    List<TColumnValue> columnValuesB = new ArrayList<TColumnValue>();
+    List<TColumnValue> columnValuesB = new ArrayList<>(1);
     TColumnValue columnValueB = new TColumnValue(wrap(familyBname), wrap(qualifierBname),
       wrap(valueBname));
     columnValuesB.add(columnValueB);
@@ -486,7 +628,7 @@ public class TestThriftHBaseServiceHandler {
     result = handler.get(table, get);
     assertArrayEquals(rowName, result.getRow());
     List<TColumnValue> returnedColumnValues = result.getColumnValues();
-    List<TColumnValue> expectedColumnValues = new ArrayList<TColumnValue>();
+    List<TColumnValue> expectedColumnValues = new ArrayList<>(2);
     expectedColumnValues.add(columnValueA);
     expectedColumnValues.add(columnValueB);
     assertTColumnValuesEqual(expectedColumnValues, returnedColumnValues);
@@ -504,14 +646,14 @@ public class TestThriftHBaseServiceHandler {
     byte[] rowName = "testCheckAndDelete".getBytes();
     ByteBuffer table = wrap(tableAname);
 
-    List<TColumnValue> columnValuesA = new ArrayList<TColumnValue>();
+    List<TColumnValue> columnValuesA = new ArrayList<>(1);
     TColumnValue columnValueA = new TColumnValue(wrap(familyAname), wrap(qualifierAname),
       wrap(valueAname));
     columnValuesA.add(columnValueA);
     TPut putA = new TPut(wrap(rowName), columnValuesA);
     putA.setColumnValues(columnValuesA);
 
-    List<TColumnValue> columnValuesB = new ArrayList<TColumnValue>();
+    List<TColumnValue> columnValuesB = new ArrayList<>(1);
     TColumnValue columnValueB = new TColumnValue(wrap(familyBname), wrap(qualifierBname),
       wrap(valueBname));
     columnValuesB.add(columnValueB);
@@ -549,7 +691,7 @@ public class TestThriftHBaseServiceHandler {
     // insert data
     TColumnValue columnValue = new TColumnValue(wrap(familyAname), wrap(qualifierAname),
       wrap(valueAname));
-    List<TColumnValue> columnValues = new ArrayList<TColumnValue>();
+    List<TColumnValue> columnValues = new ArrayList<>(1);
     columnValues.add(columnValue);
     for (int i = 0; i < 10; i++) {
       TPut put = new TPut(wrap(("testScan" + i).getBytes()), columnValues);
@@ -558,7 +700,7 @@ public class TestThriftHBaseServiceHandler {
 
     // create scan instance
     TScan scan = new TScan();
-    List<TColumn> columns = new ArrayList<TColumn>();
+    List<TColumn> columns = new ArrayList<>(1);
     TColumn column = new TColumn();
     column.setFamily(familyAname);
     column.setQualifier(qualifierAname);
@@ -610,7 +752,7 @@ public class TestThriftHBaseServiceHandler {
     // insert data
     TColumnValue columnValue = new TColumnValue(wrap(familyAname), wrap(qualifierAname),
         wrap(valueAname));
-    List<TColumnValue> columnValues = new ArrayList<TColumnValue>();
+    List<TColumnValue> columnValues = new ArrayList<>(1);
     columnValues.add(columnValue);
     for (int i = 0; i < numTrials; i++) {
       TPut put = new TPut(wrap(("testScan" + i).getBytes()), columnValues);
@@ -619,7 +761,7 @@ public class TestThriftHBaseServiceHandler {
 
     // create scan instance
     TScan scan = new TScan();
-    List<TColumn> columns = new ArrayList<TColumn>();
+    List<TColumn> columns = new ArrayList<>(1);
     TColumn column = new TColumn();
     column.setFamily(familyAname);
     column.setQualifier(qualifierAname);
@@ -648,7 +790,7 @@ public class TestThriftHBaseServiceHandler {
     // insert data
     TColumnValue columnValue = new TColumnValue(wrap(familyAname), wrap(qualifierAname),
       wrap(valueAname));
-    List<TColumnValue> columnValues = new ArrayList<TColumnValue>();
+    List<TColumnValue> columnValues = new ArrayList<>(1);
     columnValues.add(columnValue);
     for (int i = 0; i < 10; i++) {
       TPut put = new TPut(wrap(("testReverseScan" + i).getBytes()), columnValues);
@@ -658,7 +800,7 @@ public class TestThriftHBaseServiceHandler {
     // create reverse scan instance
     TScan scan = new TScan();
     scan.setReversed(true);
-    List<TColumn> columns = new ArrayList<TColumn>();
+    List<TColumn> columns = new ArrayList<>(1);
     TColumn column = new TColumn();
     column.setFamily(familyAname);
     column.setQualifier(qualifierAname);
@@ -697,7 +839,7 @@ public class TestThriftHBaseServiceHandler {
     // insert data
     TColumnValue columnValue = new TColumnValue(wrap(familyAname), wrap(qualifierAname),
       wrap(valueAname));
-    List<TColumnValue> columnValues = new ArrayList<TColumnValue>();
+    List<TColumnValue> columnValues = new ArrayList<>(1);
     columnValues.add(columnValue);
     for (int i = 0; i < 10; i++) {
       TPut put = new TPut(wrap(("testScanWithFilter" + i).getBytes()), columnValues);
@@ -706,7 +848,7 @@ public class TestThriftHBaseServiceHandler {
 
     // create scan instance with filter
     TScan scan = new TScan();
-    List<TColumn> columns = new ArrayList<TColumn>();
+    List<TColumn> columns = new ArrayList<>(1);
     TColumn column = new TColumn();
     column.setFamily(familyAname);
     column.setQualifier(qualifierAname);
@@ -742,11 +884,116 @@ public class TestThriftHBaseServiceHandler {
   }
 
   @Test
+  public void testScanWithColumnFamilyTimeRange() throws Exception {
+    ThriftHBaseServiceHandler handler = createHandler();
+    ByteBuffer table = wrap(tableAname);
+
+    // insert data
+    TColumnValue familyAColumnValue = new TColumnValue(wrap(familyAname), wrap(qualifierAname),
+        wrap(valueAname));
+    TColumnValue familyBColumnValue = new TColumnValue(wrap(familyBname), wrap(qualifierBname),
+        wrap(valueBname));
+    long minTimestamp = System.currentTimeMillis();
+    for (int i = 0; i < 10; i++) {
+      familyAColumnValue.setTimestamp(minTimestamp + i);
+      familyBColumnValue.setTimestamp(minTimestamp + i);
+      List<TColumnValue> columnValues = new ArrayList<>(2);
+      columnValues.add(familyAColumnValue);
+      columnValues.add(familyBColumnValue);
+      TPut put = new TPut(wrap(("testScanWithColumnFamilyTimeRange" + i).getBytes()),
+          columnValues);
+      handler.put(table, put);
+    }
+
+    // create scan instance with column family time range
+    TScan scan = new TScan();
+    Map<ByteBuffer,TTimeRange> colFamTimeRangeMap = new HashMap<>(2);
+    colFamTimeRangeMap.put(wrap(familyAname), new TTimeRange(minTimestamp + 3, minTimestamp + 5));
+    colFamTimeRangeMap.put(wrap(familyBname), new TTimeRange(minTimestamp + 6, minTimestamp + 9));
+    scan.setColFamTimeRangeMap(colFamTimeRangeMap);
+
+    // get scanner and rows
+    int scanId = handler.openScanner(table, scan);
+    List<TResult> results = handler.getScannerRows(scanId, 5);
+    assertEquals(5, results.size());
+    int familyACount = 0;
+    int familyBCount = 0;
+    for (TResult result : results) {
+      List<TColumnValue> columnValues = result.getColumnValues();
+      if (CollectionUtils.isNotEmpty(columnValues)) {
+        if (Bytes.equals(familyAname, columnValues.get(0).getFamily())) {
+          familyACount++;
+        } else if (Bytes.equals(familyBname, columnValues.get(0).getFamily())) {
+          familyBCount++;
+        }
+      }
+    }
+    assertEquals(2, familyACount);
+    assertEquals(3, familyBCount);
+
+    // check that we are at the end of the scan
+    results = handler.getScannerRows(scanId, 1);
+    assertEquals(0, results.size());
+
+    // close scanner and check that it was indeed closed
+    handler.closeScanner(scanId);
+    try {
+      handler.getScannerRows(scanId, 1);
+      fail("Scanner id should be invalid");
+    } catch (TIllegalArgument e) {
+    }
+  }
+
+  @Test
+  public void testSmallScan() throws Exception {
+    ThriftHBaseServiceHandler handler = createHandler();
+    ByteBuffer table = wrap(tableAname);
+
+    // insert data
+    TColumnValue columnValue = new TColumnValue(wrap(familyAname), wrap(qualifierAname),
+            wrap(valueAname));
+    List<TColumnValue> columnValues = new ArrayList<TColumnValue>();
+    columnValues.add(columnValue);
+    for (int i = 0; i < 10; i++) {
+      TPut put = new TPut(wrap(("testSmallScan" + i).getBytes()), columnValues);
+      handler.put(table, put);
+    }
+
+    // small scan instance
+    TScan scan = new TScan();
+    scan.setStartRow("testSmallScan".getBytes());
+    scan.setStopRow("testSmallScan\uffff".getBytes());
+    scan.setReadType(TReadType.PREAD);
+    scan.setCaching(2);
+
+    // get scanner and rows
+    int scanId = handler.openScanner(table, scan);
+    List<TResult> results = handler.getScannerRows(scanId, 10);
+    assertEquals(10, results.size());
+    for (int i = 0; i < 10; i++) {
+      // check if the rows are returned and in order
+      assertArrayEquals(("testSmallScan" + i).getBytes(), results.get(i).getRow());
+    }
+
+    // check that we are at the end of the scan
+    results = handler.getScannerRows(scanId, 10);
+    assertEquals(0, results.size());
+
+    // close scanner and check that it was indeed closed
+    handler.closeScanner(scanId);
+    try {
+      handler.getScannerRows(scanId, 10);
+      fail("Scanner id should be invalid");
+    } catch (TIllegalArgument e) {
+    }
+  }
+
+  @Test
   public void testPutTTL() throws Exception {
     ThriftHBaseServiceHandler handler = createHandler();
     byte[] rowName = "testPutTTL".getBytes();
     ByteBuffer table = wrap(tableAname);
-    List<TColumnValue> columnValues = new ArrayList<TColumnValue>();
+    List<TColumnValue> columnValues = new ArrayList<>(1);
 
     // Add some dummy data
     columnValues.add(
@@ -810,7 +1057,7 @@ public class TestThriftHBaseServiceHandler {
     ByteBuffer table = wrap(tableAname);
 
     // insert data
-    List<TColumnValue> columnValues = new ArrayList<TColumnValue>();
+    List<TColumnValue> columnValues = new ArrayList<>(100);
     for (int i = 0; i < 100; i++) {
       String colNum = pad(i, (byte) 3);
       TColumnValue columnValue = new TColumnValue(wrap(familyAname),
@@ -822,7 +1069,7 @@ public class TestThriftHBaseServiceHandler {
 
     // create scan instance
     TScan scan = new TScan();
-    List<TColumn> columns = new ArrayList<TColumn>();
+    List<TColumn> columns = new ArrayList<>(1);
     TColumn column = new TColumn();
     column.setFamily(familyAname);
     columns.add(column);
@@ -871,7 +1118,7 @@ public class TestThriftHBaseServiceHandler {
     // insert data
     TColumnValue columnValue =
         new TColumnValue(wrap(familyAname), wrap(qualifierAname), wrap(valueAname));
-    List<TColumnValue> columnValues = new ArrayList<TColumnValue>();
+    List<TColumnValue> columnValues = new ArrayList<>(1);
     columnValues.add(columnValue);
     for (int i = 0; i < 20; i++) {
       TPut put =
@@ -881,7 +1128,7 @@ public class TestThriftHBaseServiceHandler {
 
     // create scan instance
     TScan scan = new TScan();
-    List<TColumn> columns = new ArrayList<TColumn>();
+    List<TColumn> columns = new ArrayList<>(1);
     TColumn column = new TColumn();
     column.setFamily(familyAname);
     column.setQualifier(qualifierAname);
@@ -956,7 +1203,7 @@ public class TestThriftHBaseServiceHandler {
     TGet get = new TGet(wrap(rowName));
     assertFalse(handler.exists(table, get));
 
-    List<TColumnValue> columnValues = new ArrayList<TColumnValue>();
+    List<TColumnValue> columnValues = new ArrayList<>(2);
     columnValues.add(new TColumnValue(wrap(familyAname), wrap(qualifierAname), wrap(valueAname)));
     columnValues.add(new TColumnValue(wrap(familyBname), wrap(qualifierBname),  wrap(valueBname)));
     TPut put = new TPut(wrap(rowName), columnValues);
@@ -976,11 +1223,129 @@ public class TestThriftHBaseServiceHandler {
   }
 
   @Test
+  public void testMetricsWithException() throws Exception {
+    byte[] rowkey = Bytes.toBytes("row1");
+    byte[] family = Bytes.toBytes("f");
+    byte[] col = Bytes.toBytes("c");
+    // create a table which will throw exceptions for requests
+    TableName tableName = TableName.valueOf(name.getMethodName());
+    HTableDescriptor tableDesc = new HTableDescriptor(tableName);
+    tableDesc.addCoprocessor(ErrorThrowingGetObserver.class.getName());
+    tableDesc.addFamily(new HColumnDescriptor(family));
+
+    Table table = UTIL.createTable(tableDesc, null);
+    table.put(new Put(rowkey).addColumn(family, col, Bytes.toBytes("val1")));
+
+    ThriftHBaseServiceHandler hbaseHandler = createHandler();
+    ThriftMetrics metrics = getMetrics(UTIL.getConfiguration());
+    THBaseService.Iface handler =
+        ThriftHBaseServiceHandler.newInstance(hbaseHandler, metrics);
+    ByteBuffer tTableName = wrap(tableName.getName());
+
+    // check metrics increment with a successful get
+    long preGetCounter = metricsHelper.checkCounterExists("get_num_ops", metrics.getSource()) ?
+        metricsHelper.getCounter("get_num_ops", metrics.getSource()) :
+        0;
+    TGet tGet = new TGet(wrap(rowkey));
+    TResult tResult = handler.get(tTableName, tGet);
+
+    List<TColumnValue> expectedColumnValues = Lists.newArrayList(
+        new TColumnValue(wrap(family), wrap(col), wrap(Bytes.toBytes("val1")))
+    );
+    assertArrayEquals(rowkey, tResult.getRow());
+    List<TColumnValue> returnedColumnValues = tResult.getColumnValues();
+    assertTColumnValuesEqual(expectedColumnValues, returnedColumnValues);
+
+    metricsHelper.assertCounter("get_num_ops", preGetCounter + 1, metrics.getSource());
+
+    // check metrics increment when the get throws each exception type
+    for (ErrorThrowingGetObserver.ErrorType type : ErrorThrowingGetObserver.ErrorType.values()) {
+      testExceptionType(handler, metrics, tTableName, rowkey, type);
+    }
+  }
+
+  private void testExceptionType(THBaseService.Iface handler, ThriftMetrics metrics,
+                                 ByteBuffer tTableName, byte[] rowkey, ErrorThrowingGetObserver.ErrorType errorType) {
+    long preGetCounter = metricsHelper.getCounter("get_num_ops", metrics.getSource());
+    String exceptionKey = errorType.getMetricName();
+    long preExceptionCounter = metricsHelper.checkCounterExists(exceptionKey, metrics.getSource()) ?
+        metricsHelper.getCounter(exceptionKey, metrics.getSource()) :
+        0;
+    TGet tGet = new TGet(wrap(rowkey));
+    Map<ByteBuffer, ByteBuffer> attributes = new HashMap<>();
+    attributes.put(wrap(Bytes.toBytes(ErrorThrowingGetObserver.SHOULD_ERROR_ATTRIBUTE)),
+        wrap(Bytes.toBytes(errorType.name())));
+    tGet.setAttributes(attributes);
+    try {
+      TResult tResult = handler.get(tTableName, tGet);
+      fail("Get with error attribute should have thrown an exception");
+    } catch (TException e) {
+      LOG.info("Received exception: ", e);
+      metricsHelper.assertCounter("get_num_ops", preGetCounter + 1, metrics.getSource());
+      metricsHelper.assertCounter(exceptionKey, preExceptionCounter + 1, metrics.getSource());
+    }
+
+  }
+
+  /**
+   * See HBASE-17611
+   *
+   * Latency metrics were capped at ~ 2 seconds due to the use of an int variable to capture the
+   * duration.
+   */
+  @Test
+  public void testMetricsPrecision() throws Exception {
+    byte[] rowkey = Bytes.toBytes("row1");
+    byte[] family = Bytes.toBytes("f");
+    byte[] col = Bytes.toBytes("c");
+    // create a table which will throw exceptions for requests
+    TableName tableName = TableName.valueOf("testMetricsPrecision");
+    HTableDescriptor tableDesc = new HTableDescriptor(tableName);
+    tableDesc.addCoprocessor(DelayingRegionObserver.class.getName());
+    tableDesc.addFamily(new HColumnDescriptor(family));
+
+    Table table = null;
+    try {
+      table = UTIL.createTable(tableDesc, null);
+
+      table.put(new Put(rowkey).addColumn(family, col, Bytes.toBytes("val1")));
+
+      ThriftHBaseServiceHandler hbaseHandler = createHandler();
+      ThriftMetrics metrics = getMetrics(UTIL.getConfiguration());
+      THBaseService.Iface handler =
+          ThriftHBaseServiceHandler.newInstance(hbaseHandler, metrics);
+      ByteBuffer tTableName = wrap(tableName.getName());
+
+      // check metrics latency with a successful get
+      TGet tGet = new TGet(wrap(rowkey));
+      TResult tResult = handler.get(tTableName, tGet);
+
+      List<TColumnValue> expectedColumnValues = Lists.newArrayList(
+          new TColumnValue(wrap(family), wrap(col), wrap(Bytes.toBytes("val1")))
+      );
+      assertArrayEquals(rowkey, tResult.getRow());
+      List<TColumnValue> returnedColumnValues = tResult.getColumnValues();
+      assertTColumnValuesEqual(expectedColumnValues, returnedColumnValues);
+
+      metricsHelper.assertGaugeGt("get_max", 3000L, metrics.getSource());
+    } finally {
+      if (table != null) {
+        try {
+          table.close();
+        } catch (IOException ignored) {
+        }
+        UTIL.deleteTable(tableName);
+      }
+    }
+  }
+
+
+  @Test
   public void testAttribute() throws Exception {
     byte[] rowName = "testAttribute".getBytes();
     byte[] attributeKey = "attribute1".getBytes();
     byte[] attributeValue = "value1".getBytes();
-    Map<ByteBuffer, ByteBuffer> attributes = new HashMap<ByteBuffer, ByteBuffer>();
+    Map<ByteBuffer, ByteBuffer> attributes = new HashMap<>();
     attributes.put(wrap(attributeKey), wrap(attributeValue));
 
     TGet tGet = new TGet(wrap(rowName));
@@ -988,7 +1353,7 @@ public class TestThriftHBaseServiceHandler {
     Get get = getFromThrift(tGet);
     assertArrayEquals(get.getAttribute("attribute1"), attributeValue);
 
-    List<TColumnValue> columnValues = new ArrayList<TColumnValue>();
+    List<TColumnValue> columnValues = new ArrayList<>(1);
     columnValues.add(new TColumnValue(wrap(familyAname), wrap(qualifierAname), wrap(valueAname)));
     TPut tPut = new TPut(wrap(rowName) , columnValues);
     tPut.setAttributes(attributes);
@@ -1000,7 +1365,7 @@ public class TestThriftHBaseServiceHandler {
     Scan scan = scanFromThrift(tScan);
     assertArrayEquals(scan.getAttribute("attribute1"), attributeValue);
 
-    List<TColumnIncrement> incrementColumns = new ArrayList<TColumnIncrement>();
+    List<TColumnIncrement> incrementColumns = new ArrayList<>(1);
     incrementColumns.add(new TColumnIncrement(wrap(familyAname), wrap(qualifierAname)));
     TIncrement tIncrement = new TIncrement(wrap(rowName), incrementColumns);
     tIncrement.setAttributes(attributes);
@@ -1025,7 +1390,7 @@ public class TestThriftHBaseServiceHandler {
     byte[] rowName = "testMutateRow".getBytes();
     ByteBuffer table = wrap(tableAname);
 
-    List<TColumnValue> columnValuesA = new ArrayList<TColumnValue>();
+    List<TColumnValue> columnValuesA = new ArrayList<>(1);
     TColumnValue columnValueA = new TColumnValue(wrap(familyAname), wrap(qualifierAname),
         wrap(valueAname));
     columnValuesA.add(columnValueA);
@@ -1039,11 +1404,11 @@ public class TestThriftHBaseServiceHandler {
     assertArrayEquals(rowName, result.getRow());
     List<TColumnValue> returnedColumnValues = result.getColumnValues();
 
-    List<TColumnValue> expectedColumnValues = new ArrayList<TColumnValue>();
+    List<TColumnValue> expectedColumnValues = new ArrayList<>(1);
     expectedColumnValues.add(columnValueA);
     assertTColumnValuesEqual(expectedColumnValues, returnedColumnValues);
 
-    List<TColumnValue> columnValuesB = new ArrayList<TColumnValue>();
+    List<TColumnValue> columnValuesB = new ArrayList<>(1);
     TColumnValue columnValueB = new TColumnValue(wrap(familyAname), wrap(qualifierBname),
         wrap(valueBname));
     columnValuesB.add(columnValueB);
@@ -1051,13 +1416,13 @@ public class TestThriftHBaseServiceHandler {
     putB.setColumnValues(columnValuesB);
 
     TDelete delete = new TDelete(wrap(rowName));
-    List<TColumn> deleteColumns = new ArrayList<TColumn>();
+    List<TColumn> deleteColumns = new ArrayList<>(1);
     TColumn deleteColumn = new TColumn(wrap(familyAname));
     deleteColumn.setQualifier(qualifierAname);
     deleteColumns.add(deleteColumn);
     delete.setColumns(deleteColumns);
 
-    List<TMutation> mutations = new ArrayList<TMutation>();
+    List<TMutation> mutations = new ArrayList<>(2);
     TMutation mutationA = TMutation.put(putB);
     mutations.add(mutationA);
 
@@ -1071,7 +1436,7 @@ public class TestThriftHBaseServiceHandler {
     assertArrayEquals(rowName, result.getRow());
     returnedColumnValues = result.getColumnValues();
 
-    expectedColumnValues = new ArrayList<TColumnValue>();
+    expectedColumnValues = new ArrayList<>(1);
     expectedColumnValues.add(columnValueB);
     assertTColumnValuesEqual(expectedColumnValues, returnedColumnValues);
   }
@@ -1086,10 +1451,10 @@ public class TestThriftHBaseServiceHandler {
   @Test
   public void testDurability() throws Exception {
     byte[] rowName = "testDurability".getBytes();
-    List<TColumnValue> columnValues = new ArrayList<TColumnValue>();
+    List<TColumnValue> columnValues = new ArrayList<>(1);
     columnValues.add(new TColumnValue(wrap(familyAname), wrap(qualifierAname), wrap(valueAname)));
 
-    List<TColumnIncrement> incrementColumns = new ArrayList<TColumnIncrement>();
+    List<TColumnIncrement> incrementColumns = new ArrayList<>(1);
     incrementColumns.add(new TColumnIncrement(wrap(familyAname), wrap(qualifierAname)));
 
     TDelete tDelete = new TDelete(wrap(rowName));
@@ -1155,7 +1520,7 @@ public class TestThriftHBaseServiceHandler {
     ByteBuffer value = wrap(valueAname);
 
     // Create a mutation to write to 'B', our "mutate" of "checkAndMutate"
-    List<TColumnValue> columnValuesB = new ArrayList<TColumnValue>();
+    List<TColumnValue> columnValuesB = new ArrayList<>(1);
     TColumnValue columnValueB = new TColumnValue(family, wrap(qualifierBname), wrap(valueBname));
     columnValuesB.add(columnValueB);
     TPut putB = new TPut(row, columnValuesB);
@@ -1173,7 +1538,7 @@ public class TestThriftHBaseServiceHandler {
         handler.checkAndMutate(table, row, family, qualifier, TCompareOp.EQUAL, value,
             tRowMutations));
 
-    List<TColumnValue> columnValuesA = new ArrayList<TColumnValue>();
+    List<TColumnValue> columnValuesA = new ArrayList<>(1);
     TColumnValue columnValueA = new TColumnValue(family, qualifier, value);
     columnValuesA.add(columnValueA);
 
@@ -1194,6 +1559,37 @@ public class TestThriftHBaseServiceHandler {
     assertEquals(2, result.getColumnValuesSize());
     assertTColumnValueEqual(columnValueA, result.getColumnValues().get(0));
     assertTColumnValueEqual(columnValueB, result.getColumnValues().get(1));
+  }
+
+  public static class DelayingRegionObserver implements RegionCoprocessor, RegionObserver {
+    private static final Logger LOG = LoggerFactory.getLogger(DelayingRegionObserver.class);
+    // sleep time in msec
+    private long delayMillis;
+
+    @Override
+    public Optional<RegionObserver> getRegionObserver() {
+      return Optional.of(this);
+    }
+
+    @Override
+    public void start(CoprocessorEnvironment e) throws IOException {
+      this.delayMillis = e.getConfiguration()
+          .getLong("delayingregionobserver.delay", 3000);
+    }
+
+    @Override
+    public void preGetOp(ObserverContext<RegionCoprocessorEnvironment> e, Get get,
+                         List<Cell> results) throws IOException {
+      try {
+        long start = System.currentTimeMillis();
+        TimeUnit.MILLISECONDS.sleep(delayMillis);
+        if (LOG.isTraceEnabled()) {
+          LOG.trace("Slept for " + (System.currentTimeMillis() - start) + " msec");
+        }
+      } catch (InterruptedException ie) {
+        throw new InterruptedIOException("Interrupted while sleeping");
+      }
+    }
   }
 }
 

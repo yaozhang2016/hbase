@@ -22,18 +22,19 @@ package org.apache.hadoop.hbase.rest.client;
 import java.io.IOException;
 import java.io.InputStream;
 
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.http.Header;
 import org.apache.http.HttpResponse;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
-import org.mortbay.log.Log;
 
 /**
  * The HTTP result code, response headers, and body of a HTTP response.
  */
 @InterfaceAudience.Public
-@InterfaceStability.Stable
 public class Response {
+  private static final Logger LOG = LoggerFactory.getLogger(Response.class);
+
   private int code;
   private Header[] headers;
   private byte[] body;
@@ -139,7 +140,7 @@ public class Response {
       try {
         body = Client.getResponseBody(resp);
       } catch (IOException ioe) {
-        Log.debug("encountered ioe when obtaining body", ioe);
+        LOG.debug("encountered ioe when obtaining body", ioe);
       }
     }
     return body;

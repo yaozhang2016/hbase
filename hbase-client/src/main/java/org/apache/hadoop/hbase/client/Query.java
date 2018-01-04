@@ -19,9 +19,8 @@ package org.apache.hadoop.hbase.client;
 
 import java.util.Map;
 
-import com.google.common.collect.Maps;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.hbase.thirdparty.com.google.common.collect.Maps;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.hbase.exceptions.DeserializationException;
 import org.apache.hadoop.hbase.filter.Filter;
 import org.apache.hadoop.hbase.io.TimeRange;
@@ -32,12 +31,14 @@ import org.apache.hadoop.hbase.security.visibility.Authorizations;
 import org.apache.hadoop.hbase.security.visibility.VisibilityConstants;
 import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
 
-import com.google.common.collect.ArrayListMultimap;
-import com.google.common.collect.ListMultimap;
+import org.apache.hbase.thirdparty.com.google.common.collect.ArrayListMultimap;
+import org.apache.hbase.thirdparty.com.google.common.collect.ListMultimap;
 import org.apache.hadoop.hbase.util.Bytes;
 
+/**
+ * Base class for HBase read operations; e.g. Scan and Get.
+ */
 @InterfaceAudience.Public
-@InterfaceStability.Evolving
 public abstract class Query extends OperationWithAttributes {
   private static final String ISOLATION_LEVEL = "_isolationlevel_";
   protected Filter filter = null;
@@ -53,9 +54,9 @@ public abstract class Query extends OperationWithAttributes {
   }
 
   /**
-   * Apply the specified server-side filter when performing the Query.
-   * Only {@link Filter#filterKeyValue(Cell)} is called AFTER all tests
-   * for ttl, column match, deletes and max versions have been run.
+   * Apply the specified server-side filter when performing the Query. Only
+   * {@link Filter#filterCell(org.apache.hadoop.hbase.Cell)} is called AFTER all tests for ttl,
+   * column match, deletes and column family's max versions have been run.
    * @param filter filter to run on the server
    * @return this for invocation chaining
    */

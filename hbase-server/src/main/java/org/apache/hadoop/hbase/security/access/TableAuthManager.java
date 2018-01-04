@@ -1,4 +1,4 @@
-/*
+/**
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -18,6 +18,13 @@
 
 package org.apache.hadoop.hbase.security.access;
 
+import static org.apache.hadoop.hbase.util.CollectionUtils.computeIfAbsent;
+
+import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
+import org.apache.hbase.thirdparty.com.google.common.collect.ArrayListMultimap;
+import org.apache.hbase.thirdparty.com.google.common.collect.ListMultimap;
+import org.apache.hbase.thirdparty.com.google.common.collect.Lists;
+
 import java.io.Closeable;
 import java.io.IOException;
 import java.util.HashMap;
@@ -26,25 +33,21 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.atomic.AtomicLong;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.AuthUtil;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hbase.AuthUtil;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.zookeeper.ZKWatcher;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.hbase.exceptions.DeserializationException;
+import org.apache.hadoop.hbase.log.HBaseMarkers;
 import org.apache.hadoop.hbase.security.Superusers;
 import org.apache.hadoop.hbase.security.User;
 import org.apache.hadoop.hbase.security.UserProvider;
 import org.apache.hadoop.hbase.util.Bytes;
-import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher;
 import org.apache.zookeeper.KeeperException;
-
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.collect.ArrayListMultimap;
-import com.google.common.collect.ListMultimap;
-import com.google.common.collect.Lists;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Performs authorization checks for a given user's assigned permissions
@@ -83,7 +86,7 @@ public class TableAuthManager implements Closeable {
 
     /**
      * Returns a combined map of user and group permissions, with group names
-     * distinguished according to {@link AuthUtil.isGroupPrincipal}
+     * distinguished according to {@link AuthUtil#isGroupPrincipal(String)}.
      */
     public ListMultimap<String,T> getAllPermissions() {
       ListMultimap<String,T> tmp = ArrayListMultimap.create();
@@ -95,22 +98,22 @@ public class TableAuthManager implements Closeable {
     }
   }
 
-  private static final Log LOG = LogFactory.getLog(TableAuthManager.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TableAuthManager.class);
 
   /** Cache of global permissions */
   private volatile PermissionCache<Permission> globalCache;
 
   private ConcurrentSkipListMap<TableName, PermissionCache<TablePermission>> tableCache =
-      new ConcurrentSkipListMap<TableName, PermissionCache<TablePermission>>();
+      new ConcurrentSkipListMap<>();
 
   private ConcurrentSkipListMap<String, PermissionCache<TablePermission>> nsCache =
-    new ConcurrentSkipListMap<String, PermissionCache<TablePermission>>();
+    new ConcurrentSkipListMap<>();
 
   private Configuration conf;
   private ZKPermissionWatcher zkperms;
   private final AtomicLong mtime = new AtomicLong(0L);
 
-  private TableAuthManager(ZooKeeperWatcher watcher, Configuration conf)
+  private TableAuthManager(ZKWatcher watcher, Configuration conf)
       throws IOException {
     this.conf = conf;
 
@@ -141,7 +144,7 @@ public class TableAuthManager implements Closeable {
       throw new IOException("Unable to obtain the current user, " +
           "authorization checks for internal operations will not work correctly!");
     }
-    PermissionCache<Permission> newCache = new PermissionCache<Permission>();
+    PermissionCache<Permission> newCache = new PermissionCache<>();
     String currentUser = user.getShortName();
 
     // the system user is always included
@@ -223,7 +226,7 @@ public class TableAuthManager implements Closeable {
       mtime.incrementAndGet();
     } catch (IOException e) {
       // Never happens
-      LOG.error("Error occured while updating the global cache", e);
+      LOG.error("Error occurred while updating the global cache", e);
     }
   }
 
@@ -237,7 +240,7 @@ public class TableAuthManager implements Closeable {
    */
   private void updateTableCache(TableName table,
                                 ListMultimap<String,TablePermission> tablePerms) {
-    PermissionCache<TablePermission> newTablePerms = new PermissionCache<TablePermission>();
+    PermissionCache<TablePermission> newTablePerms = new PermissionCache<>();
 
     for (Map.Entry<String,TablePermission> entry : tablePerms.entries()) {
       if (AuthUtil.isGroupPrincipal(entry.getKey())) {
@@ -261,7 +264,7 @@ public class TableAuthManager implements Closeable {
    */
   private void updateNsCache(String namespace,
                              ListMultimap<String, TablePermission> tablePerms) {
-    PermissionCache<TablePermission> newTablePerms = new PermissionCache<TablePermission>();
+    PermissionCache<TablePermission> newTablePerms = new PermissionCache<>();
 
     for (Map.Entry<String, TablePermission> entry : tablePerms.entries()) {
       if (AuthUtil.isGroupPrincipal(entry.getKey())) {
@@ -276,17 +279,11 @@ public class TableAuthManager implements Closeable {
   }
 
   private PermissionCache<TablePermission> getTablePermissions(TableName table) {
-    if (!tableCache.containsKey(table)) {
-      tableCache.putIfAbsent(table, new PermissionCache<TablePermission>());
-    }
-    return tableCache.get(table);
+    return computeIfAbsent(tableCache, table, PermissionCache::new);
   }
 
   private PermissionCache<TablePermission> getNamespacePermissions(String namespace) {
-    if (!nsCache.containsKey(namespace)) {
-      nsCache.putIfAbsent(namespace, new PermissionCache<TablePermission>());
-    }
-    return nsCache.get(namespace);
+    return computeIfAbsent(nsCache, namespace, PermissionCache::new);
   }
 
   /**
@@ -738,15 +735,14 @@ public class TableAuthManager implements Closeable {
     return mtime.get();
   }
 
-  private static Map<ZooKeeperWatcher,TableAuthManager> managerMap =
-    new HashMap<ZooKeeperWatcher,TableAuthManager>();
+  private static Map<ZKWatcher,TableAuthManager> managerMap = new HashMap<>();
 
   private static Map<TableAuthManager, Integer> refCount = new HashMap<>();
 
   /** Returns a TableAuthManager from the cache. If not cached, constructs a new one. Returned
    * instance should be released back by calling {@link #release(TableAuthManager)}. */
   public synchronized static TableAuthManager getOrCreate(
-      ZooKeeperWatcher watcher, Configuration conf) throws IOException {
+          ZKWatcher watcher, Configuration conf) throws IOException {
     TableAuthManager instance = managerMap.get(watcher);
     if (instance == null) {
       instance = new TableAuthManager(watcher, conf);
@@ -774,7 +770,7 @@ public class TableAuthManager implements Closeable {
     if (refCount.get(instance) == null || refCount.get(instance) < 1) {
       String msg = "Something wrong with the TableAuthManager reference counting: " + instance
           + " whose count is " + refCount.get(instance);
-      LOG.fatal(msg);
+      LOG.error(HBaseMarkers.FATAL, msg);
       instance.close();
       managerMap.remove(instance.getZKPermissionWatcher().getWatcher());
       instance.getZKPermissionWatcher().getWatcher().abort(msg, null);

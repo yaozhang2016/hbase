@@ -17,19 +17,28 @@
  */
 package org.apache.hadoop.hbase.client;
 
-import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.hbase.TableName;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.ipc.RpcControllerFactory;
-import org.apache.hadoop.hbase.util.Threads;
+import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
+
+import static org.apache.hadoop.hbase.client.ConnectionUtils.calcEstimatedSize;
 
 import java.io.IOException;
+import java.io.InterruptedIOException;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Consumer;
+
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hbase.TableName;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.apache.hadoop.hbase.ipc.RpcControllerFactory;
+import org.apache.hadoop.hbase.util.Threads;
 
 /**
  * ClientAsyncPrefetchScanner implements async scanner behaviour.
@@ -42,25 +51,20 @@ import java.util.concurrent.atomic.AtomicLong;
  * This is defined in the method {@link ClientAsyncPrefetchScanner#prefetchCondition()}.
  */
 @InterfaceAudience.Private
-public class ClientAsyncPrefetchScanner extends ClientScanner {
+public class ClientAsyncPrefetchScanner extends ClientSimpleScanner {
 
-  private static final int ESTIMATED_SINGLE_RESULT_SIZE = 1024;
-  private static final int DEFAULT_QUEUE_CAPACITY = 1024;
-
-  private int cacheCapacity;
+  private long maxCacheSize;
   private AtomicLong cacheSizeInBytes;
   // exception queue (from prefetch to main scan execution)
   private Queue<Exception> exceptionsQueue;
-  // prefetch runnable object to be executed asynchronously
-  private PrefetchRunnable prefetchRunnable;
-  // Boolean flag to ensure only a single prefetch is running (per scan)
-  // We use atomic boolean to allow multiple concurrent threads to
-  // consume records from the same cache, but still have a single prefetcher thread.
-  // For a single consumer thread this can be replace with a native boolean.
-  private AtomicBoolean prefetchRunning;
-  // an attribute for synchronizing close between scanner and prefetch threads
-  private AtomicLong closingThreadId;
-  private static final int NO_THREAD = -1;
+  // prefetch thread to be executed asynchronously
+  private Thread prefetcher;
+  // used for testing
+  private Consumer<Boolean> prefetchListener;
+
+  private final Lock lock = new ReentrantLock();
+  private final Condition notEmpty = lock.newCondition();
+  private final Condition notFull = lock.newCondition();
 
   public ClientAsyncPrefetchScanner(Configuration configuration, Scan scan, TableName name,
       ClusterConnection connection, RpcRetryingCallerFactory rpcCallerFactory,
@@ -70,80 +74,64 @@ public class ClientAsyncPrefetchScanner extends ClientScanner {
         replicaCallTimeoutMicroSecondScan);
   }
 
+  @VisibleForTesting
+  void setPrefetchListener(Consumer<Boolean> prefetchListener) {
+    this.prefetchListener = prefetchListener;
+  }
+
   @Override
   protected void initCache() {
     // concurrent cache
-    cacheCapacity = calcCacheCapacity();
-    cache = new LinkedBlockingQueue<Result>(cacheCapacity);
+    maxCacheSize = resultSize2CacheSize(maxScannerResultSize);
+    cache = new LinkedBlockingQueue<>();
     cacheSizeInBytes = new AtomicLong(0);
-    exceptionsQueue = new ConcurrentLinkedQueue<Exception>();
-    prefetchRunnable = new PrefetchRunnable();
-    prefetchRunning = new AtomicBoolean(false);
-    closingThreadId = new AtomicLong(NO_THREAD);
+    exceptionsQueue = new ConcurrentLinkedQueue<>();
+    prefetcher = new Thread(new PrefetchRunnable());
+    Threads.setDaemonThreadRunning(prefetcher, tableName + ".asyncPrefetcher");
+  }
+
+  private long resultSize2CacheSize(long maxResultSize) {
+    // * 2 if possible
+    return maxResultSize > Long.MAX_VALUE / 2 ? maxResultSize : maxResultSize * 2;
   }
 
   @Override
   public Result next() throws IOException {
-
     try {
-      handleException();
-
-      // If the scanner is closed and there's nothing left in the cache, next is a no-op.
-      if (getCacheCount() == 0 && this.closed) {
-        return null;
+      lock.lock();
+      while (cache.isEmpty()) {
+        handleException();
+        if (this.closed) {
+          return null;
+        }
+        try {
+          notEmpty.await();
+        } catch (InterruptedException e) {
+          throw new InterruptedIOException("Interrupted when wait to load cache");
+        }
       }
+
+      Result result = pollCache();
       if (prefetchCondition()) {
-        // run prefetch in the background only if no prefetch is already running
-        if (!isPrefetchRunning()) {
-          if (prefetchRunning.compareAndSet(false, true)) {
-            getPool().execute(prefetchRunnable);
-          }
-        }
+        notFull.signalAll();
       }
-
-      while (isPrefetchRunning()) {
-        // prefetch running or still pending
-        if (getCacheCount() > 0) {
-          return pollCache();
-        } else {
-          // (busy) wait for a record - sleep
-          Threads.sleep(1);
-        }
-      }
-
-      if (getCacheCount() > 0) {
-        return pollCache();
-      }
-
-      // if we exhausted this scanner before calling close, write out the scan metrics
-      writeScanMetrics();
-      return null;
+      return result;
     } finally {
+      lock.unlock();
       handleException();
     }
   }
 
   @Override
   public void close() {
-    if (!scanMetricsPublished) writeScanMetrics();
-    closed = true;
-    if (!isPrefetchRunning()) {
-      if(closingThreadId.compareAndSet(NO_THREAD, Thread.currentThread().getId())) {
-        super.close();
-      }
-    } // else do nothing since the async prefetch still needs this resources
-  }
-
-  @Override
-  public int getCacheCount() {
-    if(cache != null) {
-      int size = cache.size();
-      if(size > cacheCapacity) {
-        cacheCapacity = size;
-      }
-      return size;
-    } else {
-      return 0;
+    try {
+      lock.lock();
+      super.close();
+      closed = true;
+      notFull.signalAll();
+      notEmpty.signalAll();
+    } finally {
+      lock.unlock();
     }
   }
 
@@ -166,44 +154,8 @@ public class ClientAsyncPrefetchScanner extends ClientScanner {
     }
   }
 
-  private boolean isPrefetchRunning() {
-    return prefetchRunning.get();
-  }
-
-  // double buffer - double cache size
-  private int calcCacheCapacity() {
-    int capacity = Integer.MAX_VALUE;
-    if(caching > 0 && caching < (Integer.MAX_VALUE /2)) {
-      capacity = caching * 2 + 1;
-    }
-    if(capacity == Integer.MAX_VALUE){
-      if(maxScannerResultSize != Integer.MAX_VALUE) {
-        capacity = (int) (maxScannerResultSize / ESTIMATED_SINGLE_RESULT_SIZE);
-      }
-      else {
-        capacity = DEFAULT_QUEUE_CAPACITY;
-      }
-    }
-    return capacity;
-  }
-
   private boolean prefetchCondition() {
-    return
-        (getCacheCount() < getCountThreshold()) &&
-        (maxScannerResultSize == Long.MAX_VALUE ||
-         getCacheSizeInBytes() < getSizeThreshold()) ;
-  }
-
-  private int getCountThreshold() {
-    return cacheCapacity / 2 ;
-  }
-
-  private long getSizeThreshold() {
-    return maxScannerResultSize / 2 ;
-  }
-
-  private long getCacheSizeInBytes() {
-    return cacheSizeInBytes.get();
+    return cacheSizeInBytes.get() < maxCacheSize / 2;
   }
 
   private Result pollCache() {
@@ -217,16 +169,22 @@ public class ClientAsyncPrefetchScanner extends ClientScanner {
 
     @Override
     public void run() {
-      try {
-        loadCache();
-      } catch (Exception e) {
-        exceptionsQueue.add(e);
-      } finally {
-        prefetchRunning.set(false);
-        if(closed) {
-          if (closingThreadId.compareAndSet(NO_THREAD, Thread.currentThread().getId())) {
-            // close was waiting for the prefetch to end
-            close();
+      while (!closed) {
+        boolean succeed = false;
+        try {
+          lock.lock();
+          while (!prefetchCondition()) {
+            notFull.await();
+          }
+          loadCache();
+          succeed = true;
+        } catch (Exception e) {
+          exceptionsQueue.add(e);
+        } finally {
+          notEmpty.signalAll();
+          lock.unlock();
+          if (prefetchListener != null) {
+            prefetchListener.accept(succeed);
           }
         }
       }

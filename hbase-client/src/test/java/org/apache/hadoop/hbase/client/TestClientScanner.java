@@ -17,9 +17,11 @@
  */
 package org.apache.hadoop.hbase.client;
 
+import static org.hamcrest.CoreMatchers.instanceOf;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.mockito.Matchers.any;
@@ -39,12 +41,16 @@ import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.KeyValue.Type;
 import org.apache.hadoop.hbase.RegionLocations;
 import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.client.ScannerCallable.MoreResults;
 import org.apache.hadoop.hbase.ipc.RpcControllerFactory;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
+import org.apache.hadoop.hbase.util.Bytes;
 import org.junit.After;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.junit.rules.TestName;
 import org.mockito.InOrder;
 import org.mockito.Mockito;
 import org.mockito.invocation.InvocationOnMock;
@@ -64,6 +70,9 @@ public class TestClientScanner {
   RpcRetryingCallerFactory rpcFactory;
   RpcControllerFactory controllerFactory;
 
+  @Rule
+  public TestName name = new TestName();
+
   @Before
   public void setup() throws IOException {
     clusterConn = Mockito.mock(ClusterConnection.class);
@@ -82,10 +91,11 @@ public class TestClientScanner {
     }
   }
 
-  private static class MockClientScanner extends ClientScanner {
+  private static class MockClientScanner extends ClientSimpleScanner {
 
     private boolean rpcFinished = false;
     private boolean rpcFinishedFired = false;
+    private boolean initialized = false;
 
     public MockClientScanner(final Configuration conf, final Scan scan, final TableName tableName,
         ClusterConnection connection, RpcRetryingCallerFactory rpcFactory,
@@ -96,11 +106,14 @@ public class TestClientScanner {
     }
 
     @Override
-    protected boolean nextScanner(int nbRows, final boolean done) throws IOException {
-      if (!rpcFinished) {
-        return super.nextScanner(nbRows, done);
+    protected boolean moveToNextRegion() {
+      if (!initialized) {
+        initialized = true;
+        return super.moveToNextRegion();
       }
-
+      if (!rpcFinished) {
+        return super.moveToNextRegion();
+      }
       // Enforce that we don't short-circuit more than once
       if (rpcFinishedFired) {
         throw new RuntimeException("Expected nextScanner to only be called once after " +
@@ -110,31 +123,8 @@ public class TestClientScanner {
       return false;
     }
 
-    @Override
-    protected ScannerCallableWithReplicas getScannerCallable(byte [] localStartKey,
-        int nbRows) {
-      scan.setStartRow(localStartKey);
-      ScannerCallable s =
-          new ScannerCallable(getConnection(), getTable(), scan, this.scanMetrics,
-              this.rpcControllerFactory);
-      s.setCaching(nbRows);
-      ScannerCallableWithReplicas sr = new ScannerCallableWithReplicas(getTable(), getConnection(),
-       s, pool, primaryOperationTimeout, scan,
-       getRetries(), scannerTimeout, caching, conf, caller);
-      return sr;
-    }
-
     public void setRpcFinished(boolean rpcFinished) {
       this.rpcFinished = rpcFinished;
-    }
-
-    @Override
-    protected void initCache() {
-      initSyncCache();
-    }
-
-    @Override public Result next() throws IOException {
-      return nextWithSyncCache();
     }
   }
 
@@ -142,29 +132,28 @@ public class TestClientScanner {
   @SuppressWarnings("unchecked")
   public void testNoResultsHint() throws IOException {
     final Result[] results = new Result[1];
-    KeyValue kv1 = new KeyValue("row".getBytes(), "cf".getBytes(), "cq".getBytes(), 1,
+    KeyValue kv1 = new KeyValue(Bytes.toBytes("row"), Bytes.toBytes("cf"), Bytes.toBytes("cq"), 1,
         Type.Maximum);
     results[0] = Result.create(new Cell[] {kv1});
 
     RpcRetryingCaller<Result[]> caller = Mockito.mock(RpcRetryingCaller.class);
 
     Mockito.when(rpcFactory.<Result[]> newCaller()).thenReturn(caller);
-    Mockito.when(caller.callWithoutRetries(Mockito.any(RetryingCallable.class),
+    Mockito.when(caller.callWithoutRetries(Mockito.any(),
       Mockito.anyInt())).thenAnswer(new Answer<Result[]>() {
         private int count = 0;
         @Override
         public Result[] answer(InvocationOnMock invocation) throws Throwable {
-            ScannerCallableWithReplicas callable = invocation.getArgumentAt(0,
-                ScannerCallableWithReplicas.class);
+            ScannerCallableWithReplicas callable = invocation.getArgument(0);
           switch (count) {
             case 0: // initialize
+              count++;
+              callable.currentScannerCallable.setMoreResultsInRegion(MoreResults.UNKNOWN);
+              return results;
+            case 1: // detect no more results
             case 2: // close
               count++;
-              return null;
-            case 1:
-              count++;
-              callable.setHasMoreResultsContext(false);
-              return results;
+              return new Result[0];
             default:
               throw new RuntimeException("Expected only 2 invocations");
           }
@@ -175,7 +164,7 @@ public class TestClientScanner {
     scan.setCaching(100);
     scan.setMaxResultSize(1000*1000);
 
-    try (MockClientScanner scanner = new MockClientScanner(conf, scan, TableName.valueOf("table"),
+    try (MockClientScanner scanner = new MockClientScanner(conf, scan, TableName.valueOf(name.getMethodName()),
         clusterConn, rpcFactory, controllerFactory, pool, Integer.MAX_VALUE)) {
 
       scanner.setRpcFinished(true);
@@ -184,9 +173,10 @@ public class TestClientScanner {
 
       scanner.loadCache();
 
-      // One more call due to initializeScannerInConstruction()
+      // One for fetching the results
+      // One for fetching empty results and quit as we do not have moreResults hint.
       inOrder.verify(caller, Mockito.times(2)).callWithoutRetries(
-          Mockito.any(RetryingCallable.class), Mockito.anyInt());
+          Mockito.any(), Mockito.anyInt());
 
       assertEquals(1, scanner.cache.size());
       Result r = scanner.cache.poll();
@@ -202,30 +192,28 @@ public class TestClientScanner {
   @SuppressWarnings("unchecked")
   public void testSizeLimit() throws IOException {
     final Result[] results = new Result[1];
-    KeyValue kv1 = new KeyValue("row".getBytes(), "cf".getBytes(), "cq".getBytes(), 1,
+    KeyValue kv1 = new KeyValue(Bytes.toBytes("row"), Bytes.toBytes("cf"), Bytes.toBytes("cq"), 1,
         Type.Maximum);
     results[0] = Result.create(new Cell[] {kv1});
 
     RpcRetryingCaller<Result[]> caller = Mockito.mock(RpcRetryingCaller.class);
 
     Mockito.when(rpcFactory.<Result[]> newCaller()).thenReturn(caller);
-    Mockito.when(caller.callWithoutRetries(Mockito.any(RetryingCallable.class),
+    Mockito.when(caller.callWithoutRetries(Mockito.any(),
       Mockito.anyInt())).thenAnswer(new Answer<Result[]>() {
         private int count = 0;
         @Override
         public Result[] answer(InvocationOnMock invocation) throws Throwable {
-          ScannerCallableWithReplicas callable = invocation.getArgumentAt(0,
-              ScannerCallableWithReplicas.class);
+          ScannerCallableWithReplicas callable = invocation.getArgument(0);
           switch (count) {
             case 0: // initialize
-            case 2: // close
+              count++;
+              // if we set no here the implementation will trigger a close
+              callable.currentScannerCallable.setMoreResultsInRegion(MoreResults.YES);
+              return results;
+            case 1: // close
               count++;
               return null;
-            case 1:
-              count++;
-              callable.setHasMoreResultsContext(true);
-              callable.setServerHasMoreResults(false);
-              return results;
             default:
               throw new RuntimeException("Expected only 2 invocations");
           }
@@ -239,19 +227,14 @@ public class TestClientScanner {
     // The single key-value will exit the loop
     scan.setMaxResultSize(1);
 
-    try (MockClientScanner scanner = new MockClientScanner(conf, scan, TableName.valueOf("table"),
+    try (MockClientScanner scanner = new MockClientScanner(conf, scan, TableName.valueOf(name.getMethodName()),
         clusterConn, rpcFactory, controllerFactory, pool, Integer.MAX_VALUE)) {
-
-      // Due to initializeScannerInConstruction()
-      Mockito.verify(caller).callWithoutRetries(Mockito.any(RetryingCallable.class),
-          Mockito.anyInt());
-
       InOrder inOrder = Mockito.inOrder(caller);
 
       scanner.loadCache();
 
-      inOrder.verify(caller, Mockito.times(2)).callWithoutRetries(
-          Mockito.any(RetryingCallable.class), Mockito.anyInt());
+      inOrder.verify(caller, Mockito.times(1)).callWithoutRetries(
+          Mockito.any(), Mockito.anyInt());
 
       assertEquals(1, scanner.cache.size());
       Result r = scanner.cache.poll();
@@ -266,9 +249,11 @@ public class TestClientScanner {
   @Test
   @SuppressWarnings("unchecked")
   public void testCacheLimit() throws IOException {
-    KeyValue kv1 = new KeyValue("row1".getBytes(), "cf".getBytes(), "cq".getBytes(), 1,
-        Type.Maximum), kv2 = new KeyValue("row2".getBytes(), "cf".getBytes(), "cq".getBytes(), 1,
-        Type.Maximum), kv3 = new KeyValue("row3".getBytes(), "cf".getBytes(), "cq".getBytes(), 1,
+    KeyValue kv1 = new KeyValue(Bytes.toBytes("row1"), Bytes.toBytes("cf"), Bytes.toBytes("cq"), 1,
+        Type.Maximum);
+    KeyValue kv2 = new KeyValue(Bytes.toBytes("row2"), Bytes.toBytes("cf"), Bytes.toBytes("cq"), 1,
+        Type.Maximum);
+    KeyValue kv3 = new KeyValue(Bytes.toBytes("row3"), Bytes.toBytes("cf"), Bytes.toBytes("cq"), 1,
         Type.Maximum);
     final Result[] results = new Result[] {Result.create(new Cell[] {kv1}),
         Result.create(new Cell[] {kv2}), Result.create(new Cell[] {kv3})};
@@ -276,23 +261,21 @@ public class TestClientScanner {
     RpcRetryingCaller<Result[]> caller = Mockito.mock(RpcRetryingCaller.class);
 
     Mockito.when(rpcFactory.<Result[]> newCaller()).thenReturn(caller);
-    Mockito.when(caller.callWithoutRetries(Mockito.any(RetryingCallable.class),
+    Mockito.when(caller.callWithoutRetries(Mockito.any(),
       Mockito.anyInt())).thenAnswer(new Answer<Result[]>() {
         private int count = 0;
         @Override
         public Result[] answer(InvocationOnMock invocation) throws Throwable {
-          ScannerCallableWithReplicas callable = invocation.getArgumentAt(0,
-              ScannerCallableWithReplicas.class);
+          ScannerCallableWithReplicas callable = invocation.getArgument(0);
           switch (count) {
             case 0: // initialize
-            case 2: // close
+              count++;
+              // if we set no here the implementation will trigger a close
+              callable.currentScannerCallable.setMoreResultsInRegion(MoreResults.YES);
+              return results;
+            case 1: // close
               count++;
               return null;
-            case 1:
-              count++;
-              callable.setHasMoreResultsContext(true);
-              callable.setServerHasMoreResults(false);
-              return results;
             default:
               throw new RuntimeException("Expected only 2 invocations");
           }
@@ -306,21 +289,14 @@ public class TestClientScanner {
     // Set a very large size
     scan.setMaxResultSize(1000*1000);
 
-    try (MockClientScanner scanner = new MockClientScanner(conf, scan, TableName.valueOf("table"),
+    try (MockClientScanner scanner = new MockClientScanner(conf, scan, TableName.valueOf(name.getMethodName()),
         clusterConn, rpcFactory, controllerFactory, pool, Integer.MAX_VALUE)) {
-
-      // Due to initializeScannerInConstruction()
-      Mockito.verify(caller).callWithoutRetries(Mockito.any(RetryingCallable.class),
-          Mockito.anyInt());
-
       InOrder inOrder = Mockito.inOrder(caller);
 
       scanner.loadCache();
 
-      // Ensures that possiblyNextScanner isn't called at the end which would trigger
-      // another call to callWithoutRetries
-      inOrder.verify(caller, Mockito.times(2)).callWithoutRetries(
-          Mockito.any(RetryingCallable.class), Mockito.anyInt());
+      inOrder.verify(caller, Mockito.times(1)).callWithoutRetries(
+          Mockito.any(), Mockito.anyInt());
 
       assertEquals(3, scanner.cache.size());
       Result r = scanner.cache.poll();
@@ -350,30 +326,27 @@ public class TestClientScanner {
   @SuppressWarnings("unchecked")
   public void testNoMoreResults() throws IOException {
     final Result[] results = new Result[1];
-    KeyValue kv1 = new KeyValue("row".getBytes(), "cf".getBytes(), "cq".getBytes(), 1,
+    KeyValue kv1 = new KeyValue(Bytes.toBytes("row"), Bytes.toBytes("cf"), Bytes.toBytes("cq"), 1,
         Type.Maximum);
     results[0] = Result.create(new Cell[] {kv1});
 
     RpcRetryingCaller<Result[]> caller = Mockito.mock(RpcRetryingCaller.class);
 
     Mockito.when(rpcFactory.<Result[]> newCaller()).thenReturn(caller);
-    Mockito.when(caller.callWithoutRetries(Mockito.any(RetryingCallable.class),
+    Mockito.when(caller.callWithoutRetries(Mockito.any(),
       Mockito.anyInt())).thenAnswer(new Answer<Result[]>() {
         private int count = 0;
         @Override
         public Result[] answer(InvocationOnMock invocation) throws Throwable {
-          ScannerCallableWithReplicas callable = invocation.getArgumentAt(0,
-              ScannerCallableWithReplicas.class);
+          ScannerCallableWithReplicas callable = invocation.getArgument(0);
           switch (count) {
             case 0: // initialize
-            case 2: // close
+              count++;
+              callable.currentScannerCallable.setMoreResultsInRegion(MoreResults.NO);
+              return results;
+            case 1: // close
               count++;
               return null;
-            case 1:
-              count++;
-              callable.setHasMoreResultsContext(true);
-              callable.setServerHasMoreResults(false);
-              return results;
             default:
               throw new RuntimeException("Expected only 2 invocations");
           }
@@ -386,21 +359,16 @@ public class TestClientScanner {
     scan.setCaching(100);
     scan.setMaxResultSize(1000*1000);
 
-    try (MockClientScanner scanner = new MockClientScanner(conf, scan, TableName.valueOf("table"),
+    try (MockClientScanner scanner = new MockClientScanner(conf, scan, TableName.valueOf(name.getMethodName()),
         clusterConn, rpcFactory, controllerFactory, pool, Integer.MAX_VALUE)) {
-
-      // Due to initializeScannerInConstruction()
-      Mockito.verify(caller).callWithoutRetries(Mockito.any(RetryingCallable.class),
-          Mockito.anyInt());
-
       scanner.setRpcFinished(true);
 
       InOrder inOrder = Mockito.inOrder(caller);
 
       scanner.loadCache();
 
-      inOrder.verify(caller, Mockito.times(2)).callWithoutRetries(
-          Mockito.any(RetryingCallable.class), Mockito.anyInt());
+      inOrder.verify(caller, Mockito.times(1)).callWithoutRetries(
+          Mockito.any(), Mockito.anyInt());
 
       assertEquals(1, scanner.cache.size());
       Result r = scanner.cache.poll();
@@ -416,12 +384,12 @@ public class TestClientScanner {
   @SuppressWarnings("unchecked")
   public void testMoreResults() throws IOException {
     final Result[] results1 = new Result[1];
-    KeyValue kv1 = new KeyValue("row".getBytes(), "cf".getBytes(), "cq".getBytes(), 1,
+    KeyValue kv1 = new KeyValue(Bytes.toBytes("row"), Bytes.toBytes("cf"), Bytes.toBytes("cq"), 1,
         Type.Maximum);
     results1[0] = Result.create(new Cell[] {kv1});
 
     final Result[] results2 = new Result[1];
-    KeyValue kv2 = new KeyValue("row2".getBytes(), "cf".getBytes(), "cq".getBytes(), 1,
+    KeyValue kv2 = new KeyValue(Bytes.toBytes("row2"), Bytes.toBytes("cf"), Bytes.toBytes("cq"), 1,
         Type.Maximum);
     results2[0] = Result.create(new Cell[] {kv2});
 
@@ -429,31 +397,27 @@ public class TestClientScanner {
     RpcRetryingCaller<Result[]> caller = Mockito.mock(RpcRetryingCaller.class);
 
     Mockito.when(rpcFactory.<Result[]> newCaller()).thenReturn(caller);
-    Mockito.when(caller.callWithoutRetries(Mockito.any(RetryingCallable.class),
+    Mockito.when(caller.callWithoutRetries(Mockito.any(),
         Mockito.anyInt())).thenAnswer(new Answer<Result[]>() {
           private int count = 0;
           @Override
           public Result[] answer(InvocationOnMock invocation) throws Throwable {
-            ScannerCallableWithReplicas callable = invocation.getArgumentAt(0,
-                ScannerCallableWithReplicas.class);
+            ScannerCallableWithReplicas callable = invocation.getArgument(0);
             switch (count) {
               case 0: // initialize
-              case 3: // close
                 count++;
-                return null;
+                callable.currentScannerCallable.setMoreResultsInRegion(MoreResults.YES);
+                return results1;
               case 1:
                 count++;
-                callable.setHasMoreResultsContext(true);
-                callable.setServerHasMoreResults(true);
-                return results1;
-              case 2:
-                count++;
                 // The server reports back false WRT more results
-                callable.setHasMoreResultsContext(true);
-                callable.setServerHasMoreResults(false);
+                callable.currentScannerCallable.setMoreResultsInRegion(MoreResults.NO);
                 return results2;
+              case 2: // close
+                count++;
+                return null;
               default:
-                throw new RuntimeException("Expected only 2 invocations");
+                throw new RuntimeException("Expected only 3 invocations");
             }
           }
       });
@@ -462,36 +426,23 @@ public class TestClientScanner {
     scan.setCaching(100);
     scan.setMaxResultSize(1000*1000);
 
-    try (MockClientScanner scanner = new MockClientScanner(conf, scan, TableName.valueOf("table"),
+    try (MockClientScanner scanner = new MockClientScanner(conf, scan, TableName.valueOf(name.getMethodName()),
         clusterConn, rpcFactory, controllerFactory, pool, Integer.MAX_VALUE)) {
-
-      // Due to initializeScannerInConstruction()
-      Mockito.verify(caller).callWithoutRetries(Mockito.any(RetryingCallable.class),
-          Mockito.anyInt());
-
       InOrder inOrder = Mockito.inOrder(caller);
+      scanner.setRpcFinished(true);
 
       scanner.loadCache();
 
       inOrder.verify(caller, Mockito.times(2)).callWithoutRetries(
-          Mockito.any(RetryingCallable.class), Mockito.anyInt());
+          Mockito.any(), Mockito.anyInt());
 
-      assertEquals(1, scanner.cache.size());
+      assertEquals(2, scanner.cache.size());
       Result r = scanner.cache.poll();
       assertNotNull(r);
       CellScanner cs = r.cellScanner();
       assertTrue(cs.advance());
       assertEquals(kv1, cs.current());
       assertFalse(cs.advance());
-
-      scanner.setRpcFinished(true);
-
-      inOrder = Mockito.inOrder(caller);
-
-      scanner.loadCache();
-
-      inOrder.verify(caller, Mockito.times(3)).callWithoutRetries(
-          Mockito.any(RetryingCallable.class), Mockito.anyInt());
 
       r = scanner.cache.poll();
       assertNotNull(r);
@@ -520,15 +471,15 @@ public class TestClientScanner {
     when(clusterConn.locateRegion((TableName)any(), (byte[])any(), anyBoolean(),
       anyBoolean(), anyInt())).thenReturn(new RegionLocations(null, null, null));
 
-    try (MockClientScanner scanner = new MockClientScanner(conf, scan, TableName.valueOf("table"),
+    try (MockClientScanner scanner = new MockClientScanner(conf, scan, TableName.valueOf(name.getMethodName()),
       clusterConn, rpcFactory, new RpcControllerFactory(conf), pool, Integer.MAX_VALUE)) {
       Iterator<Result> iter = scanner.iterator();
       while (iter.hasNext()) {
         iter.next();
       }
       fail("Should have failed with RetriesExhaustedException");
-    } catch (RetriesExhaustedException expected) {
-
+    } catch (RuntimeException expected) {
+      assertThat(expected.getCause(), instanceOf(RetriesExhaustedException.class));
     }
   }
 
@@ -563,7 +514,5 @@ public class TestClientScanner {
         }
       };
     }
-
   }
-
 }

@@ -18,6 +18,10 @@
 
 package org.apache.hadoop.hbase.replication;
 
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
@@ -26,17 +30,20 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.Cell;
-import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.Waiter;
 import org.apache.hadoop.hbase.client.Connection;
 import org.apache.hadoop.hbase.client.ConnectionFactory;
 import org.apache.hadoop.hbase.client.Put;
+import org.apache.hadoop.hbase.client.RegionInfo;
 import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.regionserver.HRegion;
-import org.apache.hadoop.hbase.replication.regionserver.*;
+import org.apache.hadoop.hbase.replication.regionserver.HBaseInterClusterReplicationEndpoint;
+import org.apache.hadoop.hbase.replication.regionserver.MetricsReplicationGlobalSourceSource;
+import org.apache.hadoop.hbase.replication.regionserver.MetricsReplicationSourceImpl;
+import org.apache.hadoop.hbase.replication.regionserver.MetricsReplicationSourceSource;
+import org.apache.hadoop.hbase.replication.regionserver.MetricsReplicationSourceSourceImpl;
+import org.apache.hadoop.hbase.replication.regionserver.MetricsSource;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.testclassification.ReplicationTests;
 import org.apache.hadoop.hbase.util.Bytes;
@@ -51,17 +58,15 @@ import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
-
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Tests ReplicationSource and ReplicationEndpoint interactions
  */
 @Category({ReplicationTests.class, MediumTests.class})
 public class TestReplicationEndpoint extends TestReplicationBase {
-  private static final Log LOG = LogFactory.getLog(TestReplicationEndpoint.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestReplicationEndpoint.class);
 
   static int numRegionServers;
 
@@ -89,7 +94,7 @@ public class TestReplicationEndpoint extends TestReplicationBase {
     final List<RegionServerThread> rsThreads =
         utility1.getMiniHBaseCluster().getRegionServerThreads();
     for (RegionServerThread rs : rsThreads) {
-      utility1.getHBaseAdmin().rollWALWriter(rs.getRegionServer().getServerName());
+      utility1.getAdmin().rollWALWriter(rs.getRegionServer().getServerName());
     }
     // Wait for  all log roll to finish
     utility1.waitFor(3000, new Waiter.ExplainingPredicate<Exception>() {
@@ -105,7 +110,7 @@ public class TestReplicationEndpoint extends TestReplicationBase {
 
       @Override
       public String explainFailure() throws Exception {
-        List<String> logRollInProgressRsList = new ArrayList<String>();
+        List<String> logRollInProgressRsList = new ArrayList<>();
         for (RegionServerThread rs : rsThreads) {
           if (!rs.getRegionServer().walRollRequestFinished()) {
             logRollInProgressRsList.add(rs.getRegionServer().toString());
@@ -201,7 +206,7 @@ public class TestReplicationEndpoint extends TestReplicationBase {
     // Make sure edits are spread across regions because we do region based batching
     // before shipping edits.
     for(HRegion region: regions) {
-      HRegionInfo hri = region.getRegionInfo();
+      RegionInfo hri = region.getRegionInfo();
       byte[] row = hri.getStartKey();
       for (int i = 0; i < 100; i++) {
         if (row.length > 0) {
@@ -224,6 +229,7 @@ public class TestReplicationEndpoint extends TestReplicationBase {
       public boolean evaluate() throws Exception {
         return InterClusterReplicationEndpointForTest.replicateCount.get() == numEdits;
       }
+
       @Override
       public String explainFailure() throws Exception {
         String failure = "Failed to replicate all edits, expected = " + numEdits
@@ -238,9 +244,13 @@ public class TestReplicationEndpoint extends TestReplicationBase {
 
   @Test (timeout=120000)
   public void testWALEntryFilterFromReplicationEndpoint() throws Exception {
-    admin.addPeer("testWALEntryFilterFromReplicationEndpoint",
-      new ReplicationPeerConfig().setClusterKey(ZKConfig.getZooKeeperClusterKey(conf1))
-        .setReplicationEndpointImpl(ReplicationEndpointWithWALEntryFilter.class.getName()), null);
+    ReplicationPeerConfig rpc =  new ReplicationPeerConfig().setClusterKey(ZKConfig.getZooKeeperClusterKey(conf1))
+        .setReplicationEndpointImpl(ReplicationEndpointWithWALEntryFilter.class.getName());
+    //test that we can create mutliple WALFilters reflectively
+    rpc.getConfiguration().put(BaseReplicationEndpoint.REPLICATION_WALENTRYFILTER_CONFIG_KEY,
+        EverythingPassesWALEntryFilter.class.getName() +
+            "," + EverythingPassesWALEntryFilterSubclass.class.getName());
+    admin.addPeer("testWALEntryFilterFromReplicationEndpoint", rpc);
     // now replicate some data.
     try (Connection connection = ConnectionFactory.createConnection(conf1)) {
       doPut(connection, Bytes.toBytes("row1"));
@@ -256,7 +266,29 @@ public class TestReplicationEndpoint extends TestReplicationBase {
     });
 
     Assert.assertNull(ReplicationEndpointWithWALEntryFilter.ex.get());
+    //make sure our reflectively created filter is in the filter chain
+    Assert.assertTrue(EverythingPassesWALEntryFilter.hasPassedAnEntry());
     admin.removePeer("testWALEntryFilterFromReplicationEndpoint");
+  }
+
+  @Test (timeout=120000, expected=IOException.class)
+  public void testWALEntryFilterAddValidation() throws Exception {
+    ReplicationPeerConfig rpc =  new ReplicationPeerConfig().setClusterKey(ZKConfig.getZooKeeperClusterKey(conf1))
+        .setReplicationEndpointImpl(ReplicationEndpointWithWALEntryFilter.class.getName());
+    //test that we can create mutliple WALFilters reflectively
+    rpc.getConfiguration().put(BaseReplicationEndpoint.REPLICATION_WALENTRYFILTER_CONFIG_KEY,
+        "IAmNotARealWalEntryFilter");
+    admin.addPeer("testWALEntryFilterAddValidation", rpc);
+  }
+
+  @Test (timeout=120000, expected=IOException.class)
+  public void testWALEntryFilterUpdateValidation() throws Exception {
+    ReplicationPeerConfig rpc =  new ReplicationPeerConfig().setClusterKey(ZKConfig.getZooKeeperClusterKey(conf1))
+        .setReplicationEndpointImpl(ReplicationEndpointWithWALEntryFilter.class.getName());
+    //test that we can create mutliple WALFilters reflectively
+    rpc.getConfiguration().put(BaseReplicationEndpoint.REPLICATION_WALENTRYFILTER_CONFIG_KEY,
+        "IAmNotARealWalEntryFilter");
+    admin.updatePeerConfig("testWALEntryFilterUpdateValidation", rpc);
   }
 
 
@@ -282,9 +314,11 @@ public class TestReplicationEndpoint extends TestReplicationBase {
     MetricsSource source = new MetricsSource(id, singleSourceSource, globalSourceSource);
     String gaugeName = "gauge";
     String singleGaugeName = "source.id." + gaugeName;
+    String globalGaugeName = "source." + gaugeName;
     long delta = 1;
     String counterName = "counter";
     String singleCounterName = "source.id." + counterName;
+    String globalCounterName = "source." + counterName;
     long count = 2;
     source.decGauge(gaugeName, delta);
     source.getMetricsContext();
@@ -299,21 +333,21 @@ public class TestReplicationEndpoint extends TestReplicationBase {
     source.updateHistogram(counterName, count);
 
     verify(singleRms).decGauge(singleGaugeName, delta);
-    verify(globalRms).decGauge(gaugeName, delta);
+    verify(globalRms).decGauge(globalGaugeName, delta);
     verify(globalRms).getMetricsContext();
     verify(globalRms).getMetricsJmxContext();
     verify(globalRms).getMetricsName();
     verify(singleRms).incCounters(singleCounterName, count);
-    verify(globalRms).incCounters(counterName, count);
+    verify(globalRms).incCounters(globalCounterName, count);
     verify(singleRms).incGauge(singleGaugeName, delta);
-    verify(globalRms).incGauge(gaugeName, delta);
+    verify(globalRms).incGauge(globalGaugeName, delta);
     verify(globalRms).init();
     verify(singleRms).removeMetric(singleGaugeName);
-    verify(globalRms).removeMetric(gaugeName);
+    verify(globalRms).removeMetric(globalGaugeName);
     verify(singleRms).setGauge(singleGaugeName, delta);
-    verify(globalRms).setGauge(gaugeName, delta);
+    verify(globalRms).setGauge(globalGaugeName, delta);
     verify(singleRms).updateHistogram(singleCounterName, count);
-    verify(globalRms).updateHistogram(counterName, count);
+    verify(globalRms).updateHistogram(globalCounterName, count);
   }
 
   private void doPut(byte[] row) throws IOException {
@@ -361,8 +395,18 @@ public class TestReplicationEndpoint extends TestReplicationBase {
     @Override
     public boolean replicate(ReplicateContext replicateContext) {
       replicateCount.incrementAndGet();
-      lastEntries = replicateContext.entries;
+      lastEntries = new ArrayList<>(replicateContext.entries);
       return true;
+    }
+
+    @Override
+    public void start() {
+      startAsync();
+    }
+
+    @Override
+    public void stop() {
+      stopAsync();
     }
 
     @Override
@@ -434,7 +478,7 @@ public class TestReplicationEndpoint extends TestReplicationBase {
 
   public static class ReplicationEndpointReturningFalse extends ReplicationEndpointForTest {
     static int COUNT = 10;
-    static AtomicReference<Exception> ex = new AtomicReference<Exception>(null);
+    static AtomicReference<Exception> ex = new AtomicReference<>(null);
     static AtomicBoolean replicated = new AtomicBoolean(false);
     @Override
     public boolean replicate(ReplicateContext replicateContext) {
@@ -446,7 +490,7 @@ public class TestReplicationEndpoint extends TestReplicationBase {
       }
 
       super.replicate(replicateContext);
-      LOG.info("Replicated " + row + ", count=" + replicateCount.get());
+      LOG.info("Replicated " + Bytes.toString(row) + ", count=" + replicateCount.get());
 
       replicated.set(replicateCount.get() > COUNT); // first 10 times, we return false
       return replicated.get();
@@ -455,7 +499,7 @@ public class TestReplicationEndpoint extends TestReplicationBase {
 
   // return a WALEntry filter which only accepts "row", but not other rows
   public static class ReplicationEndpointWithWALEntryFilter extends ReplicationEndpointForTest {
-    static AtomicReference<Exception> ex = new AtomicReference<Exception>(null);
+    static AtomicReference<Exception> ex = new AtomicReference<>(null);
 
     @Override
     public boolean replicate(ReplicateContext replicateContext) {
@@ -486,5 +530,22 @@ public class TestReplicationEndpoint extends TestReplicationBase {
         }
       });
     }
+  }
+
+  public static class EverythingPassesWALEntryFilter implements WALEntryFilter {
+    private static boolean passedEntry = false;
+    @Override
+    public Entry filter(Entry entry) {
+      passedEntry = true;
+      return entry;
+    }
+
+    public static boolean hasPassedAnEntry(){
+      return passedEntry;
+    }
+  }
+
+  public static class EverythingPassesWALEntryFilterSubclass extends EverythingPassesWALEntryFilter {
+
   }
 }

@@ -23,11 +23,11 @@ import java.util.HashSet;
 import java.util.Set;
 import java.util.List;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceStability;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Provides the common setup framework and runtime services for globally
@@ -44,9 +44,9 @@ public abstract class ProcedureManagerHost<E extends ProcedureManager> {
   public static final String MASTER_PROCEDURE_CONF_KEY =
       "hbase.procedure.master.classes";
 
-  private static final Log LOG = LogFactory.getLog(ProcedureManagerHost.class);
+  private static final Logger LOG = LoggerFactory.getLogger(ProcedureManagerHost.class);
 
-  protected Set<E> procedures = new HashSet<E>();
+  protected Set<E> procedures = new HashSet<>();
 
   /**
    * Load system procedures. Read the class names from configuration.
@@ -60,7 +60,7 @@ public abstract class ProcedureManagerHost<E extends ProcedureManager> {
     if (defaultProcClasses == null || defaultProcClasses.length == 0)
       return;
 
-    List<E> configured = new ArrayList<E>();
+    List<E> configured = new ArrayList<>();
     for (String className : defaultProcClasses) {
       className = className.trim();
       ClassLoader cl = this.getClass().getClassLoader();
@@ -105,7 +105,7 @@ public abstract class ProcedureManagerHost<E extends ProcedureManager> {
   }
 
   public Set<E> getProcedureManagers() {
-    Set<E> returnValue = new HashSet<E>();
+    Set<E> returnValue = new HashSet<>();
     for (E e: procedures) {
       returnValue.add(e);
     }

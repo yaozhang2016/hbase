@@ -20,17 +20,15 @@ package org.apache.hadoop.hbase.types;
 import java.util.ArrayList;
 import java.util.List;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * A helper for building {@link Struct} instances.
  */
 @InterfaceAudience.Public
-@InterfaceStability.Evolving
 public class StructBuilder {
 
-  protected final List<DataType<?>> fields = new ArrayList<DataType<?>>();
+  protected final List<DataType<?>> fields = new ArrayList<>();
 
   /**
    * Create an empty {@code StructBuilder}.
@@ -40,15 +38,23 @@ public class StructBuilder {
   /**
    * Append {@code field} to the sequence of accumulated fields.
    */
-  public StructBuilder add(DataType<?> field) { fields.add(field); return this; }
+  public StructBuilder add(DataType<?> field) {
+    fields.add(field);
+    return this;
+  }
 
   /**
    * Retrieve the {@link Struct} represented by {@code this}.
    */
-  public Struct toStruct() { return new Struct(fields.toArray(new DataType<?>[fields.size()])); }
+  public Struct toStruct() {
+    return new Struct(fields.toArray(new DataType<?>[fields.size()]));
+  }
 
   /**
    * Reset the sequence of accumulated fields.
    */
-  public StructBuilder reset() { fields.clear(); return this; }
+  public StructBuilder reset() {
+    fields.clear();
+    return this;
+  }
 }

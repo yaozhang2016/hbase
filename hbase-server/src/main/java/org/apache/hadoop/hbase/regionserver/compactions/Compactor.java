@@ -17,36 +17,37 @@
  */
 package org.apache.hadoop.hbase.regionserver.compactions;
 
+import static org.apache.hadoop.hbase.regionserver.HStoreFile.EARLIEST_PUT_TS;
+import static org.apache.hadoop.hbase.regionserver.HStoreFile.TIMERANGE_KEY;
+import static org.apache.hadoop.hbase.regionserver.ScanType.COMPACT_DROP_DELETES;
+import static org.apache.hadoop.hbase.regionserver.ScanType.COMPACT_RETAIN_DELETES;
+
 import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.Cell;
-import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.HConstants;
+import org.apache.hadoop.hbase.PrivateCellUtil;
 import org.apache.hadoop.hbase.KeyValueUtil;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.io.compress.Compression;
 import org.apache.hadoop.hbase.io.hfile.HFile;
 import org.apache.hadoop.hbase.io.hfile.HFile.FileInfo;
 import org.apache.hadoop.hbase.regionserver.CellSink;
+import org.apache.hadoop.hbase.regionserver.CustomizedScanInfoBuilder;
 import org.apache.hadoop.hbase.regionserver.HStore;
+import org.apache.hadoop.hbase.regionserver.HStoreFile;
 import org.apache.hadoop.hbase.regionserver.InternalScanner;
 import org.apache.hadoop.hbase.regionserver.KeyValueScanner;
+import org.apache.hadoop.hbase.regionserver.ScanInfo;
 import org.apache.hadoop.hbase.regionserver.ScanType;
 import org.apache.hadoop.hbase.regionserver.ScannerContext;
 import org.apache.hadoop.hbase.regionserver.ShipperListener;
-import org.apache.hadoop.hbase.regionserver.Store;
-import org.apache.hadoop.hbase.regionserver.StoreFile;
 import org.apache.hadoop.hbase.regionserver.StoreFileReader;
 import org.apache.hadoop.hbase.regionserver.StoreFileScanner;
 import org.apache.hadoop.hbase.regionserver.StoreFileWriter;
@@ -58,8 +59,10 @@ import org.apache.hadoop.hbase.security.User;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.hadoop.util.StringUtils.TraditionalBinaryPrefix;
-
-import com.google.common.io.Closeables;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.apache.hbase.thirdparty.com.google.common.io.Closeables;
 
 /**
  * A compactor is a compaction algorithm associated a given policy. Base class also contains
@@ -67,29 +70,42 @@ import com.google.common.io.Closeables;
  */
 @InterfaceAudience.Private
 public abstract class Compactor<T extends CellSink> {
-  private static final Log LOG = LogFactory.getLog(Compactor.class);
-  private static final long COMPACTION_PROGRESS_LOG_INTERVAL = 60 * 1000;
+  private static final Logger LOG = LoggerFactory.getLogger(Compactor.class);
+  protected static final long COMPACTION_PROGRESS_LOG_INTERVAL = 60 * 1000;
   protected volatile CompactionProgress progress;
   protected final Configuration conf;
-  protected final Store store;
+  protected final HStore store;
 
   protected final int compactionKVMax;
   protected final Compression.Algorithm compactionCompression;
 
-  /** specify how many days to keep MVCC values during major compaction **/ 
+  /** specify how many days to keep MVCC values during major compaction **/
   protected int keepSeqIdPeriod;
 
+  // Configs that drive whether we drop page cache behind compactions
+  protected static final String  MAJOR_COMPACTION_DROP_CACHE =
+      "hbase.regionserver.majorcompaction.pagecache.drop";
+  protected static final String MINOR_COMPACTION_DROP_CACHE =
+      "hbase.regionserver.minorcompaction.pagecache.drop";
+
+  private final boolean dropCacheMajor;
+  private final boolean dropCacheMinor;
+
   //TODO: depending on Store is not good but, realistically, all compactors currently do.
-  Compactor(final Configuration conf, final Store store) {
+  Compactor(Configuration conf, HStore store) {
     this.conf = conf;
     this.store = store;
     this.compactionKVMax =
       this.conf.getInt(HConstants.COMPACTION_KV_MAX, HConstants.COMPACTION_KV_MAX_DEFAULT);
-    this.compactionCompression = (this.store.getFamily() == null) ?
-        Compression.Algorithm.NONE : this.store.getFamily().getCompactionCompressionType();
-    this.keepSeqIdPeriod = Math.max(this.conf.getInt(HConstants.KEEP_SEQID_PERIOD, 
+    this.compactionCompression = (this.store.getColumnFamilyDescriptor() == null) ?
+        Compression.Algorithm.NONE : this.store.getColumnFamilyDescriptor().getCompactionCompressionType();
+    this.keepSeqIdPeriod = Math.max(this.conf.getInt(HConstants.KEEP_SEQID_PERIOD,
       HConstants.MIN_KEEP_SEQID_PERIOD), HConstants.MIN_KEEP_SEQID_PERIOD);
+    this.dropCacheMajor = conf.getBoolean(MAJOR_COMPACTION_DROP_CACHE, true);
+    this.dropCacheMinor = conf.getBoolean(MINOR_COMPACTION_DROP_CACHE, true);
   }
+
+
 
   protected interface CellSinkFactory<S> {
     S createWriter(InternalScanner scanner, FileDetails fd, boolean shouldDropBehind)
@@ -124,18 +140,18 @@ public abstract class Compactor<T extends CellSink> {
    * @param allFiles Whether all files are included for compaction
    * @return The result.
    */
-  protected FileDetails getFileDetails(
-      Collection<StoreFile> filesToCompact, boolean allFiles) throws IOException {
+  private FileDetails getFileDetails(
+      Collection<HStoreFile> filesToCompact, boolean allFiles) throws IOException {
     FileDetails fd = new FileDetails();
-    long oldestHFileTimeStampToKeepMVCC = System.currentTimeMillis() - 
-      (1000L * 60 * 60 * 24 * this.keepSeqIdPeriod);  
+    long oldestHFileTimeStampToKeepMVCC = System.currentTimeMillis() -
+      (1000L * 60 * 60 * 24 * this.keepSeqIdPeriod);
 
-    for (StoreFile file : filesToCompact) {
+    for (HStoreFile file : filesToCompact) {
       if(allFiles && (file.getModificationTimeStamp() < oldestHFileTimeStampToKeepMVCC)) {
-        // when isAllFiles is true, all files are compacted so we can calculate the smallest 
+        // when isAllFiles is true, all files are compacted so we can calculate the smallest
         // MVCC value to keep
-        if(fd.minSeqIdToKeep < file.getMaxMemstoreTS()) {
-          fd.minSeqIdToKeep = file.getMaxMemstoreTS();
+        if(fd.minSeqIdToKeep < file.getMaxMemStoreTS()) {
+          fd.minSeqIdToKeep = file.getMaxMemStoreTS();
         }
       }
       long seqNum = file.getMaxSequenceId();
@@ -172,7 +188,7 @@ public abstract class Compactor<T extends CellSink> {
       // This is used to remove family delete marker during compaction.
       long earliestPutTs = 0;
       if (allFiles) {
-        tmp = fileInfo.get(StoreFile.EARLIEST_PUT_TS);
+        tmp = fileInfo.get(EARLIEST_PUT_TS);
         if (tmp == null) {
           // There's a file with no information, must be an old one
           // assume we have very old puts
@@ -182,9 +198,8 @@ public abstract class Compactor<T extends CellSink> {
           fd.earliestPutTs = Math.min(fd.earliestPutTs, earliestPutTs);
         }
       }
-      tmp = fileInfo.get(StoreFile.TIMERANGE_KEY);
-      TimeRangeTracker trt = TimeRangeTracker.getTimeRangeTracker(tmp);
-      fd.latestPutTs = trt == null? HConstants.LATEST_TIMESTAMP: trt.getMax();
+      tmp = fileInfo.get(TIMERANGE_KEY);
+      fd.latestPutTs = tmp == null ? HConstants.LATEST_TIMESTAMP: TimeRangeTracker.parseFrom(tmp).getMax();
       if (LOG.isDebugEnabled()) {
         LOG.debug("Compacting " + file +
           ", keycount=" + keyCount +
@@ -203,42 +218,35 @@ public abstract class Compactor<T extends CellSink> {
    * @param filesToCompact Files.
    * @return Scanners.
    */
-  protected List<StoreFileScanner> createFileScanners(
-      final Collection<StoreFile> filesToCompact,
-      long smallestReadPoint,
-      boolean useDropBehind) throws IOException {
-    return StoreFileScanner.getScannersForStoreFiles(filesToCompact,
-        /* cache blocks = */ false,
-        /* use pread = */ false,
-        /* is compaction */ true,
-        /* use Drop Behind */ useDropBehind,
+  private List<StoreFileScanner> createFileScanners(Collection<HStoreFile> filesToCompact,
+      long smallestReadPoint, boolean useDropBehind) throws IOException {
+    return StoreFileScanner.getScannersForCompaction(filesToCompact, useDropBehind,
       smallestReadPoint);
   }
 
-  protected long getSmallestReadPoint() {
+  private long getSmallestReadPoint() {
     return store.getSmallestReadPoint();
   }
 
   protected interface InternalScannerFactory {
 
-    ScanType getScanType(CompactionRequest request);
+    ScanType getScanType(CompactionRequestImpl request);
 
-    InternalScanner createScanner(List<StoreFileScanner> scanners, ScanType scanType,
+    InternalScanner createScanner(ScanInfo scanInfo, List<StoreFileScanner> scanners, ScanType scanType,
         FileDetails fd, long smallestReadPoint) throws IOException;
   }
 
   protected final InternalScannerFactory defaultScannerFactory = new InternalScannerFactory() {
 
     @Override
-    public ScanType getScanType(CompactionRequest request) {
-      return request.isRetainDeleteMarkers() ? ScanType.COMPACT_RETAIN_DELETES
-          : ScanType.COMPACT_DROP_DELETES;
+    public ScanType getScanType(CompactionRequestImpl request) {
+      return request.isAllFiles() ? COMPACT_DROP_DELETES : COMPACT_RETAIN_DELETES;
     }
 
     @Override
-    public InternalScanner createScanner(List<StoreFileScanner> scanners, ScanType scanType,
-        FileDetails fd, long smallestReadPoint) throws IOException {
-      return Compactor.this.createScanner(store, scanners, scanType, smallestReadPoint,
+    public InternalScanner createScanner(ScanInfo scanInfo, List<StoreFileScanner> scanners,
+        ScanType scanType, FileDetails fd, long smallestReadPoint) throws IOException {
+      return Compactor.this.createScanner(store, scanInfo, scanners, scanType, smallestReadPoint,
         fd.earliestPutTs);
     }
   };
@@ -249,7 +257,7 @@ public abstract class Compactor<T extends CellSink> {
    * @return Writer for a new StoreFile in the tmp dir.
    * @throws IOException if creation failed
    */
-  protected StoreFileWriter createTmpWriter(FileDetails fd, boolean shouldDropBehind)
+  protected final StoreFileWriter createTmpWriter(FileDetails fd, boolean shouldDropBehind)
       throws IOException {
     // When all MVCC readpoints are 0, don't write them.
     // See HBASE-8166, HBASE-12600, and HBASE-13389.
@@ -259,104 +267,13 @@ public abstract class Compactor<T extends CellSink> {
     /* includesTags = */fd.maxTagsLength > 0, shouldDropBehind);
   }
 
-  protected List<Path> compact(final CompactionRequest request,
-      InternalScannerFactory scannerFactory, CellSinkFactory<T> sinkFactory,
-      ThroughputController throughputController, User user) throws IOException {
-    FileDetails fd = getFileDetails(request.getFiles(), request.isAllFiles());
-    this.progress = new CompactionProgress(fd.maxKeyCount);
-
-    // Find the smallest read point across all the Scanners.
-    long smallestReadPoint = getSmallestReadPoint();
-
-    List<StoreFileScanner> scanners;
-    Collection<StoreFile> readersToClose;
-    T writer = null;
-    if (this.conf.getBoolean("hbase.regionserver.compaction.private.readers", true)) {
-      // clone all StoreFiles, so we'll do the compaction on a independent copy of StoreFiles,
-      // HFiles, and their readers
-      readersToClose = new ArrayList<StoreFile>(request.getFiles().size());
-      for (StoreFile f : request.getFiles()) {
-        StoreFile clonedStoreFile = f.cloneForReader();
-        // create the reader after the store file is cloned in case
-        // the sequence id is used for sorting in scanners
-        clonedStoreFile.createReader();
-        readersToClose.add(clonedStoreFile);
-      }
-      scanners = createFileScanners(readersToClose, smallestReadPoint,
-        store.throttleCompaction(request.getSize()));
-    } else {
-      readersToClose = Collections.emptyList();
-      scanners = createFileScanners(request.getFiles(), smallestReadPoint,
-        store.throttleCompaction(request.getSize()));
-    }
-    InternalScanner scanner = null;
-    boolean finished = false;
-    try {
-      /* Include deletes, unless we are doing a major compaction */
-      ScanType scanType = scannerFactory.getScanType(request);
-      scanner = preCreateCoprocScanner(request, scanType, fd.earliestPutTs, scanners, user,
-        smallestReadPoint);
-      if (scanner == null) {
-        scanner = scannerFactory.createScanner(scanners, scanType, fd, smallestReadPoint);
-      }
-      scanner = postCreateCoprocScanner(request, scanType, scanner, user);
-      if (scanner == null) {
-        // NULL scanner returned from coprocessor hooks means skip normal processing.
-        return new ArrayList<Path>();
-      }
-      boolean cleanSeqId = false;
-      if (fd.minSeqIdToKeep > 0) {
-        smallestReadPoint = Math.min(fd.minSeqIdToKeep, smallestReadPoint);
-        cleanSeqId = true;
-      }
-      writer = sinkFactory.createWriter(scanner, fd, store.throttleCompaction(request.getSize()));
-      finished = performCompaction(fd, scanner, writer, smallestReadPoint, cleanSeqId,
-        throughputController, request.isAllFiles(), request.getFiles().size());
-      if (!finished) {
-        throw new InterruptedIOException("Aborting compaction of store " + store + " in region "
-            + store.getRegionInfo().getRegionNameAsString() + " because it was interrupted.");
-      }
-    } finally {
-      Closeables.close(scanner, true);
-      for (StoreFile f : readersToClose) {
-        try {
-          f.closeReader(true);
-        } catch (IOException e) {
-          LOG.warn("Exception closing " + f, e);
-        }
-      }
-      if (!finished && writer != null) {
-        abortWriter(writer);
-      }
-    }
-    assert finished : "We should have exited the method on all error paths";
-    assert writer != null : "Writer should be non-null if no error";
-    return commitWriter(writer, fd, request);
-  }
-
-  protected abstract List<Path> commitWriter(T writer, FileDetails fd, CompactionRequest request)
-      throws IOException;
-
-  protected abstract void abortWriter(T writer) throws IOException;
-
-  /**
-   * Calls coprocessor, if any, to create compaction scanner - before normal scanner creation.
-   * @param request Compaction request.
-   * @param scanType Scan type.
-   * @param earliestPutTs Earliest put ts.
-   * @param scanners File scanners for compaction files.
-   * @param user the User
-   * @param readPoint the read point to help create scanner by Coprocessor if required.
-   * @return Scanner override by coprocessor; null if not overriding.
-   */
-  protected InternalScanner preCreateCoprocScanner(final CompactionRequest request,
-      final ScanType scanType, final long earliestPutTs, final List<StoreFileScanner> scanners,
-      User user, final long readPoint) throws IOException {
+  private ScanInfo preCompactScannerOpen(CompactionRequestImpl request, ScanType scanType,
+      User user) throws IOException {
     if (store.getCoprocessorHost() == null) {
-      return null;
+      return store.getScanInfo();
     }
-    return store.getCoprocessorHost().preCompactScannerOpen(store, scanners, scanType,
-        earliestPutTs, request, user, readPoint);
+    return store.getCoprocessorHost().preCompactScannerOpen(store, scanType, request.getTracker(),
+      request, user);
   }
 
   /**
@@ -366,13 +283,70 @@ public abstract class Compactor<T extends CellSink> {
    * @param scanner The default scanner created for compaction.
    * @return Scanner scanner to use (usually the default); null if compaction should not proceed.
    */
-  protected InternalScanner postCreateCoprocScanner(final CompactionRequest request,
-      final ScanType scanType, final InternalScanner scanner, User user) throws IOException {
+  private InternalScanner postCompactScannerOpen(CompactionRequestImpl request, ScanType scanType,
+      InternalScanner scanner, User user) throws IOException {
     if (store.getCoprocessorHost() == null) {
       return scanner;
     }
-    return store.getCoprocessorHost().preCompact(store, scanner, scanType, request, user);
+    return store.getCoprocessorHost().preCompact(store, scanner, scanType, request.getTracker(),
+      request, user);
   }
+
+  protected final List<Path> compact(final CompactionRequestImpl request,
+      InternalScannerFactory scannerFactory, CellSinkFactory<T> sinkFactory,
+      ThroughputController throughputController, User user) throws IOException {
+    FileDetails fd = getFileDetails(request.getFiles(), request.isAllFiles());
+    this.progress = new CompactionProgress(fd.maxKeyCount);
+
+    // Find the smallest read point across all the Scanners.
+    long smallestReadPoint = getSmallestReadPoint();
+
+    T writer = null;
+    boolean dropCache;
+    if (request.isMajor() || request.isAllFiles()) {
+      dropCache = this.dropCacheMajor;
+    } else {
+      dropCache = this.dropCacheMinor;
+    }
+
+    List<StoreFileScanner> scanners =
+        createFileScanners(request.getFiles(), smallestReadPoint, dropCache);
+    InternalScanner scanner = null;
+    boolean finished = false;
+    try {
+      /* Include deletes, unless we are doing a major compaction */
+      ScanType scanType = scannerFactory.getScanType(request);
+      ScanInfo scanInfo = preCompactScannerOpen(request, scanType, user);
+      scanner = postCompactScannerOpen(request, scanType,
+        scannerFactory.createScanner(scanInfo, scanners, scanType, fd, smallestReadPoint), user);
+      boolean cleanSeqId = false;
+      if (fd.minSeqIdToKeep > 0 && !store.getColumnFamilyDescriptor().isNewVersionBehavior()) {
+        // For mvcc-sensitive family, we never set mvcc to 0.
+        smallestReadPoint = Math.min(fd.minSeqIdToKeep, smallestReadPoint);
+        cleanSeqId = true;
+      }
+      writer = sinkFactory.createWriter(scanner, fd, dropCache);
+      finished = performCompaction(fd, scanner, writer, smallestReadPoint, cleanSeqId,
+        throughputController, request.isAllFiles(), request.getFiles().size());
+      if (!finished) {
+        throw new InterruptedIOException("Aborting compaction of store " + store + " in region "
+            + store.getRegionInfo().getRegionNameAsString() + " because it was interrupted.");
+      }
+    } finally {
+      Closeables.close(scanner, true);
+      if (!finished && writer != null) {
+        abortWriter(writer);
+      }
+    }
+    assert finished : "We should have exited the method on all error paths";
+    assert writer != null : "Writer should be non-null if no error";
+    return commitWriter(writer, fd, request);
+  }
+
+  protected abstract List<Path> commitWriter(T writer, FileDetails fd,
+      CompactionRequestImpl request) throws IOException;
+
+  protected abstract void abortWriter(T writer) throws IOException;
 
   /**
    * Performs the compaction.
@@ -395,7 +369,7 @@ public abstract class Compactor<T extends CellSink> {
     long bytesWrittenProgressForShippedCall = 0;
     // Since scanner.next() can return 'false' but still be delivering data,
     // we have to use a do/while loop.
-    List<Cell> cells = new ArrayList<Cell>();
+    List<Cell> cells = new ArrayList<>();
     long closeCheckSizeLimit = HStore.getCloseCheckInterval();
     long lastMillis = 0;
     if (LOG.isDebugEnabled()) {
@@ -409,7 +383,7 @@ public abstract class Compactor<T extends CellSink> {
 
     throughputController.start(compactionName);
     KeyValueScanner kvs = (scanner instanceof KeyValueScanner)? (KeyValueScanner)scanner : null;
-    long shippedCallSizeLimit = (long) numofFilesToCompact * this.store.getFamily().getBlocksize();
+    long shippedCallSizeLimit = (long) numofFilesToCompact * this.store.getColumnFamilyDescriptor().getBlocksize();
     try {
       do {
         hasMore = scanner.next(cells, scannerContext);
@@ -423,7 +397,7 @@ public abstract class Compactor<T extends CellSink> {
           if (cleanSeqId && c.getSequenceId() <= smallestReadPoint) {
             lastCleanCell = c;
             lastCleanCellSeqId = c.getSequenceId();
-            CellUtil.setSequenceId(c, 0);
+            PrivateCellUtil.setSequenceId(c, 0);
           } else {
             lastCleanCell = null;
             lastCleanCellSeqId = 0;
@@ -453,7 +427,7 @@ public abstract class Compactor<T extends CellSink> {
               // HBASE-16931, set back sequence id to avoid affecting scan order unexpectedly.
               // ShipperListener will do a clone of the last cells it refer, so need to set back
               // sequence id before ShipperListener.beforeShipped
-              CellUtil.setSequenceId(lastCleanCell, lastCleanCellSeqId);
+              PrivateCellUtil.setSequenceId(lastCleanCell, lastCleanCellSeqId);
             }
             // Clone the cells that are in the writer so that they are freed of references,
             // if they are holding any.
@@ -470,7 +444,7 @@ public abstract class Compactor<T extends CellSink> {
         }
         if (lastCleanCell != null) {
           // HBASE-16931, set back sequence id to avoid affecting scan order unexpectedly
-          CellUtil.setSequenceId(lastCleanCell, lastCleanCellSeqId);
+          PrivateCellUtil.setSequenceId(lastCleanCell, lastCleanCellSeqId);
         }
         // Log the progress of long running compactions every minute if
         // logging at DEBUG level
@@ -508,12 +482,10 @@ public abstract class Compactor<T extends CellSink> {
    * @param earliestPutTs Earliest put across all files.
    * @return A compaction scanner.
    */
-  protected InternalScanner createScanner(Store store, List<StoreFileScanner> scanners,
-      ScanType scanType, long smallestReadPoint, long earliestPutTs) throws IOException {
-    Scan scan = new Scan();
-    scan.setMaxVersions(store.getFamily().getMaxVersions());
-    return new StoreScanner(store, store.getScanInfo(), scan, scanners,
-        scanType, smallestReadPoint, earliestPutTs);
+  protected InternalScanner createScanner(HStore store, ScanInfo scanInfo,
+      List<StoreFileScanner> scanners, ScanType scanType, long smallestReadPoint,
+      long earliestPutTs) throws IOException {
+    return new StoreScanner(store, scanInfo, scanners, scanType, smallestReadPoint, earliestPutTs);
   }
 
   /**
@@ -525,12 +497,10 @@ public abstract class Compactor<T extends CellSink> {
    * @param dropDeletesToRow Drop deletes ending with this row, exclusive. Can be null.
    * @return A compaction scanner.
    */
-  protected InternalScanner createScanner(Store store, List<StoreFileScanner> scanners,
-     long smallestReadPoint, long earliestPutTs, byte[] dropDeletesFromRow,
-     byte[] dropDeletesToRow) throws IOException {
-    Scan scan = new Scan();
-    scan.setMaxVersions(store.getFamily().getMaxVersions());
-    return new StoreScanner(store, store.getScanInfo(), scan, scanners, smallestReadPoint,
-        earliestPutTs, dropDeletesFromRow, dropDeletesToRow);
+  protected InternalScanner createScanner(HStore store, ScanInfo scanInfo,
+      List<StoreFileScanner> scanners, long smallestReadPoint, long earliestPutTs,
+      byte[] dropDeletesFromRow, byte[] dropDeletesToRow) throws IOException {
+    return new StoreScanner(store, scanInfo, scanners, smallestReadPoint, earliestPutTs,
+        dropDeletesFromRow, dropDeletesToRow);
   }
 }

@@ -21,20 +21,21 @@ package org.apache.hadoop.hbase.master;
 import java.io.IOException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.hadoop.hbase.zookeeper.MasterAddressTracker;
+import org.apache.hadoop.hbase.zookeeper.ZKUtil;
+import org.apache.hadoop.hbase.zookeeper.ZKWatcher;
+import org.apache.hadoop.hbase.zookeeper.ZNodePaths;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.hbase.Server;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.ZNodeClearer;
 import org.apache.hadoop.hbase.exceptions.DeserializationException;
 import org.apache.hadoop.hbase.monitoring.MonitoredTask;
 import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.zookeeper.MasterAddressTracker;
-import org.apache.hadoop.hbase.zookeeper.ZKUtil;
-import org.apache.hadoop.hbase.zookeeper.ZooKeeperListener;
-import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher;
+import org.apache.hadoop.hbase.zookeeper.ZKListener;
 import org.apache.zookeeper.KeeperException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Handles everything on master-side related to master election.
@@ -50,8 +51,8 @@ import org.apache.zookeeper.KeeperException;
  * the active master of the cluster.
  */
 @InterfaceAudience.Private
-public class ActiveMasterManager extends ZooKeeperListener {
-  private static final Log LOG = LogFactory.getLog(ActiveMasterManager.class);
+public class ActiveMasterManager extends ZKListener {
+  private static final Logger LOG = LoggerFactory.getLogger(ActiveMasterManager.class);
 
   final AtomicBoolean clusterHasActiveMaster = new AtomicBoolean(false);
   final AtomicBoolean clusterShutDown = new AtomicBoolean(false);
@@ -65,7 +66,7 @@ public class ActiveMasterManager extends ZooKeeperListener {
    * @param sn ServerName
    * @param master In an instance of a Master.
    */
-  ActiveMasterManager(ZooKeeperWatcher watcher, ServerName sn, Server master) {
+  ActiveMasterManager(ZKWatcher watcher, ServerName sn, Server master) {
     super(watcher);
     watcher.registerListener(this);
     this.sn = sn;
@@ -155,7 +156,7 @@ public class ActiveMasterManager extends ZooKeeperListener {
    */
   boolean blockUntilBecomingActiveMaster(
       int checkInterval, MonitoredTask startupStatus) {
-    String backupZNode = ZKUtil.joinZNode(
+    String backupZNode = ZNodePaths.joinZNode(
       this.watcher.znodePaths.backupMasterAddressesZNode, this.sn.toString());
     while (!(master.isAborted() || master.isStopped())) {
       startupStatus.setStatus("Trying to register in ZK as active master");
@@ -200,7 +201,7 @@ public class ActiveMasterManager extends ZooKeeperListener {
             // Hopefully next time around we won't fail the parse.  Dangerous.
             continue;
           }
-          if (ServerName.isSameHostnameAndPort(currentMaster, this.sn)) {
+          if (ServerName.isSameAddress(currentMaster, this.sn)) {
             msg = ("Current master has this master's address, " +
               currentMaster + "; master was restarted? Deleting node.");
             // Hurry along the expiration of the znode.

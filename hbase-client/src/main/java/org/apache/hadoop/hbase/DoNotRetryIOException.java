@@ -18,15 +18,13 @@
  */
 package org.apache.hadoop.hbase;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * Subclass if exception is not meant to be retried: e.g.
  * {@link org.apache.hadoop.hbase.UnknownScannerException}
  */
 @InterfaceAudience.Public
-@InterfaceStability.Stable
 public class DoNotRetryIOException extends HBaseIOException {
   // TODO: This would be more useful as a marker interface than as a class.
   private static final long serialVersionUID = 1197446454511704139L;

@@ -32,6 +32,7 @@ import org.junit.experimental.categories.Category;
 @Category({MetricsTests.class, SmallTests.class})
 public class TestMetricsRegionSourceImpl {
 
+  @SuppressWarnings("SelfComparison")
   @Test
   public void testCompareToHashCodeEquals() throws Exception {
     MetricsRegionServerSourceFactory fact = CompatibilitySingletonFactory.getInstance(MetricsRegionServerSourceFactory.class);
@@ -92,7 +93,7 @@ public class TestMetricsRegionSourceImpl {
     }
 
     @Override
-    public long getMemstoreSize() {
+    public long getMemStoreSize() {
       return 0;
     }
 
@@ -171,6 +172,26 @@ public class TestMetricsRegionSourceImpl {
      */
     @Override
     public int getReplicaId() {
+      return 0;
+    }
+
+    @Override
+    public long getNumCompactionsQueued() {
+      return 0;
+    }
+
+    @Override
+    public long getNumFlushesQueued() {
+      return 0;
+    }
+
+    @Override
+    public long getMaxCompactionQueueSize() {
+      return 0;
+    }
+
+    @Override
+    public long getMaxFlushQueueSize() {
       return 0;
     }
   }

@@ -24,40 +24,39 @@ import java.security.PrivilegedExceptionAction;
 
 import com.google.protobuf.ByteString;
 import com.google.protobuf.ServiceException;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+
+import org.apache.hadoop.hbase.zookeeper.ZKWatcher;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.TableName;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
 import org.apache.hadoop.hbase.client.Connection;
 import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.ipc.CoprocessorRpcChannel;
 import org.apache.hadoop.hbase.protobuf.generated.AuthenticationProtos;
 import org.apache.hadoop.hbase.security.User;
 import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.util.ByteStringer;
 import org.apache.hadoop.hbase.zookeeper.ZKClusterId;
-import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher;
 import org.apache.hadoop.io.Text;
 import org.apache.hadoop.mapred.JobConf;
 import org.apache.hadoop.mapreduce.Job;
 import org.apache.hadoop.security.token.Token;
 import org.apache.zookeeper.KeeperException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Utility methods for obtaining authentication tokens.
  */
 @InterfaceAudience.Public
-@InterfaceStability.Evolving
 public class TokenUtil {
   // This class is referenced indirectly by User out in common; instances are created by reflection
-  private static final Log LOG = LogFactory.getLog(TokenUtil.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TokenUtil.class);
 
   /**
    * Obtain and return an authentication token for the current user.
    * @param conn The HBase cluster connection
+   * @throws IOException if a remote error or serialization problem occurs.
    * @return the authentication token instance
    */
   public static Token<AuthenticationTokenIdentifier> obtainToken(
@@ -73,14 +72,12 @@ public class TokenUtil {
 
       return toToken(response.getToken());
     } catch (ServiceException se) {
-      ProtobufUtil.handleRemoteException(se);
+      throw ProtobufUtil.handleRemoteException(se);
     } finally {
       if (meta != null) {
         meta.close();
       }
     }
-    // dummy return for ServiceException block
-    return null;
   }
 
 
@@ -92,8 +89,8 @@ public class TokenUtil {
    */
   public static AuthenticationProtos.Token toToken(Token<AuthenticationTokenIdentifier> token) {
     AuthenticationProtos.Token.Builder builder = AuthenticationProtos.Token.newBuilder();
-    builder.setIdentifier(ByteStringer.wrap(token.getIdentifier()));
-    builder.setPassword(ByteStringer.wrap(token.getPassword()));
+    builder.setIdentifier(ByteString.copyFrom(token.getIdentifier()));
+    builder.setPassword(ByteString.copyFrom(token.getPassword()));
     if (token.getService() != null) {
       builder.setService(ByteString.copyFromUtf8(token.getService().toString()));
     }
@@ -293,7 +290,7 @@ public class TokenUtil {
    */
   private static Token<AuthenticationTokenIdentifier> getAuthToken(Configuration conf, User user)
       throws IOException, InterruptedException {
-    ZooKeeperWatcher zkw = new ZooKeeperWatcher(conf, "TokenUtil-getAuthToken", null);
+    ZKWatcher zkw = new ZKWatcher(conf, "TokenUtil-getAuthToken", null);
     try {
       String clusterId = ZKClusterId.readClusterIdZNode(zkw);
       if (clusterId == null) {
@@ -314,7 +311,7 @@ public class TokenUtil {
    * @return the Token instance
    */
   public static Token<AuthenticationTokenIdentifier> toToken(AuthenticationProtos.Token proto) {
-    return new Token<AuthenticationTokenIdentifier>(
+    return new Token<>(
         proto.hasIdentifier() ? proto.getIdentifier().toByteArray() : null,
         proto.hasPassword() ? proto.getPassword().toByteArray() : null,
         AuthenticationTokenIdentifier.AUTH_TOKEN_TYPE,

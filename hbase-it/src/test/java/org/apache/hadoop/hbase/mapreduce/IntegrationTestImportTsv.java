@@ -29,33 +29,35 @@ import java.util.Iterator;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
-import java.util.UUID;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.conf.Configured;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.conf.Configured;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellComparator;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.IntegrationTestingUtility;
-import org.apache.hadoop.hbase.testclassification.IntegrationTests;
 import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.KeyValue.Type;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.client.Table;
+import org.apache.hadoop.hbase.testclassification.IntegrationTests;
+import org.apache.hadoop.hbase.tool.LoadIncrementalHFiles;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.mapreduce.lib.partition.TotalOrderPartitioner;
 import org.apache.hadoop.util.Tool;
 import org.apache.hadoop.util.ToolRunner;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.junit.rules.TestName;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Validate ImportTsv + LoadIncrementalHFiles on a distributed cluster.
@@ -64,7 +66,7 @@ import org.junit.experimental.categories.Category;
 public class IntegrationTestImportTsv extends Configured implements Tool {
 
   private static final String NAME = IntegrationTestImportTsv.class.getSimpleName();
-  private static final Log LOG = LogFactory.getLog(IntegrationTestImportTsv.class);
+  private static final Logger LOG = LoggerFactory.getLogger(IntegrationTestImportTsv.class);
 
   protected static final String simple_tsv =
       "row1\t1\tc1\tc2\n" +
@@ -78,8 +80,11 @@ public class IntegrationTestImportTsv extends Configured implements Tool {
       "row9\t1\tc1\tc2\n" +
       "row10\t1\tc1\tc2\n";
 
+  @Rule
+  public TestName name = new TestName();
+
   protected static final Set<KeyValue> simple_expected =
-      new TreeSet<KeyValue>(CellComparator.COMPARATOR) {
+      new TreeSet<KeyValue>(CellComparator.getInstance()) {
     private static final long serialVersionUID = 1L;
     {
       byte[] family = Bytes.toBytes("d");
@@ -155,10 +160,8 @@ public class IntegrationTestImportTsv extends Configured implements Tool {
             "Ran out of expected values prematurely!",
             expectedIt.hasNext());
           KeyValue expected = expectedIt.next();
-          assertTrue(
-            format("Scan produced surprising result. expected: <%s>, actual: %s",
-              expected, actual),
-            CellComparator.COMPARATOR.compare(expected, actual) == 0);
+          assertEquals("Scan produced surprising result", 0,
+            CellComparator.getInstance().compare(expected, actual));
         }
       }
       assertFalse("Did not consume all expected values.", expectedIt.hasNext());
@@ -182,14 +185,16 @@ public class IntegrationTestImportTsv extends Configured implements Tool {
 
   @Test
   public void testGenerateAndLoad() throws Exception {
+    generateAndLoad(TableName.valueOf(name.getMethodName()));
+  }
+
+  void generateAndLoad(final TableName table) throws Exception {
     LOG.info("Running test testGenerateAndLoad.");
-    TableName table = TableName.valueOf(NAME + "-" + UUID.randomUUID());
     String cf = "d";
     Path hfiles = new Path(
         util.getDataTestDirOnTestFS(table.getNameAsString()), "hfiles");
 
-
-    Map<String, String> args = new HashMap<String, String>();
+    Map<String, String> args = new HashMap<>();
     args.put(ImportTsv.BULK_OUTPUT_CONF_KEY, hfiles.toString());
     args.put(ImportTsv.COLUMNS_CONF_KEY,
         format("HBASE_ROW_KEY,HBASE_TS_KEY,%s:c1,%s:c2", cf, cf));
@@ -223,7 +228,11 @@ public class IntegrationTestImportTsv extends Configured implements Tool {
     // adding more test methods? Don't forget to add them here... or consider doing what
     // IntegrationTestsDriver does.
     provisionCluster();
-    testGenerateAndLoad();
+    TableName tableName = TableName.valueOf("IntegrationTestImportTsv");
+    if (util.getAdmin().tableExists(tableName)) {
+      util.deleteTable(tableName);
+    }
+    generateAndLoad(tableName);
     releaseCluster();
 
     return 0;

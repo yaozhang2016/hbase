@@ -17,20 +17,21 @@
  */
 package org.apache.hadoop.hbase.quotas;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 import org.apache.hadoop.hbase.TableName;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
+
 import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProtos.SetQuotaRequest;
 import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.QuotaProtos;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.QuotaProtos.Quotas;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.QuotaProtos.SpaceQuota;
 
 @InterfaceAudience.Public
-@InterfaceStability.Evolving
 public class QuotaSettingsFactory {
   static class QuotaGlobalsSettingsBypass extends QuotaSettings {
     private final boolean bypassGlobals;
@@ -54,6 +55,24 @@ public class QuotaSettingsFactory {
     @Override
     public String toString() {
       return "GLOBAL_BYPASS => " + bypassGlobals;
+    }
+
+    protected boolean getBypass() {
+      return bypassGlobals;
+    }
+
+    @Override
+    protected QuotaGlobalsSettingsBypass merge(QuotaSettings newSettings) throws IOException {
+      if (newSettings instanceof QuotaGlobalsSettingsBypass) {
+        QuotaGlobalsSettingsBypass other = (QuotaGlobalsSettingsBypass) newSettings;
+
+        validateQuotaTarget(other);
+
+        if (getBypass() != other.getBypass()) {
+          return other;
+        }
+      }
+      return this;
     }
   }
 
@@ -84,19 +103,22 @@ public class QuotaSettingsFactory {
 
   private static List<QuotaSettings> fromQuotas(final String userName, final TableName tableName,
       final String namespace, final Quotas quotas) {
-    List<QuotaSettings> settings = new ArrayList<QuotaSettings>();
+    List<QuotaSettings> settings = new ArrayList<>();
     if (quotas.hasThrottle()) {
       settings.addAll(fromThrottle(userName, tableName, namespace, quotas.getThrottle()));
     }
     if (quotas.getBypassGlobals() == true) {
       settings.add(new QuotaGlobalsSettingsBypass(userName, tableName, namespace, true));
     }
+    if (quotas.hasSpace()) {
+      settings.add(fromSpace(tableName, namespace, quotas.getSpace()));
+    }
     return settings;
   }
 
-  private static List<QuotaSettings> fromThrottle(final String userName, final TableName tableName,
+  protected static List<QuotaSettings> fromThrottle(final String userName, final TableName tableName,
       final String namespace, final QuotaProtos.Throttle throttle) {
-    List<QuotaSettings> settings = new ArrayList<QuotaSettings>();
+    List<QuotaSettings> settings = new ArrayList<>();
     if (throttle.hasReqNum()) {
       settings.add(ThrottleSettings.fromTimedQuota(userName, tableName, namespace,
           ThrottleType.REQUEST_NUMBER, throttle.getReqNum()));
@@ -122,6 +144,28 @@ public class QuotaSettingsFactory {
           ThrottleType.READ_SIZE, throttle.getReadSize()));
     }
     return settings;
+  }
+
+  static QuotaSettings fromSpace(TableName table, String namespace, SpaceQuota protoQuota) {
+    if (protoQuota == null) {
+      return null;
+    }
+    if ((table == null && namespace == null) || (table != null && namespace != null)) {
+      throw new IllegalArgumentException(
+          "Can only construct SpaceLimitSettings for a table or namespace.");
+    }
+    if (table != null) {
+      if (protoQuota.getRemove()) {
+        return new SpaceLimitSettings(table);
+      }
+      return SpaceLimitSettings.fromSpaceQuota(table, protoQuota);
+    } else {
+      if (protoQuota.getRemove()) {
+        return new SpaceLimitSettings(namespace);
+      }
+      // namespace must be non-null
+      return SpaceLimitSettings.fromSpaceQuota(namespace, protoQuota);
+    }
   }
 
   /* ==========================================================================
@@ -279,5 +323,61 @@ public class QuotaSettingsFactory {
    */
   public static QuotaSettings bypassGlobals(final String userName, final boolean bypassGlobals) {
     return new QuotaGlobalsSettingsBypass(userName, null, null, bypassGlobals);
+  }
+
+  /* ==========================================================================
+   *  FileSystem Space Settings
+   */
+
+  /**
+   * Creates a {@link QuotaSettings} object to limit the FileSystem space usage for the given table
+   * to the given size in bytes. When the space usage is exceeded by the table, the provided
+   * {@link SpaceViolationPolicy} is enacted on the table.
+   *
+   * @param tableName The name of the table on which the quota should be applied.
+   * @param sizeLimit The limit of a table's size in bytes.
+   * @param violationPolicy The action to take when the quota is exceeded.
+   * @return An {@link QuotaSettings} object.
+   */
+  public static QuotaSettings limitTableSpace(
+      final TableName tableName, long sizeLimit, final SpaceViolationPolicy violationPolicy) {
+    return new SpaceLimitSettings(tableName, sizeLimit, violationPolicy);
+  }
+
+  /**
+   * Creates a {@link QuotaSettings} object to remove the FileSystem space quota for the given
+   * table.
+   *
+   * @param tableName The name of the table to remove the quota for.
+   * @return A {@link QuotaSettings} object.
+   */
+  public static QuotaSettings removeTableSpaceLimit(TableName tableName) {
+    return new SpaceLimitSettings(tableName);
+  }
+
+  /**
+   * Creates a {@link QuotaSettings} object to limit the FileSystem space usage for the given
+   * namespace to the given size in bytes. When the space usage is exceeded by all tables in the
+   * namespace, the provided {@link SpaceViolationPolicy} is enacted on all tables in the namespace.
+   *
+   * @param namespace The namespace on which the quota should be applied.
+   * @param sizeLimit The limit of the namespace's size in bytes.
+   * @param violationPolicy The action to take when the the quota is exceeded.
+   * @return An {@link QuotaSettings} object.
+   */
+  public static QuotaSettings limitNamespaceSpace(
+      final String namespace, long sizeLimit, final SpaceViolationPolicy violationPolicy) {
+    return new SpaceLimitSettings(namespace, sizeLimit, violationPolicy);
+  }
+
+  /**
+   * Creates a {@link QuotaSettings} object to remove the FileSystem space quota for the given
+   * namespace.
+   *
+   * @param namespace The namespace to remove the quota on.
+   * @return A {@link QuotaSettings} object.
+   */
+  public static QuotaSettings removeNamespaceSpaceLimit(String namespace) {
+    return new SpaceLimitSettings(namespace);
   }
 }

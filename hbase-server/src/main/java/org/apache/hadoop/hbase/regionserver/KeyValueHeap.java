@@ -19,16 +19,19 @@
 
 package org.apache.hadoop.hbase.regionserver;
 
+import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
+
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.HashSet;
 import java.util.List;
 import java.util.PriorityQueue;
-import java.util.Set;
 
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellComparator;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.hbase.regionserver.ScannerContext.NextState;
 
 /**
@@ -46,11 +49,12 @@ import org.apache.hadoop.hbase.regionserver.ScannerContext.NextState;
 @InterfaceAudience.Private
 public class KeyValueHeap extends NonReversedNonLazyKeyValueScanner
     implements KeyValueScanner, InternalScanner {
+  private static final Logger LOG = LoggerFactory.getLogger(KeyValueHeap.class);
   protected PriorityQueue<KeyValueScanner> heap = null;
   // Holds the scanners when a ever a eager close() happens.  All such eagerly closed
   // scans are collected and when the final scanner.close() happens will perform the
   // actual close.
-  protected Set<KeyValueScanner> scannersForDelayedClose = new HashSet<KeyValueScanner>();
+  protected List<KeyValueScanner> scannersForDelayedClose = null;
 
   /**
    * The current sub-scanner, i.e. the one that contains the next key/value
@@ -86,9 +90,9 @@ public class KeyValueHeap extends NonReversedNonLazyKeyValueScanner
   KeyValueHeap(List<? extends KeyValueScanner> scanners,
       KVScannerComparator comparator) throws IOException {
     this.comparator = comparator;
+    this.scannersForDelayedClose = new ArrayList<>(scanners.size());
     if (!scanners.isEmpty()) {
-      this.heap = new PriorityQueue<KeyValueScanner>(scanners.size(),
-          this.comparator);
+      this.heap = new PriorityQueue<>(scanners.size(), this.comparator);
       for (KeyValueScanner scanner : scanners) {
         if (scanner.peek() != null) {
           this.heap.add(scanner);
@@ -136,14 +140,8 @@ public class KeyValueHeap extends NonReversedNonLazyKeyValueScanner
    * <p>
    * This can ONLY be called when you are using Scanners that implement InternalScanner as well as
    * KeyValueScanner (a {@link StoreScanner}).
-   * @param result
    * @return true if more rows exist after this one, false if scanner is done
    */
-  @Override
-  public boolean next(List<Cell> result) throws IOException {
-    return next(result, NoLimitScannerContext.getInstance());
-  }
-
   @Override
   public boolean next(List<Cell> result, ScannerContext scannerContext) throws IOException {
     if (this.current == null) {
@@ -292,38 +290,51 @@ public class KeyValueHeap extends NonReversedNonLazyKeyValueScanner
     }
 
     KeyValueScanner scanner = current;
-    while (scanner != null) {
-      Cell topKey = scanner.peek();
-      if (comparator.getComparator().compare(seekKey, topKey) <= 0) {
-        // Top KeyValue is at-or-after Seek KeyValue. We only know that all
-        // scanners are at or after seekKey (because fake keys of
-        // scanners where a lazy-seek operation has been done are not greater
-        // than their real next keys) but we still need to enforce our
-        // invariant that the top scanner has done a real seek. This way
-        // StoreScanner and RegionScanner do not have to worry about fake keys.
-        heap.add(scanner);
-        current = pollRealKV();
-        return current != null;
-      }
+    try {
+      while (scanner != null) {
+        Cell topKey = scanner.peek();
+        if (comparator.getComparator().compare(seekKey, topKey) <= 0) {
+          // Top KeyValue is at-or-after Seek KeyValue. We only know that all
+          // scanners are at or after seekKey (because fake keys of
+          // scanners where a lazy-seek operation has been done are not greater
+          // than their real next keys) but we still need to enforce our
+          // invariant that the top scanner has done a real seek. This way
+          // StoreScanner and RegionScanner do not have to worry about fake
+          // keys.
+          heap.add(scanner);
+          scanner = null;
+          current = pollRealKV();
+          return current != null;
+        }
 
-      boolean seekResult;
-      if (isLazy && heap.size() > 0) {
-        // If there is only one scanner left, we don't do lazy seek.
-        seekResult = scanner.requestSeek(seekKey, forward, useBloom);
-      } else {
-        seekResult = NonLazyKeyValueScanner.doRealSeek(
-            scanner, seekKey, forward);
-      }
+        boolean seekResult;
+        if (isLazy && heap.size() > 0) {
+          // If there is only one scanner left, we don't do lazy seek.
+          seekResult = scanner.requestSeek(seekKey, forward, useBloom);
+        } else {
+          seekResult = NonLazyKeyValueScanner.doRealSeek(scanner, seekKey,
+              forward);
+        }
 
-      if (!seekResult) {
-        this.scannersForDelayedClose.add(scanner);
-      } else {
-        heap.add(scanner);
+        if (!seekResult) {
+          this.scannersForDelayedClose.add(scanner);
+        } else {
+          heap.add(scanner);
+        }
+        scanner = heap.poll();
+        if (scanner == null) {
+          current = null;
+        }
       }
-      scanner = heap.poll();
-      if (scanner == null) {
-        current = null;
+    } catch (Exception e) {
+      if (scanner != null) {
+        try {
+          scanner.close();
+        } catch (Exception ce) {
+          LOG.warn("close KeyValueScanner error", ce);
+        }
       }
+      throw e;
     }
 
     // Heap is returning empty, scanner is done
@@ -407,6 +418,7 @@ public class KeyValueHeap extends NonReversedNonLazyKeyValueScanner
     return 0;
   }
 
+  @VisibleForTesting
   KeyValueScanner getCurrentForTesting() {
     return current;
   }

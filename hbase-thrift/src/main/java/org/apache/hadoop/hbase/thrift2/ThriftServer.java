@@ -23,18 +23,17 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.UnknownHostException;
 import java.security.PrivilegedAction;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
 import javax.security.auth.callback.Callback;
 import javax.security.auth.callback.UnsupportedCallbackException;
 import javax.security.sasl.AuthorizeCallback;
-import javax.security.sasl.Sasl;
 import javax.security.sasl.SaslServer;
 
 import org.apache.commons.cli.CommandLine;
@@ -45,9 +44,6 @@ import org.apache.commons.cli.OptionGroup;
 import org.apache.commons.cli.Options;
 import org.apache.commons.cli.ParseException;
 import org.apache.commons.cli.PosixParser;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.conf.Configured;
 import org.apache.hadoop.hbase.HBaseConfiguration;
@@ -58,14 +54,14 @@ import org.apache.hadoop.hbase.security.SaslUtil;
 import org.apache.hadoop.hbase.security.SecurityUtil;
 import org.apache.hadoop.hbase.security.UserProvider;
 import org.apache.hadoop.hbase.thrift.CallQueue;
-import org.apache.hadoop.hbase.thrift.CallQueue.Call;
+import org.apache.hadoop.hbase.thrift.THBaseThreadPoolExecutor;
 import org.apache.hadoop.hbase.thrift.ThriftMetrics;
 import org.apache.hadoop.hbase.thrift2.generated.THBaseService;
 import org.apache.hadoop.hbase.util.DNS;
 import org.apache.hadoop.hbase.util.JvmPauseMonitor;
 import org.apache.hadoop.hbase.util.Strings;
-import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.security.SaslRpcServer.SaslGssCallbackHandler;
+import org.apache.hadoop.security.UserGroupInformation;
 import org.apache.hadoop.util.Tool;
 import org.apache.hadoop.util.ToolRunner;
 import org.apache.thrift.TException;
@@ -78,6 +74,7 @@ import org.apache.thrift.server.THsHaServer;
 import org.apache.thrift.server.TNonblockingServer;
 import org.apache.thrift.server.TServer;
 import org.apache.thrift.server.TThreadPoolServer;
+import org.apache.thrift.server.TThreadedSelectorServer;
 import org.apache.thrift.transport.TFramedTransport;
 import org.apache.thrift.transport.TNonblockingServerSocket;
 import org.apache.thrift.transport.TNonblockingServerTransport;
@@ -86,8 +83,10 @@ import org.apache.thrift.transport.TServerSocket;
 import org.apache.thrift.transport.TServerTransport;
 import org.apache.thrift.transport.TTransportException;
 import org.apache.thrift.transport.TTransportFactory;
-
-import com.google.common.util.concurrent.ThreadFactoryBuilder;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.apache.hbase.thirdparty.com.google.common.util.concurrent.ThreadFactoryBuilder;
 
 /**
  * ThriftServer - this class starts up a Thrift server which implements the HBase API specified in the
@@ -96,7 +95,7 @@ import com.google.common.util.concurrent.ThreadFactoryBuilder;
 @InterfaceAudience.LimitedPrivate(HBaseInterfaceAudience.TOOLS)
 @SuppressWarnings({ "rawtypes", "unchecked" })
 public class ThriftServer extends Configured implements Tool {
-  private static final Log log = LogFactory.getLog(ThriftServer.class);
+  private static final Logger log = LoggerFactory.getLogger(ThriftServer.class);
 
   /**
    * Thrift quality of protection configuration key. Valid values can be:
@@ -130,8 +129,8 @@ public class ThriftServer extends Configured implements Tool {
   private static void printUsage() {
     HelpFormatter formatter = new HelpFormatter();
     formatter.printHelp("Thrift", null, getOptions(),
-        "To start the Thrift server run 'bin/hbase-daemon.sh start thrift2'\n" +
-            "To shutdown the thrift server run 'bin/hbase-daemon.sh stop thrift2' or" +
+        "To start the Thrift server run 'hbase-daemon.sh start thrift2'\n" +
+            "To shutdown the thrift server run 'hbase-daemon.sh stop thrift2' or" +
             " send a kill signal to the thrift server pid",
         true);
   }
@@ -144,6 +143,7 @@ public class ThriftServer extends Configured implements Tool {
     options.addOption("f", "framed", false, "Use framed transport");
     options.addOption("c", "compact", false, "Use the compact protocol");
     options.addOption("w", "workers", true, "How many worker threads to use.");
+    options.addOption("s", "selectors", true, "How many selector threads to use.");
     options.addOption("q", "callQueueSize", true,
       "Max size of request queue (unbounded by default)");
     options.addOption("h", "help", false, "Print help information");
@@ -152,10 +152,13 @@ public class ThriftServer extends Configured implements Tool {
       "Amount of time in milliseconds before a server thread will timeout " +
       "waiting for client to send data on a connected socket. Currently, " +
       "only applies to TBoundedThreadPoolServer");
+    options.addOption("ro", "readonly", false,
+      "Respond only to read method requests [default: false]");
     OptionGroup servers = new OptionGroup();
     servers.addOption(
         new Option("nonblocking", false, "Use the TNonblockingServer. This implies the framed transport."));
     servers.addOption(new Option("hsha", false, "Use the THsHaServer. This implies the framed transport."));
+    servers.addOption(new Option("selector", false, "Use the TThreadedSelectorServer. This implies the framed transport."));
     servers.addOption(new Option("threadpool", false, "Use the TThreadPoolServer. This is the default."));
     options.addOptionGroup(servers);
     return options;
@@ -190,8 +193,7 @@ public class ThriftServer extends Configured implements Tool {
     } else if (qop == null) {
       return new TTransportFactory();
     } else {
-      Map<String, String> saslProperties = new HashMap<String, String>();
-      saslProperties.put(Sasl.QOP, qop.getSaslQop());
+      Map<String, String> saslProperties = SaslUtil.initSaslProperties(qop.name());
       TSaslServerTransport.Factory saslFactory = new TSaslServerTransport.Factory();
       saslFactory.addServerDefinition("GSSAPI", name, host, saslProperties,
         new SaslGssCallbackHandler() {
@@ -273,20 +275,44 @@ public class ThriftServer extends Configured implements Tool {
     return new THsHaServer(serverArgs);
   }
 
+  private static TServer getTThreadedSelectorServer(TProtocolFactory protocolFactory,
+      TProcessor processor, TTransportFactory transportFactory,
+      int workerThreads, int selectorThreads, int maxCallQueueSize,
+      InetSocketAddress inetSocketAddress, ThriftMetrics metrics)
+      throws TTransportException {
+    TNonblockingServerTransport serverTransport = new TNonblockingServerSocket(inetSocketAddress);
+    log.info("starting HBase ThreadedSelector Thrift server on " + inetSocketAddress.toString());
+    TThreadedSelectorServer.Args serverArgs = new TThreadedSelectorServer.Args(serverTransport);
+    if (workerThreads > 0) {
+        serverArgs.workerThreads(workerThreads);
+    }
+    if (selectorThreads > 0) {
+        serverArgs.selectorThreads(selectorThreads);
+    }
+
+    ExecutorService executorService = createExecutor(
+        workerThreads, maxCallQueueSize, metrics);
+    serverArgs.executorService(executorService);
+    serverArgs.processor(processor);
+    serverArgs.transportFactory(transportFactory);
+    serverArgs.protocolFactory(protocolFactory);
+    return new TThreadedSelectorServer(serverArgs);
+  }
+
   private static ExecutorService createExecutor(
       int workerThreads, int maxCallQueueSize, ThriftMetrics metrics) {
     CallQueue callQueue;
     if (maxCallQueueSize > 0) {
-      callQueue = new CallQueue(new LinkedBlockingQueue<Call>(maxCallQueueSize), metrics);
+      callQueue = new CallQueue(new LinkedBlockingQueue<>(maxCallQueueSize), metrics);
     } else {
-      callQueue = new CallQueue(new LinkedBlockingQueue<Call>(), metrics);
+      callQueue = new CallQueue(new LinkedBlockingQueue<>(), metrics);
     }
 
     ThreadFactoryBuilder tfb = new ThreadFactoryBuilder();
     tfb.setDaemon(true);
     tfb.setNameFormat("thrift2-worker-%d");
-    ThreadPoolExecutor pool = new ThreadPoolExecutor(workerThreads, workerThreads,
-            Long.MAX_VALUE, TimeUnit.SECONDS, callQueue, tfb.build());
+    ThreadPoolExecutor pool = new THBaseThreadPoolExecutor(workerThreads, workerThreads,
+            Long.MAX_VALUE, TimeUnit.SECONDS, callQueue, tfb.build(), metrics);
     pool.prestartAllCoreThreads();
     return pool;
   }
@@ -297,7 +323,8 @@ public class ThriftServer extends Configured implements Tool {
                                               int workerThreads,
                                               InetSocketAddress inetSocketAddress,
                                               int backlog,
-                                              int clientTimeout)
+                                              int clientTimeout,
+                                              ThriftMetrics metrics)
       throws TTransportException {
     TServerTransport serverTransport = new TServerSocket(
                                            new TServerSocket.ServerSocketTransportArgs().
@@ -311,6 +338,11 @@ public class ThriftServer extends Configured implements Tool {
     if (workerThreads > 0) {
       serverArgs.maxWorkerThreads(workerThreads);
     }
+    ThreadPoolExecutor executor = new THBaseThreadPoolExecutor(serverArgs.minWorkerThreads,
+        serverArgs.maxWorkerThreads, serverArgs.stopTimeoutVal, TimeUnit.SECONDS,
+        new SynchronousQueue<>(), metrics);
+    serverArgs.executorService(executor);
+
     return new TThreadPoolServer(serverArgs);
   }
 
@@ -350,6 +382,7 @@ public class ThriftServer extends Configured implements Tool {
     Options options = getOptions();
     CommandLine cmd = parseArguments(conf, options, args);
     int workerThreads = 0;
+    int selectorThreads = 0;
     int maxCallQueueSize = -1; // use unbounded queue by default
 
     /**
@@ -369,6 +402,14 @@ public class ThriftServer extends Configured implements Tool {
       conf.set("hbase.thrift.info.bindAddress", bindAddress);
     } else {
       bindAddress = conf.get("hbase.thrift.info.bindAddress");
+    }
+
+    // check if server should only process read requests, if so override the conf
+    if (cmd.hasOption("readonly")) {
+      conf.setBoolean("hbase.thrift.readonly", true);
+      if (log.isDebugEnabled()) {
+        log.debug("readonly set to true");
+      }
     }
 
     // Get read timeout
@@ -432,6 +473,7 @@ public class ThriftServer extends Configured implements Tool {
 
     boolean nonblocking = cmd.hasOption("nonblocking");
     boolean hsha = cmd.hasOption("hsha");
+    boolean selector = cmd.hasOption("selector");
 
     ThriftMetrics metrics = new ThriftMetrics(conf, ThriftMetrics.ThriftServerType.TWO);
     final JvmPauseMonitor pauseMonitor = new JvmPauseMonitor(conf, metrics.getSource());
@@ -441,6 +483,8 @@ public class ThriftServer extends Configured implements Tool {
       implType = "nonblocking";
     } else if (hsha) {
       implType = "hsha";
+    } else if (selector) {
+      implType = "selector";
     }
 
     conf.set("hbase.regionserver.thrift.server.type", implType);
@@ -484,7 +528,9 @@ public class ThriftServer extends Configured implements Tool {
     if (cmd.hasOption("w")) {
       workerThreads = Integer.parseInt(cmd.getOptionValue("w"));
     }
-
+    if (cmd.hasOption("s")) {
+      selectorThreads = Integer.parseInt(cmd.getOptionValue("s"));
+    }
     if (cmd.hasOption("q")) {
       maxCallQueueSize = Integer.parseInt(cmd.getOptionValue("q"));
     }
@@ -525,6 +571,15 @@ public class ThriftServer extends Configured implements Tool {
           maxCallQueueSize,
           inetSocketAddress,
           metrics);
+    } else if (selector) {
+      server = getTThreadedSelectorServer(protocolFactory,
+          processor,
+          transportFactory,
+          workerThreads,
+          selectorThreads,
+          maxCallQueueSize,
+          inetSocketAddress,
+          metrics);
     } else {
       server = getTThreadPoolServer(protocolFactory,
           processor,
@@ -532,7 +587,8 @@ public class ThriftServer extends Configured implements Tool {
           workerThreads,
           inetSocketAddress,
           backlog,
-          readTimeout);
+          readTimeout,
+          metrics);
     }
 
     final TServer tserver = server;

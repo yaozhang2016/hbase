@@ -30,17 +30,19 @@ import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataOutputStream;
-import org.apache.hadoop.hbase.ByteBufferedKeyOnlyKeyValue;
+import org.apache.hadoop.hbase.ByteBufferKeyOnlyKeyValue;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellComparator;
+//import org.apache.hadoop.hbase.CellComparatorImpl;
 import org.apache.hadoop.hbase.CellUtil;
+import org.apache.hadoop.hbase.PrivateCellUtil;
 import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.KeyValue.KeyOnlyKeyValue;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.hbase.io.HeapSize;
 import org.apache.hadoop.hbase.io.encoding.DataBlockEncoding;
 import org.apache.hadoop.hbase.io.hfile.HFile.CachingBlockReader;
@@ -61,12 +63,12 @@ import org.apache.hadoop.util.StringUtils;
  * {@link org.apache.hadoop.hbase.io.hfile.CompoundBloomFilterWriter} and
  *  {@link HFileWriterImpl}. Examples of how to use the reader can be
  *  found in {@link HFileReaderImpl} and
- *  {@link org.apache.hadoop.hbase.io.hfile.TestHFileBlockIndex}.
+ *  org.apache.hadoop.hbase.io.hfile.TestHFileBlockIndex.
  */
 @InterfaceAudience.Private
 public class HFileBlockIndex {
 
-  private static final Log LOG = LogFactory.getLog(HFileBlockIndex.class);
+  private static final Logger LOG = LoggerFactory.getLogger(HFileBlockIndex.class);
 
   static final int DEFAULT_MAX_CHUNK_SIZE = 128 * 1024;
 
@@ -239,7 +241,7 @@ public class HFileBlockIndex {
 
     private Cell[] blockKeys;
     /** Pre-computed mid-key */
-    private AtomicReference<Cell> midKey = new AtomicReference<Cell>();
+    private AtomicReference<Cell> midKey = new AtomicReference<>();
     /** Needed doing lookup on blocks. */
     private CellComparator comparator;
 
@@ -264,7 +266,7 @@ public class HFileBlockIndex {
 
         // Adding blockKeys
         for (Cell key : blockKeys) {
-          heapSize += ClassSize.align(CellUtil.estimatedHeapSizeOf(key));
+          heapSize += ClassSize.align(PrivateCellUtil.estimatedHeapSizeOf(key));
         }
       }
       // Add comparator and the midkey atomicreference
@@ -514,7 +516,7 @@ public class HFileBlockIndex {
    * blocks at all other levels will be cached in the LRU cache in practice,
    * although this API does not enforce that.
    *
-   * All non-root (leaf and intermediate) index blocks contain what we call a
+   * <p>All non-root (leaf and intermediate) index blocks contain what we call a
    * "secondary index": an array of offsets to the entries within the block.
    * This allows us to do binary search for the entry corresponding to the
    * given key without having to deserialize the block.
@@ -583,17 +585,12 @@ public class HFileBlockIndex {
     }
 
     /**
-     * Return the BlockWithScanInfo which contains the DataBlock with other scan
-     * info such as nextIndexedKey. This function will only be called when the
-     * HFile version is larger than 1.
+     * Return the BlockWithScanInfo, a data structure which contains the Data HFileBlock with
+     * other scan info such as the key that starts the next HFileBlock. This function will only
+     * be called when the HFile version is larger than 1.
      *
-     * @param key
-     *          the key we are looking for
-     * @param currentBlock
-     *          the current block, to avoid re-reading the same block
-     * @param cacheBlocks
-     * @param pread
-     * @param isCompaction
+     * @param key the key we are looking for
+     * @param currentBlock the current block, to avoid re-reading the same block
      * @param expectedDataBlockEncoding the data block encoding the caller is
      *          expecting the data block to be in, or null to not perform this
      *          check and return the block irrespective of the encoding.
@@ -745,8 +742,8 @@ public class HFileBlockIndex {
       // If we imagine that keys[-1] = -Infinity and
       // keys[numEntries] = Infinity, then we are maintaining an invariant that
       // keys[low - 1] < key < keys[high + 1] while narrowing down the range.
-      ByteBufferedKeyOnlyKeyValue nonRootIndexkeyOnlyKV = new ByteBufferedKeyOnlyKeyValue();
-      ObjectIntPair<ByteBuffer> pair = new ObjectIntPair<ByteBuffer>();
+      ByteBufferKeyOnlyKeyValue nonRootIndexkeyOnlyKV = new ByteBufferKeyOnlyKeyValue();
+      ObjectIntPair<ByteBuffer> pair = new ObjectIntPair<>();
       while (low <= high) {
         mid = (low + high) >>> 1;
 
@@ -771,7 +768,7 @@ public class HFileBlockIndex {
         // TODO avoid array call.
         nonRootIndex.asSubByteBuffer(midKeyOffset, midLength, pair);
         nonRootIndexkeyOnlyKV.setKey(pair.getFirst(), pair.getSecond(), midLength);
-        int cmp = comparator.compareKeyIgnoresMvcc(key, nonRootIndexkeyOnlyKV);
+        int cmp = PrivateCellUtil.compareKeyIgnoresMvcc(comparator, key, nonRootIndexkeyOnlyKV);
 
         // key lives above the midpoint
         if (cmp > 0)
@@ -1407,20 +1404,20 @@ public class HFileBlockIndex {
   static class BlockIndexChunk {
 
     /** First keys of the key range corresponding to each index entry. */
-    private final List<byte[]> blockKeys = new ArrayList<byte[]>();
+    private final List<byte[]> blockKeys = new ArrayList<>();
 
     /** Block offset in backing stream. */
-    private final List<Long> blockOffsets = new ArrayList<Long>();
+    private final List<Long> blockOffsets = new ArrayList<>();
 
     /** On-disk data sizes of lower-level data or index blocks. */
-    private final List<Integer> onDiskDataSizes = new ArrayList<Integer>();
+    private final List<Integer> onDiskDataSizes = new ArrayList<>();
 
     /**
      * The cumulative number of sub-entries, i.e. entries on deeper-level block
      * index entries. numSubEntriesAt[i] is the number of sub-entries in the
      * blocks corresponding to this chunk's entries #0 through #i inclusively.
      */
-    private final List<Long> numSubEntriesAt = new ArrayList<Long>();
+    private final List<Long> numSubEntriesAt = new ArrayList<>();
 
     /**
      * The offset of the next entry to be added, relative to the end of the
@@ -1439,8 +1436,7 @@ public class HFileBlockIndex {
      * records in a "non-root" format block. These offsets are relative to the
      * end of this secondary index.
      */
-    private final List<Integer> secondaryIndexOffsetMarks =
-        new ArrayList<Integer>();
+    private final List<Integer> secondaryIndexOffsetMarks = new ArrayList<>();
 
     /**
      * Adds a new entry to this block index chunk.

@@ -21,8 +21,6 @@ import static org.junit.Assert.assertTrue;
 
 import java.io.IOException;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
@@ -35,13 +33,15 @@ import org.junit.Before;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.mockito.Mockito;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Test our recoverLease loop against mocked up filesystem.
  */
 @Category({MiscTests.class, MediumTests.class})
 public class TestFSHDFSUtils {
-  private static final Log LOG = LogFactory.getLog(TestFSHDFSUtils.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestFSHDFSUtils.class);
   private static final HBaseTestingUtility HTU = new HBaseTestingUtility();
   static {
     Configuration conf = HTU.getConfiguration();
@@ -100,8 +100,7 @@ public class TestFSHDFSUtils {
     Mockito.verify(dfs, Mockito.times(1)).isFileClosed(FILE);
   }
 
-  @Test
-  public void testIsSameHdfs() throws IOException {
+  void testIsSameHdfs(int nnport) throws IOException {
     try {
       Class dfsUtilClazz = Class.forName("org.apache.hadoop.hdfs.DFSUtil");
       dfsUtilClazz.getMethod("getNNServiceRpcAddresses", Configuration.class);
@@ -111,7 +110,7 @@ public class TestFSHDFSUtils {
     }
 
     Configuration conf = HBaseConfiguration.create();
-    Path srcPath = new Path("hdfs://localhost:8020/");
+    Path srcPath = new Path("hdfs://localhost:" + nnport + "/");
     Path desPath = new Path("hdfs://127.0.0.1/");
     FileSystem srcFs = srcPath.getFileSystem(conf);
     FileSystem desFs = desPath.getFileSystem(conf);
@@ -122,7 +121,7 @@ public class TestFSHDFSUtils {
     desFs = desPath.getFileSystem(conf);
     assertTrue(!FSHDFSUtils.isSameHdfs(conf, srcFs, desFs));
 
-    desPath = new Path("hdfs://127.0.1.1:8020/");
+    desPath = new Path("hdfs://127.0.1.1:" + nnport + "/");
     desFs = desPath.getFileSystem(conf);
     assertTrue(!FSHDFSUtils.isSameHdfs(conf, srcFs, desFs));
 
@@ -130,19 +129,33 @@ public class TestFSHDFSUtils {
     conf.set("dfs.nameservices", "haosong-hadoop");
     conf.set("dfs.ha.namenodes.haosong-hadoop", "nn1,nn2");
     conf.set("dfs.client.failover.proxy.provider.haosong-hadoop",
-            "org.apache.hadoop.hdfs.server.namenode.ha.ConfiguredFailoverProxyProvider");
+        "org.apache.hadoop.hdfs.server.namenode.ha.ConfiguredFailoverProxyProvider");
 
-    conf.set("dfs.namenode.rpc-address.haosong-hadoop.nn1", "127.0.0.1:8020");
+    conf.set("dfs.namenode.rpc-address.haosong-hadoop.nn1", "127.0.0.1:"+ nnport);
     conf.set("dfs.namenode.rpc-address.haosong-hadoop.nn2", "127.10.2.1:8000");
     desPath = new Path("/");
     desFs = desPath.getFileSystem(conf);
     assertTrue(FSHDFSUtils.isSameHdfs(conf, srcFs, desFs));
 
-    conf.set("dfs.namenode.rpc-address.haosong-hadoop.nn1", "127.10.2.1:8020");
+    conf.set("dfs.namenode.rpc-address.haosong-hadoop.nn1", "127.10.2.1:"+nnport);
     conf.set("dfs.namenode.rpc-address.haosong-hadoop.nn2", "127.0.0.1:8000");
     desPath = new Path("/");
     desFs = desPath.getFileSystem(conf);
     assertTrue(!FSHDFSUtils.isSameHdfs(conf, srcFs, desFs));
+  }
+
+  @Test
+  public void testIsSameHdfs() throws IOException {
+    String hadoopVersion = org.apache.hadoop.util.VersionInfo.getVersion();
+    LOG.info("hadoop version is: "  + hadoopVersion);
+    boolean isHadoop3 = hadoopVersion.startsWith("3.");
+    if (isHadoop3) {
+      // Hadoop 3.0.0 alpha1+ change default nn port to 9820. See HDFS-9427
+      testIsSameHdfs(9820);
+    } else {
+      // pre hadoop 3.0.0 defaults to port 8020
+      testIsSameHdfs(8020);
+    }
   }
 
   /**

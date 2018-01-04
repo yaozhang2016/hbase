@@ -17,42 +17,76 @@
  */
 package org.apache.hadoop.hbase.regionserver;
 
+import java.nio.ByteBuffer;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.apache.hadoop.hbase.util.Bytes;
 
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Preconditions;
+import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
+import org.apache.hbase.thirdparty.com.google.common.base.Preconditions;
 
 /**
  * A chunk of memory out of which allocations are sliced.
  */
 @InterfaceAudience.Private
-public class Chunk {
+public abstract class Chunk {
   /** Actual underlying data */
-  private byte[] data;
+  protected ByteBuffer data;
 
-  private static final int UNINITIALIZED = -1;
-  private static final int OOM = -2;
+  protected static final int UNINITIALIZED = -1;
+  protected static final int OOM = -2;
   /**
    * Offset for the next allocation, or the sentinel value -1 which implies that the chunk is still
    * uninitialized.
    */
-  private AtomicInteger nextFreeOffset = new AtomicInteger(UNINITIALIZED);
+  protected AtomicInteger nextFreeOffset = new AtomicInteger(UNINITIALIZED);
 
   /** Total number of allocations satisfied from this buffer */
-  private AtomicInteger allocCount = new AtomicInteger();
+  protected AtomicInteger allocCount = new AtomicInteger();
 
   /** Size of chunk in bytes */
-  private final int size;
+  protected final int size;
+
+  // The unique id associated with the chunk.
+  private final int id;
+
+  // indicates if the chunk is formed by ChunkCreator#MemstorePool
+  private final boolean fromPool;
 
   /**
-   * Create an uninitialized chunk. Note that memory is not allocated yet, so this is cheap.
-   *
+   * Create an uninitialized chunk. Note that memory is not allocated yet, so
+   * this is cheap.
    * @param size in bytes
+   * @param id the chunk id
    */
-  Chunk(int size) {
+  public Chunk(int size, int id) {
+    this(size, id, false);
+  }
+
+  /**
+   * Create an uninitialized chunk. Note that memory is not allocated yet, so
+   * this is cheap.
+   * @param size in bytes
+   * @param id the chunk id
+   * @param fromPool if the chunk is formed by pool
+   */
+  public Chunk(int size, int id, boolean fromPool) {
     this.size = size;
+    this.id = id;
+    this.fromPool = fromPool;
+  }
+
+  int getId() {
+    return this.id;
+  }
+
+  boolean isFromPool() {
+    return this.fromPool;
+  }
+
+  boolean isJumbo() {
+    return size > ChunkCreator.getInstance().getChunkSize();
   }
 
   /**
@@ -63,20 +97,21 @@ public class Chunk {
   public void init() {
     assert nextFreeOffset.get() == UNINITIALIZED;
     try {
-      if (data == null) {
-        data = new byte[size];
-      }
+      allocateDataBuffer();
     } catch (OutOfMemoryError e) {
       boolean failInit = nextFreeOffset.compareAndSet(UNINITIALIZED, OOM);
       assert failInit; // should be true.
       throw e;
     }
     // Mark that it's ready for use
-    boolean initted = nextFreeOffset.compareAndSet(UNINITIALIZED, 0);
+    // Move 4 bytes since the first 4 bytes are having the chunkid in it
+    boolean initted = nextFreeOffset.compareAndSet(UNINITIALIZED, Bytes.SIZEOF_INT);
     // We should always succeed the above CAS since only one thread
     // calls init()!
     Preconditions.checkState(initted, "Multiple threads tried to init same chunk");
   }
+
+  abstract void allocateDataBuffer();
 
   /**
    * Reset the offset to UNINITIALIZED before before reusing an old chunk
@@ -90,7 +125,8 @@ public class Chunk {
 
   /**
    * Try to allocate <code>size</code> bytes from the chunk.
-   *
+   * If a chunk is tried to get allocated before init() call, the thread doing the allocation
+   * will be in busy-wait state as it will keep looping till the nextFreeOffset is set.
    * @return the offset of the successful allocation, or -1 to indicate not-enough-space
    */
   public int alloc(int size) {
@@ -109,10 +145,10 @@ public class Chunk {
         return -1;
       }
 
-      if (oldOffset + size > data.length) {
+      if (oldOffset + size > data.capacity()) {
         return -1; // alloc doesn't fit
       }
-
+      // TODO : If seqID is to be written add 8 bytes here for nextFreeOFfset
       // Try to atomically claim this chunk
       if (nextFreeOffset.compareAndSet(oldOffset, oldOffset + size)) {
         // we got the alloc
@@ -126,14 +162,14 @@ public class Chunk {
   /**
    * @return This chunk's backing data.
    */
-  byte[] getData() {
+  ByteBuffer getData() {
     return this.data;
   }
 
   @Override
   public String toString() {
     return "Chunk@" + System.identityHashCode(this) + " allocs=" + allocCount.get() + "waste="
-        + (data.length - nextFreeOffset.get());
+        + (data.capacity() - nextFreeOffset.get());
   }
 
   @VisibleForTesting

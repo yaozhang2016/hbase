@@ -18,18 +18,15 @@
 
 package org.apache.hadoop.hbase.master.procedure;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
 
 @InterfaceAudience.Private
 public final class MasterProcedureConstants {
   private MasterProcedureConstants() {}
 
-  /** Used to construct the name of the log directory for master procedures */
-  public static final String MASTER_PROCEDURE_LOGDIR = "MasterProcWALs";
-
   /** Number of threads used by the procedure executor */
   public static final String MASTER_PROCEDURE_THREADS = "hbase.master.procedure.threads";
-  public static final int DEFAULT_MIN_MASTER_PROCEDURE_THREADS = 4;
+  public static final int DEFAULT_MIN_MASTER_PROCEDURE_THREADS = 16;
 
   /**
    * Procedure replay sanity check. In case a WAL is missing or unreadable we

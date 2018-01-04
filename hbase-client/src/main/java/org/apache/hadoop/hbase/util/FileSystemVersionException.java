@@ -21,12 +21,10 @@ package org.apache.hadoop.hbase.util;
 
 import java.io.IOException;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /** Thrown when the file system needs to be upgraded */
 @InterfaceAudience.Public
-@InterfaceStability.Evolving
 public class FileSystemVersionException extends IOException {
   private static final long serialVersionUID = 1004053363L;
 

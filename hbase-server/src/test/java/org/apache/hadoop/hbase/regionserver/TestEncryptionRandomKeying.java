@@ -17,7 +17,8 @@
  */
 package org.apache.hadoop.hbase.regionserver;
 
-import static org.junit.Assert.*;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertTrue;
 
 import java.security.Key;
 import java.util.ArrayList;
@@ -29,8 +30,6 @@ import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HTableDescriptor;
-import org.apache.hadoop.hbase.testclassification.MediumTests;
-import org.apache.hadoop.hbase.testclassification.RegionServerTests;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Table;
@@ -38,8 +37,9 @@ import org.apache.hadoop.hbase.io.crypto.Encryption;
 import org.apache.hadoop.hbase.io.crypto.KeyProviderForTesting;
 import org.apache.hadoop.hbase.io.hfile.CacheConfig;
 import org.apache.hadoop.hbase.io.hfile.HFile;
+import org.apache.hadoop.hbase.testclassification.MediumTests;
+import org.apache.hadoop.hbase.testclassification.RegionServerTests;
 import org.apache.hadoop.hbase.util.Bytes;
-
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -52,11 +52,11 @@ public class TestEncryptionRandomKeying {
   private static HTableDescriptor htd;
 
   private static List<Path> findStorefilePaths(TableName tableName) throws Exception {
-    List<Path> paths = new ArrayList<Path>();
+    List<Path> paths = new ArrayList<>();
     for (Region region:
-        TEST_UTIL.getRSForFirstRegionInTable(tableName).getOnlineRegions(htd.getTableName())) {
-      for (Store store: region.getStores()) {
-        for (StoreFile storefile: store.getStorefiles()) {
+        TEST_UTIL.getRSForFirstRegionInTable(tableName).getRegions(htd.getTableName())) {
+      for (HStore store : ((HRegion) region).getStores()) {
+        for (HStoreFile storefile : store.getStorefiles()) {
           paths.add(storefile.getPath());
         }
       }
@@ -66,7 +66,7 @@ public class TestEncryptionRandomKeying {
 
   private static byte[] extractHFileKey(Path path) throws Exception {
     HFile.Reader reader = HFile.createReader(TEST_UTIL.getTestFileSystem(), path,
-      new CacheConfig(conf), conf);
+      new CacheConfig(conf), true, conf);
     try {
       reader.loadFileInfo();
       Encryption.Context cryptoContext = reader.getFileContext().getEncryptionContext();
@@ -100,8 +100,8 @@ public class TestEncryptionRandomKeying {
     TEST_UTIL.startMiniCluster(1);
 
     // Create the test table
-    TEST_UTIL.getHBaseAdmin().createTable(htd);
-    TEST_UTIL.waitTableAvailable(htd.getName(), 5000);
+    TEST_UTIL.getAdmin().createTable(htd);
+    TEST_UTIL.waitTableAvailable(htd.getTableName(), 5000);
 
     // Create a store file
     Table table = TEST_UTIL.getConnection().getTable(htd.getTableName());
@@ -111,7 +111,7 @@ public class TestEncryptionRandomKeying {
     } finally {
       table.close();
     }
-    TEST_UTIL.getHBaseAdmin().flush(htd.getTableName());
+    TEST_UTIL.getAdmin().flush(htd.getTableName());
   }
 
   @AfterClass

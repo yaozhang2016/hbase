@@ -17,9 +17,9 @@
  */
 package org.apache.hadoop.hbase.ipc;
 
-import com.google.common.base.Preconditions;
-import org.apache.hadoop.hbase.shaded.com.google.protobuf.CodedOutputStream;
-import org.apache.hadoop.hbase.shaded.com.google.protobuf.Message;
+import org.apache.hbase.thirdparty.com.google.common.base.Preconditions;
+import org.apache.hbase.thirdparty.com.google.protobuf.CodedOutputStream;
+import org.apache.hbase.thirdparty.com.google.protobuf.Message;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -28,12 +28,13 @@ import java.net.InetSocketAddress;
 import java.net.SocketTimeoutException;
 import java.nio.ByteBuffer;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.hadoop.hbase.DoNotRetryIOException;
+import org.apache.hadoop.hbase.HConstants;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.hbase.exceptions.ConnectionClosingException;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.RPCProtos.CellBlockMeta;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.RPCProtos.ExceptionResponse;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.RPCProtos.RequestHeader;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.TracingProtos.RPCTInfo;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.hadoop.ipc.RemoteException;
@@ -100,17 +101,18 @@ class IPCUtil {
   static RequestHeader buildRequestHeader(Call call, CellBlockMeta cellBlockMeta) {
     RequestHeader.Builder builder = RequestHeader.newBuilder();
     builder.setCallId(call.id);
-    if (call.span != null) {
+    //TODO handle htrace API change, see HBASE-18895
+    /*if (call.span != null) {
       builder.setTraceInfo(RPCTInfo.newBuilder().setParentId(call.span.getSpanId())
-          .setTraceId(call.span.getTraceId()));
-    }
+          .setTraceId(call.span.getTracerId()));
+    }*/
     builder.setMethodName(call.md.getName());
     builder.setRequestParam(call.param != null);
     if (cellBlockMeta != null) {
       builder.setCellBlockMeta(cellBlockMeta);
     }
     // Only pass priority if there is one set.
-    if (call.priority != HBaseRpcController.PRIORITY_UNSET) {
+    if (call.priority != HConstants.PRIORITY_UNSET) {
       builder.setPriority(call.priority);
     }
     builder.setTimeout(call.timeout);
@@ -168,6 +170,12 @@ class IPCUtil {
     } else if (exception instanceof ConnectionClosingException) {
       return (ConnectionClosingException) new ConnectionClosingException(
           "Call to " + addr + " failed on local exception: " + exception).initCause(exception);
+    } else if (exception instanceof ServerTooBusyException) {
+      // we already have address in the exception message
+      return (IOException) exception;
+    } else if (exception instanceof DoNotRetryIOException) {
+      return (IOException) new DoNotRetryIOException(
+          "Call to " + addr + " failed on local exception: " + exception).initCause(exception);
     } else {
       return (IOException) new IOException(
           "Call to " + addr + " failed on local exception: " + exception).initCause(exception);
@@ -176,7 +184,7 @@ class IPCUtil {
 
   static void setCancelled(Call call) {
     call.setException(new CallCancelledException("Call id=" + call.id + ", waitTime="
-        + (EnvironmentEdgeManager.currentTime() - call.getStartTime()) + ", rpcTimetout="
+        + (EnvironmentEdgeManager.currentTime() - call.getStartTime()) + ", rpcTimeout="
         + call.timeout));
   }
 }

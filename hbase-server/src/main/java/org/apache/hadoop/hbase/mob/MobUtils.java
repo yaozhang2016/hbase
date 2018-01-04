@@ -23,9 +23,11 @@ import java.io.IOException;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Calendar;
 import java.util.Collection;
 import java.util.Date;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
@@ -34,46 +36,49 @@ import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellComparator;
-import org.apache.hadoop.hbase.CellUtil;
-import org.apache.hadoop.hbase.HBaseConfiguration;
-import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.HRegionInfo;
-import org.apache.hadoop.hbase.HTableDescriptor;
-import org.apache.hadoop.hbase.KeyValue;
+import org.apache.hadoop.hbase.PrivateCellUtil;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.Tag;
 import org.apache.hadoop.hbase.TagType;
+import org.apache.hadoop.hbase.TagUtil;
 import org.apache.hadoop.hbase.backup.HFileArchiver;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.hadoop.hbase.client.ColumnFamilyDescriptor;
+import org.apache.hadoop.hbase.client.MobCompactPartitionPolicy;
+import org.apache.hadoop.hbase.client.RegionInfo;
+import org.apache.hadoop.hbase.client.RegionInfoBuilder;
 import org.apache.hadoop.hbase.client.Scan;
+import org.apache.hadoop.hbase.client.TableDescriptor;
 import org.apache.hadoop.hbase.io.HFileLink;
 import org.apache.hadoop.hbase.io.compress.Compression;
 import org.apache.hadoop.hbase.io.crypto.Encryption;
 import org.apache.hadoop.hbase.io.hfile.CacheConfig;
+import org.apache.hadoop.hbase.io.hfile.HFile;
 import org.apache.hadoop.hbase.io.hfile.HFileContext;
 import org.apache.hadoop.hbase.io.hfile.HFileContextBuilder;
-import org.apache.hadoop.hbase.master.TableLockManager;
-import org.apache.hadoop.hbase.master.TableLockManager.TableLock;
+import org.apache.hadoop.hbase.master.locking.LockManager;
 import org.apache.hadoop.hbase.mob.compactions.MobCompactor;
+import org.apache.hadoop.hbase.mob.compactions.PartitionedMobCompactionRequest.CompactionPartitionId;
 import org.apache.hadoop.hbase.mob.compactions.PartitionedMobCompactor;
 import org.apache.hadoop.hbase.regionserver.BloomType;
 import org.apache.hadoop.hbase.regionserver.HStore;
-import org.apache.hadoop.hbase.regionserver.StoreFile;
+import org.apache.hadoop.hbase.regionserver.HStoreFile;
 import org.apache.hadoop.hbase.regionserver.StoreFileWriter;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.hadoop.hbase.util.ChecksumType;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.hadoop.hbase.util.FSUtils;
 import org.apache.hadoop.hbase.util.ReflectionUtils;
 import org.apache.hadoop.hbase.util.Threads;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * The mob utilities
@@ -81,7 +86,9 @@ import org.apache.hadoop.hbase.util.Threads;
 @InterfaceAudience.Private
 public final class MobUtils {
 
-  private static final Log LOG = LogFactory.getLog(MobUtils.class);
+  private static final Logger LOG = LoggerFactory.getLogger(MobUtils.class);
+  private final static long WEEKLY_THRESHOLD_MULTIPLIER = 7;
+  private final static long MONTHLY_THRESHOLD_MULTIPLIER = 4 * WEEKLY_THRESHOLD_MULTIPLIER;
 
   private static final ThreadLocal<SimpleDateFormat> LOCAL_FORMAT =
       new ThreadLocal<SimpleDateFormat>() {
@@ -91,6 +98,12 @@ public final class MobUtils {
     }
   };
 
+  private static final byte[] REF_DELETE_MARKER_TAG_BYTES;
+  static {
+    List<Tag> tags = new ArrayList<>();
+    tags.add(MobConstants.MOB_REF_TAG);
+    REF_DELETE_MARKER_TAG_BYTES = TagUtil.fromList(tags);
+  }
 
   /**
    * Private constructor to keep this class from being instantiated.
@@ -118,14 +131,55 @@ public final class MobUtils {
   }
 
   /**
+   * Get the first day of the input date's month
+   * @param calendar Calendar object
+   * @param date The date to find out its first day of that month
+   * @return The first day in the month
+   */
+  public static Date getFirstDayOfMonth(final Calendar calendar, final Date date) {
+
+    calendar.setTime(date);
+    calendar.set(Calendar.HOUR_OF_DAY, 0);
+    calendar.set(Calendar.MINUTE, 0);
+    calendar.set(Calendar.SECOND, 0);
+    calendar.set(Calendar.MILLISECOND, 0);
+    calendar.set(Calendar.DAY_OF_MONTH, 1);
+
+    Date firstDayInMonth = calendar.getTime();
+    return firstDayInMonth;
+  }
+
+  /**
+   * Get the first day of the input date's week
+   * @param calendar Calendar object
+   * @param date The date to find out its first day of that week
+   * @return The first day in the week
+   */
+  public static Date getFirstDayOfWeek(final Calendar calendar, final Date date) {
+
+    calendar.setTime(date);
+    calendar.set(Calendar.HOUR_OF_DAY, 0);
+    calendar.set(Calendar.MINUTE, 0);
+    calendar.set(Calendar.SECOND, 0);
+    calendar.set(Calendar.MILLISECOND, 0);
+    calendar.setFirstDayOfWeek(Calendar.MONDAY);
+    calendar.set(Calendar.DAY_OF_WEEK, Calendar.MONDAY);
+
+    Date firstDayInWeek = calendar.getTime();
+    return firstDayInWeek;
+  }
+
+  /**
    * Whether the current cell is a mob reference cell.
    * @param cell The current cell.
    * @return True if the cell has a mob reference tag, false if it doesn't.
    */
   public static boolean isMobReferenceCell(Cell cell) {
     if (cell.getTagsLength() > 0) {
-      Tag tag = CellUtil.getTag(cell, TagType.MOB_REFERENCE_TAG_TYPE);
-      return tag != null;
+      Optional<Tag> tag = PrivateCellUtil.getTag(cell, TagType.MOB_REFERENCE_TAG_TYPE);
+      if (tag.isPresent()) {
+        return true;
+      }
     }
     return false;
   }
@@ -137,7 +191,10 @@ public final class MobUtils {
    */
   public static Tag getTableNameTag(Cell cell) {
     if (cell.getTagsLength() > 0) {
-      return CellUtil.getTag(cell, TagType.MOB_TABLE_NAME_TAG_TYPE);
+      Optional<Tag> tag = PrivateCellUtil.getTag(cell, TagType.MOB_TABLE_NAME_TAG_TYPE);
+      if (tag.isPresent()) {
+        return tag.get();
+      }
     }
     return null;
   }
@@ -234,7 +291,7 @@ public final class MobUtils {
    * @throws IOException
    */
   public static void cleanExpiredMobFiles(FileSystem fs, Configuration conf, TableName tableName,
-      HColumnDescriptor columnDescriptor, CacheConfig cacheConfig, long current)
+      ColumnFamilyDescriptor columnDescriptor, CacheConfig cacheConfig, long current)
       throws IOException {
     long timeToLive = columnDescriptor.getTimeToLive();
     if (Integer.MAX_VALUE == timeToLive) {
@@ -242,8 +299,14 @@ public final class MobUtils {
       return;
     }
 
-    Date expireDate = new Date(current - timeToLive * 1000);
-    expireDate = new Date(expireDate.getYear(), expireDate.getMonth(), expireDate.getDate());
+    Calendar calendar = Calendar.getInstance();
+    calendar.setTimeInMillis(current - timeToLive * 1000);
+    calendar.set(Calendar.HOUR_OF_DAY, 0);
+    calendar.set(Calendar.MINUTE, 0);
+    calendar.set(Calendar.SECOND, 0);
+
+    Date expireDate = calendar.getTime();
+
     LOG.info("MOB HFiles older than " + expireDate.toGMTString() + " will be deleted!");
 
     FileStatus[] stats = null;
@@ -258,19 +321,18 @@ public final class MobUtils {
       // no file found
       return;
     }
-    List<StoreFile> filesToClean = new ArrayList<StoreFile>();
+    List<HStoreFile> filesToClean = new ArrayList<>();
     int deletedFileCount = 0;
     for (FileStatus file : stats) {
       String fileName = file.getPath().getName();
       try {
-        MobFileName mobFileName = null;
-        if (!HFileLink.isHFileLink(file.getPath())) {
-          mobFileName = MobFileName.create(fileName);
-        } else {
+        if (HFileLink.isHFileLink(file.getPath())) {
           HFileLink hfileLink = HFileLink.buildFromHFileLinkPattern(conf, file.getPath());
-          mobFileName = MobFileName.create(hfileLink.getOriginPath().getName());
+          fileName = hfileLink.getOriginPath().getName();
         }
-        Date fileDate = parseDate(mobFileName.getDate());
+
+        Date fileDate = parseDate(MobFileName.getDateFromName(fileName));
+
         if (LOG.isDebugEnabled()) {
           LOG.debug("Checking file " + fileName);
         }
@@ -278,7 +340,8 @@ public final class MobUtils {
           if (LOG.isDebugEnabled()) {
             LOG.debug(fileName + " is an expired file");
           }
-          filesToClean.add(new StoreFile(fs, file.getPath(), conf, cacheConfig, BloomType.NONE));
+          filesToClean
+              .add(new HStoreFile(fs, file.getPath(), conf, cacheConfig, BloomType.NONE, true));
         }
       } catch (Exception e) {
         LOG.error("Cannot parse the fileName " + fileName, e);
@@ -317,7 +380,7 @@ public final class MobUtils {
     Path hbaseDir = new Path(conf.get(HConstants.HBASE_DIR));
     Path mobRootDir = new Path(hbaseDir, MobConstants.MOB_DIR_NAME);
     FileSystem fs = mobRootDir.getFileSystem(conf);
-    return mobRootDir.makeQualified(fs);
+    return mobRootDir.makeQualified(fs.getUri(), fs.getWorkingDirectory());
   }
 
   /**
@@ -329,7 +392,7 @@ public final class MobUtils {
    */
   public static Path getMobRegionPath(Configuration conf, TableName tableName) {
     Path tablePath = FSUtils.getTableDir(getMobHome(conf), tableName);
-    HRegionInfo regionInfo = getMobRegionInfo(tableName);
+    RegionInfo regionInfo = getMobRegionInfo(tableName);
     return new Path(tablePath, regionInfo.getEncodedName());
   }
 
@@ -357,24 +420,27 @@ public final class MobUtils {
   }
 
   /**
-   * Gets the HRegionInfo of the mob files.
+   * Gets the RegionInfo of the mob files.
    * This is a dummy region. The mob files are not saved in a region in HBase.
    * This is only used in mob snapshot. It's internally used only.
    * @param tableName
    * @return A dummy mob region info.
    */
-  public static HRegionInfo getMobRegionInfo(TableName tableName) {
-    HRegionInfo info = new HRegionInfo(tableName, MobConstants.MOB_REGION_NAME_BYTES,
-        HConstants.EMPTY_END_ROW, false, 0);
-    return info;
+  public static RegionInfo getMobRegionInfo(TableName tableName) {
+    return RegionInfoBuilder.newBuilder(tableName)
+        .setStartKey(MobConstants.MOB_REGION_NAME_BYTES)
+        .setEndKey(HConstants.EMPTY_END_ROW)
+        .setSplit(false)
+        .setRegionId(0)
+        .build();
   }
 
   /**
-   * Gets whether the current HRegionInfo is a mob one.
-   * @param regionInfo The current HRegionInfo.
-   * @return If true, the current HRegionInfo is a mob one.
+   * Gets whether the current RegionInfo is a mob one.
+   * @param regionInfo The current RegionInfo.
+   * @return If true, the current RegionInfo is a mob one.
    */
-  public static boolean isMobRegionInfo(HRegionInfo regionInfo) {
+  public static boolean isMobRegionInfo(RegionInfo regionInfo) {
     return regionInfo == null ? false : getMobRegionInfo(regionInfo.getTable()).getEncodedName()
         .equals(regionInfo.getEncodedName());
   }
@@ -410,7 +476,7 @@ public final class MobUtils {
    * @throws IOException
    */
   public static void removeMobFiles(Configuration conf, FileSystem fs, TableName tableName,
-      Path tableDir, byte[] family, Collection<StoreFile> storeFiles) throws IOException {
+      Path tableDir, byte[] family, Collection<HStoreFile> storeFiles) throws IOException {
     HFileArchiver.archiveStoreFiles(conf, fs, getMobRegionInfo(tableName), tableDir, family,
         storeFiles);
   }
@@ -424,10 +490,10 @@ public final class MobUtils {
    *                        cloning the snapshot.
    * @return The mob reference KeyValue.
    */
-  public static KeyValue createMobRefKeyValue(Cell cell, byte[] fileName, Tag tableNameTag) {
+  public static Cell createMobRefCell(Cell cell, byte[] fileName, Tag tableNameTag) {
     // Append the tags to the KeyValue.
     // The key is same, the value is the filename of the mob file
-    List<Tag> tags = new ArrayList<Tag>();
+    List<Tag> tags = new ArrayList<>();
     // Add the ref tag as the 1st one.
     tags.add(MobConstants.MOB_REF_TAG);
     // Add the tag of the source table name, this table is where this mob file is flushed
@@ -436,16 +502,12 @@ public final class MobUtils {
     // find the original mob files by this table name. For details please see cloning
     // snapshot for mob files.
     tags.add(tableNameTag);
-    // Add the existing tags.
-    tags.addAll(CellUtil.getTags(cell));
-    int valueLength = cell.getValueLength();
-    byte[] refValue = Bytes.add(Bytes.toBytes(valueLength), fileName);
-    KeyValue reference = new KeyValue(cell.getRowArray(), cell.getRowOffset(), cell.getRowLength(),
-        cell.getFamilyArray(), cell.getFamilyOffset(), cell.getFamilyLength(),
-        cell.getQualifierArray(), cell.getQualifierOffset(), cell.getQualifierLength(),
-        cell.getTimestamp(), KeyValue.Type.Put, refValue, 0, refValue.length, tags);
-    reference.setSequenceId(cell.getSequenceId());
-    return reference;
+    return createMobRefCell(cell, fileName, TagUtil.fromList(tags));
+  }
+
+  public static Cell createMobRefCell(Cell cell, byte[] fileName, byte[] refCellTags) {
+    byte[] refValue = Bytes.add(Bytes.toBytes(cell.getValueLength()), fileName);
+    return PrivateCellUtil.createCell(cell, refValue, TagUtil.concatTags(refCellTags, cell));
   }
 
   /**
@@ -460,18 +522,19 @@ public final class MobUtils {
    * @param startKey The hex string of the start key.
    * @param cacheConfig The current cache config.
    * @param cryptoContext The encryption context.
+   * @param isCompaction If the writer is used in compaction.
    * @return The writer for the mob file.
    * @throws IOException
    */
   public static StoreFileWriter createWriter(Configuration conf, FileSystem fs,
-      HColumnDescriptor family, String date, Path basePath, long maxKeyCount,
+      ColumnFamilyDescriptor family, String date, Path basePath, long maxKeyCount,
       Compression.Algorithm compression, String startKey, CacheConfig cacheConfig,
-      Encryption.Context cryptoContext)
+      Encryption.Context cryptoContext, boolean isCompaction)
       throws IOException {
-    MobFileName mobFileName = MobFileName.create(startKey, date, UUID.randomUUID().toString()
-        .replaceAll("-", ""));
+    MobFileName mobFileName = MobFileName.create(startKey, date,
+        UUID.randomUUID().toString().replaceAll("-", ""));
     return createWriter(conf, fs, family, mobFileName, basePath, maxKeyCount, compression,
-      cacheConfig, cryptoContext);
+        cacheConfig, cryptoContext, isCompaction);
   }
 
   /**
@@ -483,25 +546,19 @@ public final class MobUtils {
    * @param maxKeyCount The key count.
    * @param cacheConfig The current cache config.
    * @param cryptoContext The encryption context.
+   * @param isCompaction If the writer is used in compaction.
    * @return The writer for the mob file.
    * @throws IOException
    */
   public static StoreFileWriter createRefFileWriter(Configuration conf, FileSystem fs,
-    HColumnDescriptor family, Path basePath, long maxKeyCount, CacheConfig cacheConfig,
-    Encryption.Context cryptoContext)
+    ColumnFamilyDescriptor family, Path basePath, long maxKeyCount, CacheConfig cacheConfig,
+    Encryption.Context cryptoContext, boolean isCompaction)
     throws IOException {
-    HFileContext hFileContext = new HFileContextBuilder().withIncludesMvcc(true)
-      .withIncludesTags(true).withCompression(family.getCompactionCompression())
-      .withCompressTags(family.isCompressTags()).withChecksumType(HStore.getChecksumType(conf))
-      .withBytesPerCheckSum(HStore.getBytesPerChecksum(conf)).withBlockSize(family.getBlocksize())
-      .withHBaseCheckSum(true).withDataBlockEncoding(family.getDataBlockEncoding())
-      .withEncryptionContext(cryptoContext).withCreateTime(EnvironmentEdgeManager.currentTime())
-      .build();
-    Path tempPath = new Path(basePath, UUID.randomUUID().toString().replaceAll("-", ""));
-    StoreFileWriter w = new StoreFileWriter.Builder(conf, cacheConfig, fs).withFilePath(tempPath)
-      .withComparator(CellComparator.COMPARATOR).withBloomType(family.getBloomFilterType())
-      .withMaxKeyCount(maxKeyCount).withFileContext(hFileContext).build();
-    return w;
+    return createWriter(conf, fs, family,
+      new Path(basePath, UUID.randomUUID().toString().replaceAll("-", "")), maxKeyCount,
+      family.getCompactionCompressionType(), cacheConfig, cryptoContext,
+      HStore.getChecksumType(conf), HStore.getBytesPerChecksum(conf), family.getBlocksize(),
+      family.getBloomFilterType(), isCompaction);
   }
 
   /**
@@ -516,18 +573,19 @@ public final class MobUtils {
    * @param startKey The start key.
    * @param cacheConfig The current cache config.
    * @param cryptoContext The encryption context.
+   * @param isCompaction If the writer is used in compaction.
    * @return The writer for the mob file.
    * @throws IOException
    */
   public static StoreFileWriter createWriter(Configuration conf, FileSystem fs,
-      HColumnDescriptor family, String date, Path basePath, long maxKeyCount,
+      ColumnFamilyDescriptor family, String date, Path basePath, long maxKeyCount,
       Compression.Algorithm compression, byte[] startKey, CacheConfig cacheConfig,
-      Encryption.Context cryptoContext)
+      Encryption.Context cryptoContext, boolean isCompaction)
       throws IOException {
-    MobFileName mobFileName = MobFileName.create(startKey, date, UUID.randomUUID().toString()
-        .replaceAll("-", ""));
+    MobFileName mobFileName = MobFileName.create(startKey, date,
+        UUID.randomUUID().toString().replaceAll("-", ""));
     return createWriter(conf, fs, family, mobFileName, basePath, maxKeyCount, compression,
-      cacheConfig, cryptoContext);
+      cacheConfig, cryptoContext, isCompaction);
   }
 
   /**
@@ -546,7 +604,7 @@ public final class MobUtils {
    * @throws IOException
    */
   public static StoreFileWriter createDelFileWriter(Configuration conf, FileSystem fs,
-      HColumnDescriptor family, String date, Path basePath, long maxKeyCount,
+      ColumnFamilyDescriptor family, String date, Path basePath, long maxKeyCount,
       Compression.Algorithm compression, byte[] startKey, CacheConfig cacheConfig,
       Encryption.Context cryptoContext)
       throws IOException {
@@ -554,7 +612,7 @@ public final class MobUtils {
       .randomUUID().toString().replaceAll("-", "") + "_del";
     MobFileName mobFileName = MobFileName.create(startKey, date, suffix);
     return createWriter(conf, fs, family, mobFileName, basePath, maxKeyCount, compression,
-      cacheConfig, cryptoContext);
+      cacheConfig, cryptoContext, true);
   }
 
   /**
@@ -568,26 +626,69 @@ public final class MobUtils {
    * @param compression The compression algorithm.
    * @param cacheConfig The current cache config.
    * @param cryptoContext The encryption context.
+   * @param isCompaction If the writer is used in compaction.
    * @return The writer for the mob file.
    * @throws IOException
    */
-  private static StoreFileWriter createWriter(Configuration conf, FileSystem fs,
-    HColumnDescriptor family, MobFileName mobFileName, Path basePath, long maxKeyCount,
-    Compression.Algorithm compression, CacheConfig cacheConfig, Encryption.Context cryptoContext)
-    throws IOException {
-    HFileContext hFileContext = new HFileContextBuilder().withCompression(compression)
-      .withIncludesMvcc(true).withIncludesTags(true)
-      .withCompressTags(family.isCompressTags())
-      .withChecksumType(HStore.getChecksumType(conf))
-      .withBytesPerCheckSum(HStore.getBytesPerChecksum(conf)).withBlockSize(family.getBlocksize())
-      .withHBaseCheckSum(true).withDataBlockEncoding(family.getDataBlockEncoding())
-      .withEncryptionContext(cryptoContext)
-      .withCreateTime(EnvironmentEdgeManager.currentTime()).build();
+  public static StoreFileWriter createWriter(Configuration conf, FileSystem fs,
+                                             ColumnFamilyDescriptor family, MobFileName mobFileName, Path basePath, long maxKeyCount,
+      Compression.Algorithm compression, CacheConfig cacheConfig, Encryption.Context cryptoContext,
+      boolean isCompaction)
+      throws IOException {
+    return createWriter(conf, fs, family,
+      new Path(basePath, mobFileName.getFileName()), maxKeyCount, compression, cacheConfig,
+      cryptoContext, HStore.getChecksumType(conf), HStore.getBytesPerChecksum(conf),
+      family.getBlocksize(), BloomType.NONE, isCompaction);
+  }
 
-    StoreFileWriter w = new StoreFileWriter.Builder(conf, cacheConfig, fs)
-      .withFilePath(new Path(basePath, mobFileName.getFileName()))
-      .withComparator(CellComparator.COMPARATOR).withBloomType(BloomType.NONE)
-      .withMaxKeyCount(maxKeyCount).withFileContext(hFileContext).build();
+  /**
+   * Creates a writer for the mob file in temp directory.
+   * @param conf The current configuration.
+   * @param fs The current file system.
+   * @param family The descriptor of the current column family.
+   * @param path The path for a temp directory.
+   * @param maxKeyCount The key count.
+   * @param compression The compression algorithm.
+   * @param cacheConfig The current cache config.
+   * @param cryptoContext The encryption context.
+   * @param checksumType The checksum type.
+   * @param bytesPerChecksum The bytes per checksum.
+   * @param blocksize The HFile block size.
+   * @param bloomType The bloom filter type.
+   * @param isCompaction If the writer is used in compaction.
+   * @return The writer for the mob file.
+   * @throws IOException
+   */
+  public static StoreFileWriter createWriter(Configuration conf, FileSystem fs,
+      ColumnFamilyDescriptor family, Path path, long maxKeyCount,
+      Compression.Algorithm compression, CacheConfig cacheConfig, Encryption.Context cryptoContext,
+      ChecksumType checksumType, int bytesPerChecksum, int blocksize, BloomType bloomType,
+      boolean isCompaction)
+      throws IOException {
+    if (compression == null) {
+      compression = HFile.DEFAULT_COMPRESSION_ALGORITHM;
+    }
+    final CacheConfig writerCacheConf;
+    if (isCompaction) {
+      writerCacheConf = new CacheConfig(cacheConfig);
+      writerCacheConf.setCacheDataOnWrite(false);
+    } else {
+      writerCacheConf = cacheConfig;
+    }
+    HFileContext hFileContext = new HFileContextBuilder().withCompression(compression)
+        .withIncludesMvcc(true).withIncludesTags(true)
+        .withCompressTags(family.isCompressTags())
+        .withChecksumType(checksumType)
+        .withBytesPerCheckSum(bytesPerChecksum)
+        .withBlockSize(blocksize)
+        .withHBaseCheckSum(true).withDataBlockEncoding(family.getDataBlockEncoding())
+        .withEncryptionContext(cryptoContext)
+        .withCreateTime(EnvironmentEdgeManager.currentTime()).build();
+
+    StoreFileWriter w = new StoreFileWriter.Builder(conf, writerCacheConf, fs)
+        .withFilePath(path)
+        .withComparator(CellComparator.getInstance()).withBloomType(bloomType)
+        .withMaxKeyCount(maxKeyCount).withFileContext(hFileContext).build();
     return w;
   }
 
@@ -607,7 +708,7 @@ public final class MobUtils {
       return null;
     }
     Path dstPath = new Path(targetPath, sourceFile.getName());
-    validateMobFile(conf, fs, sourceFile, cacheConfig);
+    validateMobFile(conf, fs, sourceFile, cacheConfig, true);
     String msg = "Renaming flushed file from " + sourceFile + " to " + dstPath;
     LOG.info(msg);
     Path parent = dstPath.getParent();
@@ -628,17 +729,17 @@ public final class MobUtils {
    * @param cacheConfig The current cache config.
    */
   private static void validateMobFile(Configuration conf, FileSystem fs, Path path,
-      CacheConfig cacheConfig) throws IOException {
-    StoreFile storeFile = null;
+      CacheConfig cacheConfig, boolean primaryReplica) throws IOException {
+    HStoreFile storeFile = null;
     try {
-      storeFile = new StoreFile(fs, path, conf, cacheConfig, BloomType.NONE);
-      storeFile.createReader();
+      storeFile = new HStoreFile(fs, path, conf, cacheConfig, BloomType.NONE, primaryReplica);
+      storeFile.initReader();
     } catch (IOException e) {
       LOG.error("Failed to open mob file[" + path + "], keep it in temp directory.", e);
       throw e;
     } finally {
       if (storeFile != null) {
-        storeFile.closeReader(false);
+        storeFile.closeStoreFile(false);
       }
     }
   }
@@ -666,7 +767,7 @@ public final class MobUtils {
    * @return The real mob value length.
    */
   public static int getMobValueLength(Cell cell) {
-    return Bytes.toInt(cell.getValueArray(), cell.getValueOffset(), Bytes.SIZEOF_INT);
+    return PrivateCellUtil.getValueAsInt(cell);
   }
 
   /**
@@ -701,19 +802,18 @@ public final class MobUtils {
    * @param tableName the table the compact
    * @param hcd the column descriptor
    * @param pool the thread pool
-   * @param tableLockManager the tableLock manager
    * @param allFiles Whether add all mob files into the compaction.
    */
   public static void doMobCompaction(Configuration conf, FileSystem fs, TableName tableName,
-    HColumnDescriptor hcd, ExecutorService pool, TableLockManager tableLockManager,
-    boolean allFiles) throws IOException {
+                                     ColumnFamilyDescriptor hcd, ExecutorService pool, boolean allFiles, LockManager.MasterLock lock)
+      throws IOException {
     String className = conf.get(MobConstants.MOB_COMPACTOR_CLASS_KEY,
-      PartitionedMobCompactor.class.getName());
+        PartitionedMobCompactor.class.getName());
     // instantiate the mob compactor.
     MobCompactor compactor = null;
     try {
       compactor = ReflectionUtils.instantiateWithCustomCtor(className, new Class[] {
-        Configuration.class, FileSystem.class, TableName.class, HColumnDescriptor.class,
+        Configuration.class, FileSystem.class, TableName.class, ColumnFamilyDescriptor.class,
         ExecutorService.class }, new Object[] { conf, fs, tableName, hcd, pool });
     } catch (Exception e) {
       throw new IOException("Unable to load configured mob file compactor '" + className + "'", e);
@@ -721,29 +821,14 @@ public final class MobUtils {
     // compact only for mob-enabled column.
     // obtain a write table lock before performing compaction to avoid race condition
     // with major compaction in mob-enabled column.
-    boolean tableLocked = false;
-    TableLock lock = null;
     try {
-      // the tableLockManager might be null in testing. In that case, it is lock-free.
-      if (tableLockManager != null) {
-        lock = tableLockManager.writeLock(MobUtils.getTableLockName(tableName),
-          "Run MobCompactor");
-        lock.acquire();
-      }
-      tableLocked = true;
+      lock.acquire();
       compactor.compact(allFiles);
     } catch (Exception e) {
       LOG.error("Failed to compact the mob files for the column " + hcd.getNameAsString()
-        + " in the table " + tableName.getNameAsString(), e);
+          + " in the table " + tableName.getNameAsString(), e);
     } finally {
-      if (lock != null && tableLocked) {
-        try {
-          lock.release();
-        } catch (IOException e) {
-          LOG.error(
-            "Failed to release the write lock for the table " + tableName.getNameAsString(), e);
-        }
-      }
+      lock.release();
     }
   }
 
@@ -754,11 +839,11 @@ public final class MobUtils {
    */
   public static ExecutorService createMobCompactorThreadPool(Configuration conf) {
     int maxThreads = conf.getInt(MobConstants.MOB_COMPACTION_THREADS_MAX,
-      MobConstants.DEFAULT_MOB_COMPACTION_THREADS_MAX);
+        MobConstants.DEFAULT_MOB_COMPACTION_THREADS_MAX);
     if (maxThreads == 0) {
       maxThreads = 1;
     }
-    final SynchronousQueue<Runnable> queue = new SynchronousQueue<Runnable>();
+    final SynchronousQueue<Runnable> queue = new SynchronousQueue<>();
     ThreadPoolExecutor pool = new ThreadPoolExecutor(1, maxThreads, 60, TimeUnit.SECONDS, queue,
       Threads.newDaemonThreadFactory("MobCompactor"), new RejectedExecutionHandler() {
         @Override
@@ -780,9 +865,9 @@ public final class MobUtils {
    * @param htd The current table descriptor.
    * @return Whether this table has mob-enabled columns.
    */
-  public static boolean hasMobColumns(HTableDescriptor htd) {
-    HColumnDescriptor[] hcds = htd.getColumnFamilies();
-    for (HColumnDescriptor hcd : hcds) {
+  public static boolean hasMobColumns(TableDescriptor htd) {
+    ColumnFamilyDescriptor[] hcds = htd.getColumnFamilies();
+    for (ColumnFamilyDescriptor hcd : hcds) {
       if (hcd.isMobEnabled()) {
         return true;
       }
@@ -807,25 +892,124 @@ public final class MobUtils {
   }
 
   /**
-   * Archives mob store files
-   * @param conf The current configuration.
-   * @param fs The current file system.
-   * @param mobRegionInfo The mob family region info.
-   * @param mobFamilyDir The mob family directory.
-   * @param family The name of the column family.
-   * @throws IOException
+   * Creates a mob ref delete marker.
+   * @param cell The current delete marker.
+   * @return A delete marker with the ref tag.
    */
-  public static void archiveMobStoreFiles(Configuration conf, FileSystem fs,
-      HRegionInfo mobRegionInfo, Path mobFamilyDir, byte[] family) throws IOException {
-    // disable the block cache.
-    Configuration copyOfConf = HBaseConfiguration.create(conf);
-    copyOfConf.setFloat(HConstants.HFILE_BLOCK_CACHE_SIZE_KEY, 0f);
-    CacheConfig cacheConfig = new CacheConfig(copyOfConf);
-    FileStatus[] fileStatus = FSUtils.listStatus(fs, mobFamilyDir);
-    List<StoreFile> storeFileList = new ArrayList<StoreFile>();
-    for (FileStatus file : fileStatus) {
-      storeFileList.add(new StoreFile(fs, file.getPath(), conf, cacheConfig, BloomType.NONE));
+  public static Cell createMobRefDeleteMarker(Cell cell) {
+    return PrivateCellUtil.createCell(cell, TagUtil.concatTags(REF_DELETE_MARKER_TAG_BYTES, cell));
+  }
+
+  /**
+   * Checks if the mob file is expired.
+   * @param column The descriptor of the current column family.
+   * @param current The current time.
+   * @param fileDate The date string parsed from the mob file name.
+   * @return True if the mob file is expired.
+   */
+  public static boolean isMobFileExpired(ColumnFamilyDescriptor column, long current, String fileDate) {
+    if (column.getMinVersions() > 0) {
+      return false;
     }
-    HFileArchiver.archiveStoreFiles(conf, fs, mobRegionInfo, mobFamilyDir, family, storeFileList);
+    long timeToLive = column.getTimeToLive();
+    if (Integer.MAX_VALUE == timeToLive) {
+      return false;
+    }
+
+    Date expireDate = new Date(current - timeToLive * 1000);
+    expireDate = new Date(expireDate.getYear(), expireDate.getMonth(), expireDate.getDate());
+    try {
+      Date date = parseDate(fileDate);
+      if (date.getTime() < expireDate.getTime()) {
+        return true;
+      }
+    } catch (ParseException e) {
+      LOG.warn("Failed to parse the date " + fileDate, e);
+      return false;
+    }
+    return false;
+  }
+
+  /**
+   * fill out partition id based on compaction policy and date, threshold...
+   * @param id Partition id to be filled out
+   * @param firstDayOfCurrentMonth The first day in the current month
+   * @param firstDayOfCurrentWeek The first day in the current week
+   * @param dateStr Date string from the mob file
+   * @param policy Mob compaction policy
+   * @param calendar Calendar object
+   * @param threshold Mob compaciton threshold configured
+   * @return true if the file needs to be excluded from compaction
+   */
+  public static boolean fillPartitionId(final CompactionPartitionId id,
+      final Date firstDayOfCurrentMonth, final Date firstDayOfCurrentWeek, final String dateStr,
+      final MobCompactPartitionPolicy policy, final Calendar calendar, final long threshold) {
+
+    boolean skipCompcation = false;
+    id.setThreshold(threshold);
+    if (threshold <= 0) {
+      id.setDate(dateStr);
+      return skipCompcation;
+    }
+
+    long finalThreshold;
+    Date date;
+    try {
+      date = MobUtils.parseDate(dateStr);
+    } catch (ParseException e)  {
+      LOG.warn("Failed to parse date " + dateStr, e);
+      id.setDate(dateStr);
+      return true;
+    }
+
+    /* The algorithm works as follows:
+     *    For monthly policy:
+     *       1). If the file's date is in past months, apply 4 * 7 * threshold
+     *       2). If the file's date is in past weeks, apply 7 * threshold
+     *       3). If the file's date is in current week, exclude it from the compaction
+     *    For weekly policy:
+     *       1). If the file's date is in past weeks, apply 7 * threshold
+     *       2). If the file's date in currently, apply threshold
+     *    For daily policy:
+     *       1). apply threshold
+     */
+    if (policy == MobCompactPartitionPolicy.MONTHLY) {
+      if (date.before(firstDayOfCurrentMonth)) {
+        // Check overflow
+        if (threshold < (Long.MAX_VALUE / MONTHLY_THRESHOLD_MULTIPLIER)) {
+          finalThreshold = MONTHLY_THRESHOLD_MULTIPLIER * threshold;
+        } else {
+          finalThreshold = Long.MAX_VALUE;
+        }
+        id.setThreshold(finalThreshold);
+
+        // set to the date for the first day of that month
+        id.setDate(MobUtils.formatDate(MobUtils.getFirstDayOfMonth(calendar, date)));
+        return skipCompcation;
+      }
+    }
+
+    if ((policy == MobCompactPartitionPolicy.MONTHLY) ||
+        (policy == MobCompactPartitionPolicy.WEEKLY)) {
+      // Check if it needs to apply weekly multiplier
+      if (date.before(firstDayOfCurrentWeek)) {
+        // Check overflow
+        if (threshold < (Long.MAX_VALUE / WEEKLY_THRESHOLD_MULTIPLIER)) {
+          finalThreshold = WEEKLY_THRESHOLD_MULTIPLIER * threshold;
+        } else {
+          finalThreshold = Long.MAX_VALUE;
+        }
+        id.setThreshold(finalThreshold);
+
+        id.setDate(MobUtils.formatDate(MobUtils.getFirstDayOfWeek(calendar, date)));
+        return skipCompcation;
+      } else if (policy == MobCompactPartitionPolicy.MONTHLY) {
+        skipCompcation = true;
+      }
+    }
+
+    // Rest is daily
+    id.setDate(dateStr);
+    return skipCompcation;
   }
 }

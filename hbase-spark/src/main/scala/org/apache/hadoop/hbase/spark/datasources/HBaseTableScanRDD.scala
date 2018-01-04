@@ -19,6 +19,7 @@ package org.apache.hadoop.hbase.spark.datasources
 
 import java.util.ArrayList
 
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.hbase.client._
 import org.apache.hadoop.hbase.spark._
 import org.apache.hadoop.hbase.spark.hbase._
@@ -30,6 +31,7 @@ import org.apache.spark.rdd.RDD
 
 import scala.collection.mutable
 
+@InterfaceAudience.Private
 class HBaseTableScanRDD(relation: HBaseRelation,
                        val hbaseContext: HBaseContext,
                        @transient val filter: Option[SparkSQLPushDownFilter] = None,
@@ -107,7 +109,7 @@ class HBaseTableScanRDD(relation: HBaseRelation,
       columns: Seq[Field],
       hbaseContext: HBaseContext): Iterator[Result] = {
     g.grouped(relation.bulkGetSize).flatMap{ x =>
-      val gets = new ArrayList[Get]()
+      val gets = new ArrayList[Get](x.size)
       x.foreach{ y =>
         val g = new Get(y)
         handleTimeSemantics(g)

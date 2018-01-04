@@ -1,4 +1,4 @@
-/**
+/*
  *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -20,6 +20,7 @@
 package org.apache.hadoop.hbase.coprocessor;
 
 import java.io.IOException;
+import java.util.Optional;
 
 import junit.framework.TestCase;
 
@@ -31,16 +32,21 @@ import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.HTableDescriptor;
+import org.apache.hadoop.hbase.MockRegionServerServices;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Durability;
+import org.apache.hadoop.hbase.regionserver.ChunkCreator;
 import org.apache.hadoop.hbase.regionserver.HRegion;
+import org.apache.hadoop.hbase.regionserver.MemStoreLABImpl;
 import org.apache.hadoop.hbase.regionserver.RegionCoprocessorHost;
-import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
+import org.apache.hadoop.hbase.regionserver.RegionServerServices;
+import org.apache.hadoop.hbase.wal.WALEdit;
 import org.apache.hadoop.hbase.testclassification.CoprocessorTests;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.junit.experimental.categories.Category;
+import org.mockito.Mockito;
 
 @Category({CoprocessorTests.class, SmallTests.class})
 public class TestRegionObserverStacking extends TestCase {
@@ -48,8 +54,14 @@ public class TestRegionObserverStacking extends TestCase {
     = new HBaseTestingUtility();
   static final Path DIR = TEST_UTIL.getDataTestDir();
 
-  public static class ObserverA extends BaseRegionObserver {
+  public static class ObserverA implements RegionCoprocessor, RegionObserver {
     long id;
+
+    @Override
+    public Optional<RegionObserver> getRegionObserver() {
+      return Optional.of(this);
+    }
+
     @Override
     public void postPut(final ObserverContext<RegionCoprocessorEnvironment> c,
         final Put put, final WALEdit edit,
@@ -63,8 +75,14 @@ public class TestRegionObserverStacking extends TestCase {
     }
   }
 
-  public static class ObserverB extends BaseRegionObserver {
+  public static class ObserverB implements RegionCoprocessor, RegionObserver {
     long id;
+
+    @Override
+    public Optional<RegionObserver> getRegionObserver() {
+      return Optional.of(this);
+    }
+
     @Override
     public void postPut(final ObserverContext<RegionCoprocessorEnvironment> c,
         final Put put, final WALEdit edit,
@@ -78,8 +96,13 @@ public class TestRegionObserverStacking extends TestCase {
     }
   }
 
-  public static class ObserverC extends BaseRegionObserver {
+  public static class ObserverC implements RegionCoprocessor, RegionObserver {
     long id;
+
+    @Override
+    public Optional<RegionObserver> getRegionObserver() {
+      return Optional.of(this);
+    }
 
     @Override
     public void postPut(final ObserverContext<RegionCoprocessorEnvironment> c,
@@ -100,6 +123,7 @@ public class TestRegionObserverStacking extends TestCase {
     for(byte [] family : families) {
       htd.addFamily(new HColumnDescriptor(family));
     }
+    ChunkCreator.initialize(MemStoreLABImpl.CHUNK_SIZE_DEFAULT, false, 0, 0, 0, null);
     HRegionInfo info = new HRegionInfo(htd.getTableName(), null, null, false);
     Path path = new Path(DIR + callingMethod);
     HRegion r = HBaseTestingUtility.createRegionAndWAL(info, path, conf, htd);
@@ -107,7 +131,8 @@ public class TestRegionObserverStacking extends TestCase {
     // is secretly loaded at OpenRegionHandler. we don't really
     // start a region server here, so just manually create cphost
     // and set it to region.
-    RegionCoprocessorHost host = new RegionCoprocessorHost(r, null, conf);
+    RegionCoprocessorHost host = new RegionCoprocessorHost(r,
+        Mockito.mock(RegionServerServices.class), conf);
     r.setCoprocessorHost(host);
     return r;
   }

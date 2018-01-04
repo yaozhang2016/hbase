@@ -20,7 +20,7 @@ package org.apache.hadoop.hbase.spark
 import org.apache.hadoop.fs.{FileSystem, Path}
 import org.apache.hadoop.hbase.client.{Get, ConnectionFactory}
 import org.apache.hadoop.hbase.io.hfile.{CacheConfig, HFile}
-import org.apache.hadoop.hbase.mapreduce.LoadIncrementalHFiles
+import org.apache.hadoop.hbase.tool.LoadIncrementalHFiles
 import org.apache.hadoop.hbase.{HConstants, CellUtil, HBaseTestingUtility, TableName}
 import org.apache.hadoop.hbase.util.Bytes
 import org.apache.hadoop.hbase.spark.HBaseRDDFunctions._
@@ -390,7 +390,7 @@ BeforeAndAfterEach with BeforeAndAfterAll  with Logging {
     val f1FileList = fs.listStatus(new Path(stagingFolder.getPath +"/f1"))
     for ( i <- 0 until f1FileList.length) {
       val reader = HFile.createReader(fs, f1FileList(i).getPath,
-        new CacheConfig(config), config)
+        new CacheConfig(config), true, config)
       assert(reader.getCompressionAlgorithm.getName.equals("gz"))
       assert(reader.getDataBlockEncoding.name().equals("PREFIX"))
     }
@@ -400,7 +400,7 @@ BeforeAndAfterEach with BeforeAndAfterAll  with Logging {
     val f2FileList = fs.listStatus(new Path(stagingFolder.getPath +"/f2"))
     for ( i <- 0 until f2FileList.length) {
       val reader = HFile.createReader(fs, f2FileList(i).getPath,
-        new CacheConfig(config), config)
+        new CacheConfig(config), true, config)
       assert(reader.getCompressionAlgorithm.getName.equals("none"))
       assert(reader.getDataBlockEncoding.name().equals("NONE"))
     }
@@ -869,7 +869,7 @@ BeforeAndAfterEach with BeforeAndAfterAll  with Logging {
     val f1FileList = fs.listStatus(new Path(stagingFolder.getPath +"/f1"))
     for ( i <- 0 until f1FileList.length) {
       val reader = HFile.createReader(fs, f1FileList(i).getPath,
-        new CacheConfig(config), config)
+        new CacheConfig(config), true, config)
       assert(reader.getCompressionAlgorithm.getName.equals("gz"))
       assert(reader.getDataBlockEncoding.name().equals("PREFIX"))
     }
@@ -879,7 +879,7 @@ BeforeAndAfterEach with BeforeAndAfterAll  with Logging {
     val f2FileList = fs.listStatus(new Path(stagingFolder.getPath +"/f2"))
     for ( i <- 0 until f2FileList.length) {
       val reader = HFile.createReader(fs, f2FileList(i).getPath,
-        new CacheConfig(config), config)
+        new CacheConfig(config), true, config)
       assert(reader.getCompressionAlgorithm.getName.equals("none"))
       assert(reader.getDataBlockEncoding.name().equals("NONE"))
     }

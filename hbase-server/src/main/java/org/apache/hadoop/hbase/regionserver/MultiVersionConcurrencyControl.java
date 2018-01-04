@@ -18,15 +18,15 @@
  */
 package org.apache.hadoop.hbase.regionserver;
 
+import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
+import org.apache.hbase.thirdparty.com.google.common.base.MoreObjects;
+
 import java.util.LinkedList;
 import java.util.concurrent.atomic.AtomicLong;
 
-import com.google.common.annotations.VisibleForTesting;
-
-import com.google.common.base.Objects;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.ClassSize;
 
@@ -38,7 +38,7 @@ import org.apache.hadoop.hbase.util.ClassSize;
  */
 @InterfaceAudience.Private
 public class MultiVersionConcurrencyControl {
-  private static final Log LOG = LogFactory.getLog(MultiVersionConcurrencyControl.class);
+  private static final Logger LOG = LoggerFactory.getLogger(MultiVersionConcurrencyControl.class);
 
   final AtomicLong readPoint = new AtomicLong(0);
   final AtomicLong writePoint = new AtomicLong(0);
@@ -54,7 +54,7 @@ public class MultiVersionConcurrencyControl {
   // reduce the number of allocations on the write path?
   // This could be equal to the number of handlers + a small number.
   // TODO: St.Ack 20150903 Sounds good to me.
-  private final LinkedList<WriteEntry> writeQueue = new LinkedList<WriteEntry>();
+  private final LinkedList<WriteEntry> writeQueue = new LinkedList<>();
 
   public MultiVersionConcurrencyControl() {
     super();
@@ -110,20 +110,30 @@ public class MultiVersionConcurrencyControl {
   }
 
   /**
+   * Call {@link #begin(Runnable)} with an empty {@link Runnable}.
+   */
+  public WriteEntry begin() {
+    return begin(() -> {});
+  }
+
+  /**
    * Start a write transaction. Create a new {@link WriteEntry} with a new write number and add it
-   * to our queue of ongoing writes. Return this WriteEntry instance.
-   * To complete the write transaction and wait for it to be visible, call
-   * {@link #completeAndWait(WriteEntry)}. If the write failed, call
-   * {@link #complete(WriteEntry)} so we can clean up AFTER removing ALL trace of the failed write
-   * transaction.
+   * to our queue of ongoing writes. Return this WriteEntry instance. To complete the write
+   * transaction and wait for it to be visible, call {@link #completeAndWait(WriteEntry)}. If the
+   * write failed, call {@link #complete(WriteEntry)} so we can clean up AFTER removing ALL trace of
+   * the failed write transaction.
+   * <p>
+   * The {@code action} will be executed under the lock which means it can keep the same order with
+   * mvcc.
    * @see #complete(WriteEntry)
    * @see #completeAndWait(WriteEntry)
    */
-  public WriteEntry begin() {
+  public WriteEntry begin(Runnable action) {
     synchronized (writeQueue) {
       long nextWriteNumber = writePoint.incrementAndGet();
       WriteEntry e = new WriteEntry(nextWriteNumber);
       writeQueue.add(e);
+      action.run();
       return e;
     }
   }
@@ -230,7 +240,7 @@ public class MultiVersionConcurrencyControl {
 
   @VisibleForTesting
   public String toString() {
-    return Objects.toStringHelper(this)
+    return MoreObjects.toStringHelper(this)
         .add("readPoint", readPoint)
         .add("writePoint", writePoint).toString();
   }

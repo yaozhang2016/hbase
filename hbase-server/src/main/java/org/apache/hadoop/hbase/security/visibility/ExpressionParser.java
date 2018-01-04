@@ -21,7 +21,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Stack;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.hbase.security.visibility.expression.ExpressionNode;
 import org.apache.hadoop.hbase.security.visibility.expression.LeafExpressionNode;
 import org.apache.hadoop.hbase.security.visibility.expression.NonLeafExpressionNode;
@@ -40,7 +40,7 @@ public class ExpressionParser {
   private static final char DOUBLE_QUOTES = '"';
   public ExpressionNode parse(String expS) throws ParseException {
     expS = expS.trim();
-    Stack<ExpressionNode> expStack = new Stack<ExpressionNode>();
+    Stack<ExpressionNode> expStack = new Stack<>();
     int index = 0;
     byte[] exp = Bytes.toBytes(expS);
     int endPos = exp.length;
@@ -68,7 +68,7 @@ public class ExpressionParser {
           // We have to rewrite the expression within double quotes as incase of expressions 
           // with escape characters we may have to avoid them as the original expression did
           // not have them
-          List<Byte> list = new ArrayList<Byte>();
+          List<Byte> list = new ArrayList<>();
           while (index < endPos && !endDoubleQuotesFound(exp[index])) {
             if (exp[index] == '\\') {
               index++;
@@ -86,7 +86,7 @@ public class ExpressionParser {
           // This could be costly. but do we have any alternative?
           // If we don't do this way then we may have to handle while checking the authorizations.
           // Better to do it here.
-          byte[] array = com.google.common.primitives.Bytes.toArray(list);
+          byte[] array = org.apache.hbase.thirdparty.com.google.common.primitives.Bytes.toArray(list);
           String leafExp = Bytes.toString(array).trim();
           if (leafExp.isEmpty()) {
             throw new ParseException("Error parsing expression " + expS + " at column : " + index);

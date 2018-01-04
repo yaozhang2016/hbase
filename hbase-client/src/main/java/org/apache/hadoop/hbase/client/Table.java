@@ -22,12 +22,13 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hbase.CompareOperator;
 import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.TableName;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.hbase.client.coprocessor.Batch;
 import org.apache.hadoop.hbase.filter.CompareFilter;
 import org.apache.hadoop.hbase.ipc.CoprocessorRpcChannel;
@@ -49,7 +50,6 @@ import com.google.protobuf.ServiceException;
  * @since 0.99.0
  */
 @InterfaceAudience.Public
-@InterfaceStability.Evolving
 public interface Table extends Closeable {
   /**
    * Gets the fully qualified table name instance of this table.
@@ -67,8 +67,17 @@ public interface Table extends Closeable {
   /**
    * Gets the {@link org.apache.hadoop.hbase.HTableDescriptor table descriptor} for this table.
    * @throws java.io.IOException if a remote or network exception occurs.
+   * @deprecated since 2.0 version and will be removed in 3.0 version.
+   *             use {@link #getDescriptor()}
    */
+  @Deprecated
   HTableDescriptor getTableDescriptor() throws IOException;
+
+  /**
+   * Gets the {@link org.apache.hadoop.hbase.client.TableDescriptor table descriptor} for this table.
+   * @throws java.io.IOException if a remote or network exception occurs.
+   */
+  TableDescriptor getDescriptor() throws IOException;
 
   /**
    * Test for the existence of columns in the table, as specified by the Get.
@@ -101,18 +110,37 @@ public interface Table extends Closeable {
    * @return Array of boolean.  True if the specified Get matches one or more keys, false if not.
    * @throws IOException e
    */
-  boolean[] existsAll(List<Get> gets) throws IOException;
+  boolean[] exists(List<Get> gets) throws IOException;
 
   /**
-   * Method that does a batch call on Deletes, Gets, Puts, Increments and Appends.
+   * Test for the existence of columns in the table, as specified by the Gets.
+   * This will return an array of booleans. Each value will be true if the related Get matches
+   * one or more keys, false if not.
+   * This is a server-side call so it prevents any data from being transferred to
+   * the client.
+   *
+   * @param gets the Gets
+   * @return Array of boolean.  True if the specified Get matches one or more keys, false if not.
+   * @throws IOException e
+   * @deprecated since 2.0 version and will be removed in 3.0 version.
+   *             use {@link #exists(List)}
+   */
+  @Deprecated
+  default boolean[] existsAll(List<Get> gets) throws IOException {
+    return exists(gets);
+  }
+
+  /**
+   * Method that does a batch call on Deletes, Gets, Puts, Increments, Appends, RowMutations.
    * The ordering of execution of the actions is not defined. Meaning if you do a Put and a
    * Get in the same {@link #batch} call, you will not necessarily be
    * guaranteed that the Get returns what the Put had put.
    *
-   * @param actions list of Get, Put, Delete, Increment, Append objects
+   * @param actions list of Get, Put, Delete, Increment, Append, RowMutations.
    * @param results Empty Object[], same size as actions. Provides access to partial
    *                results, in case an exception is thrown. A null in the result array means that
-   *                the call for that action failed, even after retries
+   *                the call for that action failed, even after retries. The order of the objects
+   *                in the results array corresponds to the order of actions in the request list.
    * @throws IOException
    * @since 0.90.0
    */
@@ -125,8 +153,7 @@ public interface Table extends Closeable {
    */
   <R> void batchCallback(
     final List<? extends Row> actions, final Object[] results, final Batch.Callback<R> callback
-  )
-    throws IOException, InterruptedException;
+  ) throws IOException, InterruptedException;
 
   /**
    * Extracts certain cells from a given row.
@@ -140,16 +167,21 @@ public interface Table extends Closeable {
   Result get(Get get) throws IOException;
 
   /**
-   * Extracts certain cells from the given rows, in batch.
+   * Extracts specified cells from the given rows, as a batch.
    *
    * @param gets The objects that specify what data to fetch and from which rows.
    * @return The data coming from the specified rows, if it exists.  If the row specified doesn't
    * exist, the {@link Result} instance returned won't contain any {@link
-   * org.apache.hadoop.hbase.KeyValue}, as indicated by {@link Result#isEmpty()}. If there are any
-   * failures even after retries, there will be a null in the results array for those Gets, AND an
-   * exception will be thrown.
+   * org.apache.hadoop.hbase.Cell}s, as indicated by {@link Result#isEmpty()}. If there are any
+   * failures even after retries, there will be a <code>null</code> in the results' array for those
+   * Gets, AND an exception will be thrown. The ordering of the Result array corresponds to the order
+   * of the list of passed in Gets.
    * @throws IOException if a remote or network exception occurs.
    * @since 0.90.0
+   * @apiNote {@link #put(List)} runs pre-flight validations on the input list on client.
+   * Currently {@link #get(List)} doesn't run any validations on the client-side, currently there
+   * is no need, but this may change in the future. An
+   * {@link IllegalArgumentException} will be thrown in this case.
    */
   Result[] get(List<Get> gets) throws IOException;
 
@@ -198,15 +230,18 @@ public interface Table extends Closeable {
   void put(Put put) throws IOException;
 
   /**
-   * Puts some data in the table, in batch.
+   * Batch puts the specified data into the table.
    * <p>
-   * This can be used for group commit, or for submitting user defined
-   * batches.  The writeBuffer will be periodically inspected while the List
-   * is processed, so depending on the List size the writeBuffer may flush
-   * not at all, or more than once.
-   * @param puts The list of mutations to apply. The batch put is done by
-   * aggregating the iteration of the Puts over the write buffer
-   * at the client-side for a single RPC call.
+   * This can be used for group commit, or for submitting user defined batches. Before sending
+   * a batch of mutations to the server, the client runs a few validations on the input list. If an
+   * error is found, for example, a mutation was supplied but was missing it's column an
+   * {@link IllegalArgumentException} will be thrown and no mutations will be applied. If there
+   * are any failures even after retries, a {@link RetriesExhaustedWithDetailsException} will be
+   * thrown. RetriesExhaustedWithDetailsException contains lists of failed mutations and
+   * corresponding remote exceptions. The ordering of mutations and exceptions in the
+   * encapsulating exception corresponds to the order of the input list of Put requests.
+   *
+   * @param puts The list of mutations to apply.
    * @throws IOException if a remote or network exception occurs.
    * @since 0.20.0
    */
@@ -224,9 +259,11 @@ public interface Table extends Closeable {
    * @param put data to put if check succeeds
    * @throws IOException e
    * @return true if the new put was executed, false otherwise
+   * @deprecated Since 2.0.0. Will be removed in 3.0.0. Use {@link #checkAndMutate(byte[], byte[])}
    */
+  @Deprecated
   boolean checkAndPut(byte[] row, byte[] family, byte[] qualifier,
-    byte[] value, Put put) throws IOException;
+      byte[] value, Put put) throws IOException;
 
   /**
    * Atomically checks if a row/family/qualifier value matches the expected
@@ -246,9 +283,35 @@ public interface Table extends Closeable {
    * @param put data to put if check succeeds
    * @throws IOException e
    * @return true if the new put was executed, false otherwise
+   * @deprecated Since 2.0.0. Will be removed in 3.0.0. Use {@link #checkAndMutate(byte[], byte[])}
    */
+  @Deprecated
   boolean checkAndPut(byte[] row, byte[] family, byte[] qualifier,
-    CompareFilter.CompareOp compareOp, byte[] value, Put put) throws IOException;
+      CompareFilter.CompareOp compareOp, byte[] value, Put put) throws IOException;
+
+  /**
+   * Atomically checks if a row/family/qualifier value matches the expected
+   * value. If it does, it adds the put.  If the passed value is null, the check
+   * is for the lack of column (ie: non-existence)
+   *
+   * The expected value argument of this call is on the left and the current
+   * value of the cell is on the right side of the comparison operator.
+   *
+   * Ie. eg. GREATER operator means expected value > existing <=> add the put.
+   *
+   * @param row to check
+   * @param family column family to check
+   * @param qualifier column qualifier to check
+   * @param op comparison operator to use
+   * @param value the expected value
+   * @param put data to put if check succeeds
+   * @throws IOException e
+   * @return true if the new put was executed, false otherwise
+   * @deprecated Since 2.0.0. Will be removed in 3.0.0. Use {@link #checkAndMutate(byte[], byte[])}
+   */
+  @Deprecated
+  boolean checkAndPut(byte[] row, byte[] family, byte[] qualifier, CompareOperator op,
+      byte[] value, Put put) throws IOException;
 
   /**
    * Deletes the specified cells/row.
@@ -260,15 +323,27 @@ public interface Table extends Closeable {
   void delete(Delete delete) throws IOException;
 
   /**
-   * Deletes the specified cells/rows in bulk.
-   * @param deletes List of things to delete.  List gets modified by this
-   * method (in particular it gets re-ordered, so the order in which the elements
-   * are inserted in the list gives no guarantee as to the order in which the
-   * {@link Delete}s are executed).
+   * Batch Deletes the specified cells/rows from the table.
+   * <p>
+   * If a specified row does not exist, {@link Delete} will report as though sucessful
+   * delete; no exception will be thrown. If there are any failures even after retries,
+   * a * {@link RetriesExhaustedWithDetailsException} will be thrown.
+   * RetriesExhaustedWithDetailsException contains lists of failed {@link Delete}s and
+   * corresponding remote exceptions.
+   *
+   * @param deletes List of things to delete. The input list gets modified by this
+   * method. All successfully applied {@link Delete}s in the list are removed (in particular it
+   * gets re-ordered, so the order in which the elements are inserted in the list gives no
+   * guarantee as to the order in which the {@link Delete}s are executed).
    * @throws IOException if a remote or network exception occurs. In that case
    * the {@code deletes} argument will contain the {@link Delete} instances
    * that have not be successfully applied.
    * @since 0.20.1
+   * @apiNote In 3.0.0 version, the input list {@code deletes} will no longer be modified. Also,
+   * {@link #put(List)} runs pre-flight validations on the input list on client. Currently
+   * {@link #delete(List)} doesn't run validations on the client, there is no need currently,
+   * but this may change in the future. An * {@link IllegalArgumentException} will be thrown
+   * in this case.
    */
   void delete(List<Delete> deletes) throws IOException;
 
@@ -284,7 +359,9 @@ public interface Table extends Closeable {
    * @param delete data to delete if check succeeds
    * @throws IOException e
    * @return true if the new delete was executed, false otherwise
+   * @deprecated Since 2.0.0. Will be removed in 3.0.0. Use {@link #checkAndMutate(byte[], byte[])}
    */
+  @Deprecated
   boolean checkAndDelete(byte[] row, byte[] family, byte[] qualifier,
     byte[] value, Delete delete) throws IOException;
 
@@ -306,9 +383,97 @@ public interface Table extends Closeable {
    * @param delete data to delete if check succeeds
    * @throws IOException e
    * @return true if the new delete was executed, false otherwise
+   * @deprecated Since 2.0.0. Will be removed in 3.0.0. Use {@link #checkAndMutate(byte[], byte[])}
    */
+  @Deprecated
   boolean checkAndDelete(byte[] row, byte[] family, byte[] qualifier,
     CompareFilter.CompareOp compareOp, byte[] value, Delete delete) throws IOException;
+
+  /**
+   * Atomically checks if a row/family/qualifier value matches the expected
+   * value. If it does, it adds the delete.  If the passed value is null, the
+   * check is for the lack of column (ie: non-existence)
+   *
+   * The expected value argument of this call is on the left and the current
+   * value of the cell is on the right side of the comparison operator.
+   *
+   * Ie. eg. GREATER operator means expected value > existing <=> add the delete.
+   *
+   * @param row to check
+   * @param family column family to check
+   * @param qualifier column qualifier to check
+   * @param op comparison operator to use
+   * @param value the expected value
+   * @param delete data to delete if check succeeds
+   * @throws IOException e
+   * @return true if the new delete was executed, false otherwise
+   * @deprecated Since 2.0.0. Will be removed in 3.0.0. Use {@link #checkAndMutate(byte[], byte[])}
+   */
+  @Deprecated
+  boolean checkAndDelete(byte[] row, byte[] family, byte[] qualifier,
+                         CompareOperator op, byte[] value, Delete delete) throws IOException;
+
+  /**
+   * Atomically checks if a row/family/qualifier value matches the expected value. If it does, it
+   * adds the Put/Delete/RowMutations.
+   * <p>
+   * Use the returned {@link CheckAndMutateBuilder} to construct your request and then execute it.
+   * This is a fluent style API, the code is like:
+   *
+   * <pre>
+   * <code>
+   * table.checkAndMutate(row, family).qualifier(qualifier).ifNotExists().thenPut(put);
+   * </code>
+   * </pre>
+   */
+  CheckAndMutateBuilder checkAndMutate(byte[] row, byte[] family);
+  /**
+   * A helper class for sending checkAndMutate request.
+   */
+  interface CheckAndMutateBuilder {
+
+    /**
+     * @param qualifier column qualifier to check.
+     */
+    CheckAndMutateBuilder qualifier(byte[] qualifier);
+
+    /**
+     * Check for lack of column.
+     */
+    CheckAndMutateBuilder ifNotExists();
+
+    /**
+     * Check for equality.
+     * @param value the expected value
+     */
+    default CheckAndMutateBuilder ifEquals(byte[] value) {
+      return ifMatches(CompareOperator.EQUAL, value);
+    }
+
+    /**
+     * @param compareOp comparison operator to use
+     * @param value the expected value
+     */
+    CheckAndMutateBuilder ifMatches(CompareOperator compareOp, byte[] value);
+
+    /**
+     * @param put data to put if check succeeds
+     * @return {@code true} if the new put was executed, {@code false} otherwise.
+     */
+    boolean thenPut(Put put) throws IOException;
+
+    /**
+     * @param delete data to delete if check succeeds
+     * @return {@code true} if the new delete was executed, {@code false} otherwise.
+     */
+    boolean thenDelete(Delete delete) throws IOException;
+    /**
+     * @param mutation mutations to perform if check succeeds
+     * @return true if the new mutation was executed, false otherwise.
+     */
+    boolean thenMutate(RowMutations mutation) throws IOException;
+
+  }
 
   /**
    * Performs multiple mutations atomically on a single row. Currently
@@ -322,10 +487,9 @@ public interface Table extends Closeable {
   /**
    * Appends values to one or more columns within a single row.
    * <p>
-   * This operation does not appear atomic to readers.  Appends are done
-   * under a single row lock, so write operations to a row are synchronized, but
-   * readers do not take row locks so get and scan operations can see this
-   * operation partially completed.
+   * This operation guaranteed atomicity to readers. Appends are done
+   * under a single row lock, so write operations to a row are synchronized, and
+   * readers are guaranteed to see this operation fully completed.
    *
    * @param append object that specifies the columns and amounts to be used
    *                  for the increment operations
@@ -337,10 +501,9 @@ public interface Table extends Closeable {
   /**
    * Increments one or more columns within a single row.
    * <p>
-   * This operation does not appear atomic to readers.  Increments are done
-   * under a single row lock, so write operations to a row are synchronized, but
-   * readers do not take row locks so get and scan operations can see this
-   * operation partially completed.
+   * This operation ensures atomicity to readers. Increments are done
+   * under a single row lock, so write operations to a row are synchronized, and
+   * readers are guaranteed to see this operation fully completed.
    *
    * @param increment object that specifies the columns and amounts to be used
    *                  for the increment operations
@@ -474,30 +637,6 @@ public interface Table extends Closeable {
     final Batch.Callback<R> callback) throws ServiceException, Throwable;
 
   /**
-   * Returns the maximum size in bytes of the write buffer for this HTable.
-   * <p>
-   * The default value comes from the configuration parameter
-   * {@code hbase.client.write.buffer}.
-   * @return The size of the write buffer in bytes.
-    * @deprecated as of 1.0.1 (should not have been in 1.0.0). Replaced by {@link BufferedMutator#getWriteBufferSize()}
-   */
-  @Deprecated
-  long getWriteBufferSize();
-
-  /**
-   * Sets the size of the buffer in bytes.
-   * <p>
-   * If the new size is less than the current amount of data in the
-   * write buffer, the buffer gets flushed.
-   * @param writeBufferSize The new write buffer size, in bytes.
-   * @throws IOException if a remote or network exception occurs.
-   * @deprecated as of 1.0.1 (should not have been in 1.0.0). Replaced by {@link BufferedMutator} and
-   * {@link BufferedMutatorParams#writeBufferSize(long)}
-   */
-  @Deprecated
-  void setWriteBufferSize(long writeBufferSize) throws IOException;
-
-  /**
    * Creates an instance of the given {@link com.google.protobuf.Service} subclass for each table
    * region spanning the range from the {@code startKey} row to {@code endKey} row (inclusive), all
    * the invocations to the same region server will be batched into one call. The coprocessor
@@ -578,32 +717,52 @@ public interface Table extends Closeable {
    * @param mutation  mutations to perform if check succeeds
    * @throws IOException e
    * @return true if the new put was executed, false otherwise
+   * @deprecated Since 2.0.0. Will be removed in 3.0.0. Use {@link #checkAndMutate(byte[], byte[])}
    */
+  @Deprecated
   boolean checkAndMutate(byte[] row, byte[] family, byte[] qualifier,
       CompareFilter.CompareOp compareOp, byte[] value, RowMutations mutation) throws IOException;
 
   /**
-   * Set timeout (millisecond) of each operation in this Table instance, will override the value
-   * of hbase.client.operation.timeout in configuration.
-   * Operation timeout is a top-level restriction that makes sure a blocking method will not be
-   * blocked more than this. In each operation, if rpc request fails because of timeout or
-   * other reason, it will retry until success or throw a RetriesExhaustedException. But if the
-   * total time being blocking reach the operation timeout before retries exhausted, it will break
-   * early and throw SocketTimeoutException.
-   * @param operationTimeout the total timeout of each operation in millisecond.
+   * Atomically checks if a row/family/qualifier value matches the expected value.
+   * If it does, it performs the row mutations.  If the passed value is null, the check
+   * is for the lack of column (ie: non-existence)
+   *
+   * The expected value argument of this call is on the left and the current
+   * value of the cell is on the right side of the comparison operator.
+   *
+   * Ie. eg. GREATER operator means expected value > existing <=> perform row mutations.
+   *
+   * @param row to check
+   * @param family column family to check
+   * @param qualifier column qualifier to check
+   * @param op the comparison operator
+   * @param value the expected value
+   * @param mutation  mutations to perform if check succeeds
+   * @throws IOException e
+   * @return true if the new put was executed, false otherwise
+   * @deprecated Since 2.0.0. Will be removed in 3.0.0. Use {@link #checkAndMutate(byte[], byte[])}
    */
-  void setOperationTimeout(int operationTimeout);
+  @Deprecated
+  boolean checkAndMutate(byte[] row, byte[] family, byte[] qualifier, CompareOperator op,
+                         byte[] value, RowMutations mutation) throws IOException;
 
   /**
-   * Get timeout (millisecond) of each operation for in Table instance.
+   * Get timeout of each rpc request in this Table instance. It will be overridden by a more
+   * specific rpc timeout config such as readRpcTimeout or writeRpcTimeout.
+   * @see #getReadRpcTimeout(TimeUnit)
+   * @see #getWriteRpcTimeout(TimeUnit)
+   * @param unit the unit of time the timeout to be represented in
+   * @return rpc timeout in the specified time unit
    */
-  int getOperationTimeout();
+  long getRpcTimeout(TimeUnit unit);
 
   /**
    * Get timeout (millisecond) of each rpc request in this Table instance.
    *
-   * @returns Currently configured read timeout
-   * @deprecated Use getReadRpcTimeout or getWriteRpcTimeout instead
+   * @return Currently configured read timeout
+   * @deprecated use {@link #getReadRpcTimeout(TimeUnit)} or
+   *             {@link #getWriteRpcTimeout(TimeUnit)} instead
    */
   @Deprecated
   int getRpcTimeout();
@@ -624,8 +783,18 @@ public interface Table extends Closeable {
   void setRpcTimeout(int rpcTimeout);
 
   /**
-   * Get timeout (millisecond) of each rpc read request in this Table instance.
+   * Get timeout of each rpc read request in this Table instance.
+   * @param unit the unit of time the timeout to be represented in
+   * @return read rpc timeout in the specified time unit
    */
+  long getReadRpcTimeout(TimeUnit unit);
+
+  /**
+   * Get timeout (millisecond) of each rpc read request in this Table instance.
+   * @deprecated since 2.0 and will be removed in 3.0 version
+   *             use {@link #getReadRpcTimeout(TimeUnit)} instead
+   */
+  @Deprecated
   int getReadRpcTimeout();
 
   /**
@@ -634,13 +803,25 @@ public interface Table extends Closeable {
    * If a rpc read request waiting too long, it will stop waiting and send a new request to retry
    * until retries exhausted or operation timeout reached.
    *
-   * @param readRpcTimeout
+   * @param readRpcTimeout the timeout for read rpc request in milliseconds
+   * @deprecated since 2.0.0, use {@link TableBuilder#setReadRpcTimeout} instead
    */
+  @Deprecated
   void setReadRpcTimeout(int readRpcTimeout);
 
   /**
-   * Get timeout (millisecond) of each rpc write request in this Table instance.
+   * Get timeout of each rpc write request in this Table instance.
+   * @param unit the unit of time the timeout to be represented in
+   * @return write rpc timeout in the specified time unit
    */
+  long getWriteRpcTimeout(TimeUnit unit);
+
+  /**
+   * Get timeout (millisecond) of each rpc write request in this Table instance.
+   * @deprecated since 2.0 and will be removed in 3.0 version
+   *             use {@link #getWriteRpcTimeout(TimeUnit)} instead
+   */
+  @Deprecated
   int getWriteRpcTimeout();
 
   /**
@@ -649,7 +830,38 @@ public interface Table extends Closeable {
    * If a rpc write request waiting too long, it will stop waiting and send a new request to retry
    * until retries exhausted or operation timeout reached.
    *
-   * @param writeRpcTimeout
+   * @param writeRpcTimeout the timeout for write rpc request in milliseconds
+   * @deprecated since 2.0.0, use {@link TableBuilder#setWriteRpcTimeout} instead
    */
+  @Deprecated
   void setWriteRpcTimeout(int writeRpcTimeout);
+
+  /**
+   * Get timeout of each operation in Table instance.
+   * @param unit the unit of time the timeout to be represented in
+   * @return operation rpc timeout in the specified time unit
+   */
+  long getOperationTimeout(TimeUnit unit);
+
+  /**
+   * Get timeout (millisecond) of each operation for in Table instance.
+   * @deprecated since 2.0 and will be removed in 3.0 version
+   *             use {@link #getOperationTimeout(TimeUnit)} instead
+   */
+  @Deprecated
+  int getOperationTimeout();
+
+  /**
+   * Set timeout (millisecond) of each operation in this Table instance, will override the value
+   * of hbase.client.operation.timeout in configuration.
+   * Operation timeout is a top-level restriction that makes sure a blocking method will not be
+   * blocked more than this. In each operation, if rpc request fails because of timeout or
+   * other reason, it will retry until success or throw a RetriesExhaustedException. But if the
+   * total time being blocking reach the operation timeout before retries exhausted, it will break
+   * early and throw SocketTimeoutException.
+   * @param operationTimeout the total timeout of each operation in millisecond.
+   * @deprecated since 2.0.0, use {@link TableBuilder#setOperationTimeout} instead
+   */
+  @Deprecated
+  void setOperationTimeout(int operationTimeout);
 }

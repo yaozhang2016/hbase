@@ -21,47 +21,75 @@ package org.apache.hadoop.hbase.quotas;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.util.Collection;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.regex.Pattern;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.hadoop.hbase.Cell;
+import org.apache.hadoop.hbase.CellScanner;
+import org.apache.hadoop.hbase.CompareOperator;
 import org.apache.hadoop.hbase.NamespaceDescriptor;
+import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceStability;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.apache.hadoop.hbase.client.ClusterConnection;
 import org.apache.hadoop.hbase.client.Connection;
 import org.apache.hadoop.hbase.client.Get;
+import org.apache.hadoop.hbase.client.Put;
+import org.apache.hadoop.hbase.client.QuotaStatusCalls;
 import org.apache.hadoop.hbase.client.Result;
+import org.apache.hadoop.hbase.client.ResultScanner;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.client.Table;
-import org.apache.hadoop.hbase.filter.CompareFilter;
+import org.apache.hadoop.hbase.filter.ColumnPrefixFilter;
 import org.apache.hadoop.hbase.filter.Filter;
 import org.apache.hadoop.hbase.filter.FilterList;
 import org.apache.hadoop.hbase.filter.QualifierFilter;
 import org.apache.hadoop.hbase.filter.RegexStringComparator;
 import org.apache.hadoop.hbase.filter.RowFilter;
 import org.apache.hadoop.hbase.protobuf.ProtobufMagic;
+import org.apache.hbase.thirdparty.com.google.protobuf.ByteString;
+import org.apache.hbase.thirdparty.com.google.protobuf.InvalidProtocolBufferException;
+import org.apache.hbase.thirdparty.com.google.protobuf.TextFormat;
+import org.apache.hbase.thirdparty.com.google.protobuf.UnsafeByteOperations;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.QuotaProtos;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.QuotaProtos.GetQuotaStatesResponse;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.QuotaProtos.GetSpaceQuotaRegionSizesResponse;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.QuotaProtos.GetSpaceQuotaSnapshotsResponse;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.QuotaProtos.GetSpaceQuotaSnapshotsResponse.TableQuotaSnapshot;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.QuotaProtos.GetSpaceQuotaRegionSizesResponse.RegionSizes;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.QuotaProtos.Quotas;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.QuotaProtos.SpaceQuota;
 import org.apache.hadoop.hbase.util.Bytes;
-import org.apache.hadoop.hbase.util.Strings;
 
 /**
  * Helper class to interact with the quota table.
- * <pre>
- *     ROW-KEY      FAM/QUAL        DATA
- *   n.&lt;namespace&gt; q:s         &lt;global-quotas&gt;
- *   t.&lt;table&gt;     q:s         &lt;global-quotas&gt;
- *   u.&lt;user&gt;      q:s         &lt;global-quotas&gt;
- *   u.&lt;user&gt;      q:s.&lt;table&gt; &lt;table-quotas&gt;
- *   u.&lt;user&gt;      q:s.&lt;ns&gt;:   &lt;namespace-quotas&gt;
- * </pre>
+ * <table>
+ *   <tr><th>ROW-KEY</th><th>FAM/QUAL</th><th>DATA</th></tr>
+ *   <tr><td>n.&lt;namespace&gt;</td><td>q:s</td><td>&lt;global-quotas&gt;</td></tr>
+ *   <tr><td>n.&lt;namespace&gt;</td><td>u:p</td><td>&lt;namespace-quota policy&gt;</td></tr>
+ *   <tr><td>n.&lt;namespace&gt;</td><td>u:s</td><td>&lt;SpaceQuotaSnapshot&gt;</td></tr>
+ *   <tr><td>t.&lt;table&gt;</td><td>q:s</td><td>&lt;global-quotas&gt;</td></tr>
+ *   <tr><td>t.&lt;table&gt;</td><td>u:p</td><td>&lt;table-quota policy&gt;</td></tr>
+ *   <tr><td>t.&lt;table&gt;</td><td>u:ss.&lt;snapshot name&gt;</td><td>&lt;SpaceQuotaSnapshot&gt;</td></tr>
+ *   <tr><td>u.&lt;user&gt;</td><td>q:s</td><td>&lt;global-quotas&gt;</td></tr>
+ *   <tr><td>u.&lt;user&gt;</td><td>q:s.&lt;table&gt;</td><td>&lt;table-quotas&gt;</td></tr>
+ *   <tr><td>u.&lt;user&gt;</td><td>q:s.&lt;ns&gt;</td><td>&lt;namespace-quotas&gt;</td></tr>
+ * </table
  */
 @InterfaceAudience.Private
 @InterfaceStability.Evolving
 public class QuotaTableUtil {
-  private static final Log LOG = LogFactory.getLog(QuotaTableUtil.class);
+  private static final Logger LOG = LoggerFactory.getLogger(QuotaTableUtil.class);
 
   /** System table for quotas */
   public static final TableName QUOTA_TABLE_NAME =
@@ -71,6 +99,10 @@ public class QuotaTableUtil {
   protected static final byte[] QUOTA_FAMILY_USAGE = Bytes.toBytes("u");
   protected static final byte[] QUOTA_QUALIFIER_SETTINGS = Bytes.toBytes("s");
   protected static final byte[] QUOTA_QUALIFIER_SETTINGS_PREFIX = Bytes.toBytes("s.");
+  protected static final byte[] QUOTA_QUALIFIER_POLICY = Bytes.toBytes("p");
+  protected static final byte[] QUOTA_SNAPSHOT_SIZE_QUALIFIER = Bytes.toBytes("ss");
+  protected static final String QUOTA_POLICY_COLUMN =
+      Bytes.toString(QUOTA_FAMILY_USAGE) + ":" + Bytes.toString(QUOTA_QUALIFIER_POLICY);
   protected static final byte[] QUOTA_USER_ROW_KEY_PREFIX = Bytes.toBytes("u.");
   protected static final byte[] QUOTA_TABLE_ROW_KEY_PREFIX = Bytes.toBytes("t.");
   protected static final byte[] QUOTA_NAMESPACE_ROW_KEY_PREFIX = Bytes.toBytes("n.");
@@ -159,44 +191,119 @@ public class QuotaTableUtil {
    */
   public static Filter makeFilter(final QuotaFilter filter) {
     FilterList filterList = new FilterList(FilterList.Operator.MUST_PASS_ALL);
-    if (!Strings.isEmpty(filter.getUserFilter())) {
+    if (StringUtils.isNotEmpty(filter.getUserFilter())) {
       FilterList userFilters = new FilterList(FilterList.Operator.MUST_PASS_ONE);
       boolean hasFilter = false;
 
-      if (!Strings.isEmpty(filter.getNamespaceFilter())) {
+      if (StringUtils.isNotEmpty(filter.getNamespaceFilter())) {
         FilterList nsFilters = new FilterList(FilterList.Operator.MUST_PASS_ALL);
-        nsFilters.addFilter(new RowFilter(CompareFilter.CompareOp.EQUAL,
+        nsFilters.addFilter(new RowFilter(CompareOperator.EQUAL,
             new RegexStringComparator(getUserRowKeyRegex(filter.getUserFilter()), 0)));
-        nsFilters.addFilter(new QualifierFilter(CompareFilter.CompareOp.EQUAL,
+        nsFilters.addFilter(new QualifierFilter(CompareOperator.EQUAL,
             new RegexStringComparator(
               getSettingsQualifierRegexForUserNamespace(filter.getNamespaceFilter()), 0)));
         userFilters.addFilter(nsFilters);
         hasFilter = true;
       }
-      if (!Strings.isEmpty(filter.getTableFilter())) {
+      if (StringUtils.isNotEmpty(filter.getTableFilter())) {
         FilterList tableFilters = new FilterList(FilterList.Operator.MUST_PASS_ALL);
-        tableFilters.addFilter(new RowFilter(CompareFilter.CompareOp.EQUAL,
+        tableFilters.addFilter(new RowFilter(CompareOperator.EQUAL,
             new RegexStringComparator(getUserRowKeyRegex(filter.getUserFilter()), 0)));
-        tableFilters.addFilter(new QualifierFilter(CompareFilter.CompareOp.EQUAL,
+        tableFilters.addFilter(new QualifierFilter(CompareOperator.EQUAL,
             new RegexStringComparator(
               getSettingsQualifierRegexForUserTable(filter.getTableFilter()), 0)));
         userFilters.addFilter(tableFilters);
         hasFilter = true;
       }
       if (!hasFilter) {
-        userFilters.addFilter(new RowFilter(CompareFilter.CompareOp.EQUAL,
+        userFilters.addFilter(new RowFilter(CompareOperator.EQUAL,
             new RegexStringComparator(getUserRowKeyRegex(filter.getUserFilter()), 0)));
       }
 
       filterList.addFilter(userFilters);
-    } else if (!Strings.isEmpty(filter.getTableFilter())) {
-      filterList.addFilter(new RowFilter(CompareFilter.CompareOp.EQUAL,
+    } else if (StringUtils.isNotEmpty(filter.getTableFilter())) {
+      filterList.addFilter(new RowFilter(CompareOperator.EQUAL,
           new RegexStringComparator(getTableRowKeyRegex(filter.getTableFilter()), 0)));
-    } else if (!Strings.isEmpty(filter.getNamespaceFilter())) {
-      filterList.addFilter(new RowFilter(CompareFilter.CompareOp.EQUAL,
+    } else if (StringUtils.isNotEmpty(filter.getNamespaceFilter())) {
+      filterList.addFilter(new RowFilter(CompareOperator.EQUAL,
           new RegexStringComparator(getNamespaceRowKeyRegex(filter.getNamespaceFilter()), 0)));
     }
     return filterList;
+  }
+
+  /**
+   * Creates a {@link Scan} which returns only quota snapshots from the quota table.
+   */
+  public static Scan makeQuotaSnapshotScan() {
+    return makeQuotaSnapshotScanForTable(null);
+  }
+
+  /**
+   * Fetches all {@link SpaceQuotaSnapshot} objects from the {@code hbase:quota} table.
+   *
+   * @param conn The HBase connection
+   * @return A map of table names and their computed snapshot.
+   */
+  public static Map<TableName,SpaceQuotaSnapshot> getSnapshots(Connection conn) throws IOException {
+    Map<TableName,SpaceQuotaSnapshot> snapshots = new HashMap<>();
+    try (Table quotaTable = conn.getTable(QUOTA_TABLE_NAME);
+        ResultScanner rs = quotaTable.getScanner(makeQuotaSnapshotScan())) {
+      for (Result r : rs) {
+        extractQuotaSnapshot(r, snapshots);
+      }
+    }
+    return snapshots;
+  }
+
+  /**
+   * Creates a {@link Scan} which returns only {@link SpaceQuotaSnapshot} from the quota table for a
+   * specific table.
+   * @param tn Optionally, a table name to limit the scan's rowkey space. Can be null.
+   */
+  public static Scan makeQuotaSnapshotScanForTable(TableName tn) {
+    Scan s = new Scan();
+    // Limit to "u:v" column
+    s.addColumn(QUOTA_FAMILY_USAGE, QUOTA_QUALIFIER_POLICY);
+    if (null == tn) {
+      s.setRowPrefixFilter(QUOTA_TABLE_ROW_KEY_PREFIX);
+    } else {
+      byte[] row = getTableRowKey(tn);
+      // Limit rowspace to the "t:" prefix
+      s.withStartRow(row, true).withStopRow(row, true);
+    }
+    return s;
+  }
+
+  /**
+   * Extracts the {@link SpaceViolationPolicy} and {@link TableName} from the provided
+   * {@link Result} and adds them to the given {@link Map}. If the result does not contain
+   * the expected information or the serialized policy in the value is invalid, this method
+   * will throw an {@link IllegalArgumentException}.
+   *
+   * @param result A row from the quota table.
+   * @param snapshots A map of snapshots to add the result of this method into.
+   */
+  public static void extractQuotaSnapshot(
+      Result result, Map<TableName,SpaceQuotaSnapshot> snapshots) {
+    byte[] row = Objects.requireNonNull(result).getRow();
+    if (row == null) {
+      throw new IllegalArgumentException("Provided result had a null row");
+    }
+    final TableName targetTableName = getTableFromRowKey(row);
+    Cell c = result.getColumnLatestCell(QUOTA_FAMILY_USAGE, QUOTA_QUALIFIER_POLICY);
+    if (c == null) {
+      throw new IllegalArgumentException("Result did not contain the expected column "
+          + QUOTA_POLICY_COLUMN + ", " + result.toString());
+    }
+    ByteString buffer = UnsafeByteOperations.unsafeWrap(
+        c.getValueArray(), c.getValueOffset(), c.getValueLength());
+    try {
+      QuotaProtos.SpaceQuotaSnapshot snapshot = QuotaProtos.SpaceQuotaSnapshot.parseFrom(buffer);
+      snapshots.put(targetTableName, SpaceQuotaSnapshot.toSpaceQuotaSnapshot(snapshot));
+    } catch (InvalidProtocolBufferException e) {
+      throw new IllegalArgumentException(
+          "Result did not contain a valid SpaceQuota protocol buffer message", e);
+    }
   }
 
   public static interface UserQuotasVisitor {
@@ -234,6 +341,37 @@ public class QuotaTableUtil {
     } else {
       LOG.warn("unexpected row-key: " + Bytes.toString(row));
     }
+  }
+
+  public static void parseResultToCollection(final Result result,
+      Collection<QuotaSettings> quotaSettings) throws IOException {
+
+    QuotaTableUtil.parseResult(result, new QuotaTableUtil.QuotasVisitor() {
+      @Override
+      public void visitUserQuotas(String userName, Quotas quotas) {
+        quotaSettings.addAll(QuotaSettingsFactory.fromUserQuotas(userName, quotas));
+      }
+
+      @Override
+      public void visitUserQuotas(String userName, TableName table, Quotas quotas) {
+        quotaSettings.addAll(QuotaSettingsFactory.fromUserQuotas(userName, table, quotas));
+      }
+
+      @Override
+      public void visitUserQuotas(String userName, String namespace, Quotas quotas) {
+        quotaSettings.addAll(QuotaSettingsFactory.fromUserQuotas(userName, namespace, quotas));
+      }
+
+      @Override
+      public void visitTableQuotas(TableName tableName, Quotas quotas) {
+        quotaSettings.addAll(QuotaSettingsFactory.fromTableQuotas(tableName, quotas));
+      }
+
+      @Override
+      public void visitNamespaceQuotas(String namespace, Quotas quotas) {
+        quotaSettings.addAll(QuotaSettingsFactory.fromNamespaceQuotas(namespace, quotas));
+      }
+    });
   }
 
   public static void parseNamespaceResult(final Result result,
@@ -294,15 +432,230 @@ public class QuotaTableUtil {
     }
   }
 
+  /**
+   * Creates a {@link Put} to store the given {@code snapshot} for the given {@code tableName} in
+   * the quota table.
+   */
+  static Put createPutForSpaceSnapshot(TableName tableName, SpaceQuotaSnapshot snapshot) {
+    Put p = new Put(getTableRowKey(tableName));
+    p.addColumn(
+        QUOTA_FAMILY_USAGE, QUOTA_QUALIFIER_POLICY,
+        SpaceQuotaSnapshot.toProtoSnapshot(snapshot).toByteArray());
+    return p;
+  }
+
+  /**
+   * Creates a {@link Get} for the HBase snapshot's size against the given table.
+   */
+  static Get makeGetForSnapshotSize(TableName tn, String snapshot) {
+    Get g = new Get(Bytes.add(QUOTA_TABLE_ROW_KEY_PREFIX, Bytes.toBytes(tn.toString())));
+    g.addColumn(
+        QUOTA_FAMILY_USAGE,
+        Bytes.add(QUOTA_SNAPSHOT_SIZE_QUALIFIER, Bytes.toBytes(snapshot)));
+    return g;
+  }
+
+  /**
+   * Creates a {@link Put} to persist the current size of the {@code snapshot} with respect to
+   * the given {@code table}.
+   */
+  static Put createPutForSnapshotSize(TableName tableName, String snapshot, long size) {
+    // We just need a pb message with some `long usage`, so we can just reuse the
+    // SpaceQuotaSnapshot message instead of creating a new one.
+    Put p = new Put(getTableRowKey(tableName));
+    p.addColumn(QUOTA_FAMILY_USAGE, getSnapshotSizeQualifier(snapshot),
+        org.apache.hadoop.hbase.shaded.protobuf.generated.QuotaProtos.SpaceQuotaSnapshot
+            .newBuilder().setQuotaUsage(size).build().toByteArray());
+    return p;
+  }
+
+  /**
+   * Creates a {@code Put} for the namespace's total snapshot size.
+   */
+  static Put createPutForNamespaceSnapshotSize(String namespace, long size) {
+    Put p = new Put(getNamespaceRowKey(namespace));
+    p.addColumn(QUOTA_FAMILY_USAGE, QUOTA_SNAPSHOT_SIZE_QUALIFIER,
+        org.apache.hadoop.hbase.shaded.protobuf.generated.QuotaProtos.SpaceQuotaSnapshot
+            .newBuilder().setQuotaUsage(size).build().toByteArray());
+    return p;
+  }
+
+  /**
+   * Fetches the computed size of all snapshots against tables in a namespace for space quotas.
+   */
+  static long getNamespaceSnapshotSize(
+      Connection conn, String namespace) throws IOException {
+    try (Table quotaTable = conn.getTable(QuotaTableUtil.QUOTA_TABLE_NAME)) {
+      Result r = quotaTable.get(createGetNamespaceSnapshotSize(namespace));
+      if (r.isEmpty()) {
+        return 0L;
+      }
+      r.advance();
+      return parseSnapshotSize(r.current());
+    } catch (InvalidProtocolBufferException e) {
+      throw new IOException("Could not parse snapshot size value for namespace " + namespace, e);
+    }
+  }
+
+  /**
+   * Creates a {@code Get} to fetch the namespace's total snapshot size.
+   */
+  static Get createGetNamespaceSnapshotSize(String namespace) {
+    Get g = new Get(getNamespaceRowKey(namespace));
+    g.addColumn(QUOTA_FAMILY_USAGE, QUOTA_SNAPSHOT_SIZE_QUALIFIER);
+    return g;
+  }
+
+  /**
+   * Parses the snapshot size from the given Cell's value.
+   */
+  static long parseSnapshotSize(Cell c) throws InvalidProtocolBufferException {
+    ByteString bs = UnsafeByteOperations.unsafeWrap(
+        c.getValueArray(), c.getValueOffset(), c.getValueLength());
+    return QuotaProtos.SpaceQuotaSnapshot.parseFrom(bs).getQuotaUsage();
+  }
+
+  static Scan createScanForSpaceSnapshotSizes() {
+    return createScanForSpaceSnapshotSizes(null);
+  }
+
+  static Scan createScanForSpaceSnapshotSizes(TableName table) {
+    Scan s = new Scan();
+    if (null == table) {
+      // Read all tables, just look at the row prefix
+      s.setRowPrefixFilter(QUOTA_TABLE_ROW_KEY_PREFIX);
+    } else {
+      // Fetch the exact row for the table
+      byte[] rowkey = getTableRowKey(table);
+      // Fetch just this one row
+      s.withStartRow(rowkey).withStopRow(rowkey, true);
+    }
+
+    // Just the usage family and only the snapshot size qualifiers
+    return s.addFamily(QUOTA_FAMILY_USAGE).setFilter(
+        new ColumnPrefixFilter(QUOTA_SNAPSHOT_SIZE_QUALIFIER));
+  }
+
+  /**
+   * Fetches any persisted HBase snapshot sizes stored in the quota table. The sizes here are
+   * computed relative to the table which the snapshot was created from. A snapshot's size will
+   * not include the size of files which the table still refers. These sizes, in bytes, are what
+   * is used internally to compute quota violation for tables and namespaces.
+   *
+   * @return A map of snapshot name to size in bytes per space quota computations
+   */
+  public static Map<String,Long> getObservedSnapshotSizes(Connection conn) throws IOException {
+    try (Table quotaTable = conn.getTable(QUOTA_TABLE_NAME);
+        ResultScanner rs = quotaTable.getScanner(createScanForSpaceSnapshotSizes())) {
+      final Map<String,Long> snapshotSizes = new HashMap<>();
+      for (Result r : rs) {
+        CellScanner cs = r.cellScanner();
+        while (cs.advance()) {
+          Cell c = cs.current();
+          final String snapshot = extractSnapshotNameFromSizeCell(c);
+          final long size = parseSnapshotSize(c);
+          snapshotSizes.put(snapshot, size);
+        }
+      }
+      return snapshotSizes;
+    }
+  }
+
+  /* =========================================================================
+   *  Space quota status RPC helpers
+   */
+  /**
+   * Fetches the table sizes on the filesystem as tracked by the HBase Master.
+   */
+  public static Map<TableName,Long> getMasterReportedTableSizes(
+      Connection conn) throws IOException {
+    if (!(conn instanceof ClusterConnection)) {
+      throw new IllegalArgumentException("Expected a ClusterConnection");
+    }
+    ClusterConnection clusterConn = (ClusterConnection) conn;
+    GetSpaceQuotaRegionSizesResponse response = QuotaStatusCalls.getMasterRegionSizes(
+        clusterConn, 0);
+    Map<TableName,Long> tableSizes = new HashMap<>();
+    for (RegionSizes sizes : response.getSizesList()) {
+      TableName tn = ProtobufUtil.toTableName(sizes.getTableName());
+      tableSizes.put(tn, sizes.getSize());
+    }
+    return tableSizes;
+  }
+
+  /**
+   * Fetches the observed {@link SpaceQuotaSnapshot}s observed by a RegionServer.
+   */
+  public static Map<TableName,SpaceQuotaSnapshot> getRegionServerQuotaSnapshots(
+      Connection conn, ServerName regionServer) throws IOException {
+    if (!(conn instanceof ClusterConnection)) {
+      throw new IllegalArgumentException("Expected a ClusterConnection");
+    }
+    ClusterConnection clusterConn = (ClusterConnection) conn;
+    GetSpaceQuotaSnapshotsResponse response = QuotaStatusCalls.getRegionServerQuotaSnapshot(
+        clusterConn, 0, regionServer);
+    Map<TableName,SpaceQuotaSnapshot> snapshots = new HashMap<>();
+    for (TableQuotaSnapshot snapshot : response.getSnapshotsList()) {
+      snapshots.put(
+          ProtobufUtil.toTableName(snapshot.getTableName()),
+          SpaceQuotaSnapshot.toSpaceQuotaSnapshot(snapshot.getSnapshot()));
+    }
+    return snapshots;
+  }
+
+  /**
+   * Returns the Master's view of a quota on the given {@code tableName} or null if the
+   * Master has no quota information on that table.
+   */
+  public static SpaceQuotaSnapshot getCurrentSnapshot(
+      Connection conn, TableName tn) throws IOException {
+    if (!(conn instanceof ClusterConnection)) {
+      throw new IllegalArgumentException("Expected a ClusterConnection");
+    }
+    ClusterConnection clusterConn = (ClusterConnection) conn;
+    GetQuotaStatesResponse resp = QuotaStatusCalls.getMasterQuotaStates(clusterConn, 0);
+    HBaseProtos.TableName protoTableName = ProtobufUtil.toProtoTableName(tn);
+    for (GetQuotaStatesResponse.TableQuotaSnapshot tableSnapshot : resp.getTableSnapshotsList()) {
+      if (protoTableName.equals(tableSnapshot.getTableName())) {
+        return SpaceQuotaSnapshot.toSpaceQuotaSnapshot(tableSnapshot.getSnapshot());
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Returns the Master's view of a quota on the given {@code namespace} or null if the
+   * Master has no quota information on that namespace.
+   */
+  public static SpaceQuotaSnapshot getCurrentSnapshot(
+      Connection conn, String namespace) throws IOException {
+    if (!(conn instanceof ClusterConnection)) {
+      throw new IllegalArgumentException("Expected a ClusterConnection");
+    }
+    ClusterConnection clusterConn = (ClusterConnection) conn;
+    GetQuotaStatesResponse resp = QuotaStatusCalls.getMasterQuotaStates(clusterConn, 0);
+    for (GetQuotaStatesResponse.NamespaceQuotaSnapshot nsSnapshot : resp.getNsSnapshotsList()) {
+      if (namespace.equals(nsSnapshot.getNamespace())) {
+        return SpaceQuotaSnapshot.toSpaceQuotaSnapshot(nsSnapshot.getSnapshot());
+      }
+    }
+    return null;
+  }
+
   /* =========================================================================
    *  Quotas protobuf helpers
    */
   protected static Quotas quotasFromData(final byte[] data) throws IOException {
+    return quotasFromData(data, 0, data.length);
+  }
+
+  protected static Quotas quotasFromData(
+      final byte[] data, int offset, int length) throws IOException {
     int magicLen = ProtobufMagic.lengthOfPBMagic();
-    if (!ProtobufMagic.isPBMagicPrefix(data, 0, magicLen)) {
+    if (!ProtobufMagic.isPBMagicPrefix(data, offset, magicLen)) {
       throw new IOException("Missing pb magic prefix");
     }
-    return Quotas.parseFrom(new ByteArrayInputStream(data, magicLen, data.length - magicLen));
+    return Quotas.parseFrom(new ByteArrayInputStream(data, offset + magicLen, length - magicLen));
   }
 
   protected static byte[] quotasToData(final Quotas data) throws IOException {
@@ -316,6 +669,11 @@ public class QuotaTableUtil {
     boolean hasSettings = false;
     hasSettings |= quotas.hasThrottle();
     hasSettings |= quotas.hasBypassGlobals();
+    // Only when there is a space quota, make sure there's actually both fields provided
+    // Otherwise, it's a noop.
+    if (quotas.hasSpace()) {
+      hasSettings |= (quotas.getSpace().hasSoftLimit() && quotas.getSpace().hasViolationPolicy());
+    }
     return !hasSettings;
   }
 
@@ -408,5 +766,35 @@ public class QuotaTableUtil {
 
   protected static String getUserFromRowKey(final byte[] key) {
     return Bytes.toString(key, QUOTA_USER_ROW_KEY_PREFIX.length);
+  }
+
+  protected static SpaceQuota getProtoViolationPolicy(SpaceViolationPolicy policy) {
+    return SpaceQuota.newBuilder()
+          .setViolationPolicy(ProtobufUtil.toProtoViolationPolicy(policy))
+          .build();
+  }
+
+  protected static SpaceViolationPolicy getViolationPolicy(SpaceQuota proto) {
+    if (!proto.hasViolationPolicy()) {
+      throw new IllegalArgumentException("Protobuf SpaceQuota does not have violation policy.");
+    }
+    return ProtobufUtil.toViolationPolicy(proto.getViolationPolicy());
+  }
+
+  protected static byte[] getSnapshotSizeQualifier(String snapshotName) {
+    return Bytes.add(QUOTA_SNAPSHOT_SIZE_QUALIFIER, Bytes.toBytes(snapshotName));
+  }
+
+  protected static String extractSnapshotNameFromSizeCell(Cell c) {
+    return Bytes.toString(
+        c.getQualifierArray(), c.getQualifierOffset() + QUOTA_SNAPSHOT_SIZE_QUALIFIER.length,
+        c.getQualifierLength() - QUOTA_SNAPSHOT_SIZE_QUALIFIER.length);
+  }
+
+  protected static long extractSnapshotSize(
+      byte[] data, int offset, int length) throws InvalidProtocolBufferException {
+    ByteString byteStr = UnsafeByteOperations.unsafeWrap(data, offset, length);
+    return org.apache.hadoop.hbase.shaded.protobuf.generated.QuotaProtos.SpaceQuotaSnapshot
+        .parseFrom(byteStr).getQuotaUsage();
   }
 }

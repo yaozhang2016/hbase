@@ -36,8 +36,10 @@ import org.apache.hadoop.hbase.testclassification.RegionServerTests;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.Threads;
 import org.junit.BeforeClass;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.junit.rules.TestName;
 
 import java.io.IOException;
 
@@ -48,6 +50,9 @@ public class TestRemoveRegionMetrics {
   private static Configuration conf;
   private static HBaseTestingUtility TEST_UTIL;
   private static MetricsAssertHelper metricsHelper;
+
+  @Rule
+  public TestName name = new TestName();
 
   @BeforeClass
   public static void startCluster() throws Exception {
@@ -72,11 +77,11 @@ public class TestRemoveRegionMetrics {
 
   @Test
   public void testMoveRegion() throws IOException, InterruptedException {
-    String tableNameString = "testMoveRegion";
+    String tableNameString = name.getMethodName();
     TableName tableName = TableName.valueOf(tableNameString);
     Table t = TEST_UTIL.createTable(tableName, Bytes.toBytes("D"));
     TEST_UTIL.waitUntilAllRegionsAssigned(t.getName());
-    Admin admin = TEST_UTIL.getHBaseAdmin();
+    Admin admin = TEST_UTIL.getAdmin();
     HRegionInfo regionInfo;
     byte[] row =  Bytes.toBytes("r1");
 
@@ -91,7 +96,6 @@ public class TestRemoveRegionMetrics {
       int destServerIdx = (currentServerIdx +1)% cluster.getLiveRegionServerThreads().size();
       HRegionServer currentServer = cluster.getRegionServer(currentServerIdx);
       HRegionServer destServer = cluster.getRegionServer(destServerIdx);
-      byte[] destServerName = Bytes.toBytes(destServer.getServerName().getServerName());
 
 
       // Do a put. The counters should be non-zero now
@@ -110,24 +114,22 @@ public class TestRemoveRegionMetrics {
           "_region_" + regionInfo.getEncodedName()+
           "_metric";
 
-      metricsHelper.assertCounter(prefix + "_mutateCount", 1, currentAgg);
+      metricsHelper.assertCounter(prefix + "_putCount", 1, currentAgg);
 
 
       try {
-        admin.move(regionInfo.getEncodedNameAsBytes(), destServerName);
+        TEST_UTIL.moveRegionAndWait(regionInfo, destServer.getServerName());
         moved = true;
-        Thread.sleep(5000);
       } catch (IOException ioe) {
         moved = false;
       }
-      TEST_UTIL.waitUntilAllRegionsAssigned(t.getName());
 
       if (moved) {
         MetricsRegionAggregateSource destAgg = destServer.getRegion(regionInfo.getRegionName())
             .getMetrics()
             .getSource()
             .getAggregateSource();
-        metricsHelper.assertCounter(prefix + "_mutateCount", 0, destAgg);
+        metricsHelper.assertCounter(prefix + "_putCount", 0, destAgg);
       }
     }
 

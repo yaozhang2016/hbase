@@ -1,6 +1,4 @@
 /**
- * Copyright The Apache Software Foundation
- *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -19,103 +17,85 @@
  */
 package org.apache.hadoop.hbase.rsgroup;
 
-import com.google.common.net.HostAndPort;
-
-import java.io.Closeable;
 import java.io.IOException;
 import java.util.List;
 import java.util.Set;
 
 import org.apache.hadoop.hbase.TableName;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.client.Connection;
+import org.apache.hadoop.hbase.net.Address;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * Group user API interface used between client and server.
  */
 @InterfaceAudience.Private
-public abstract class RSGroupAdmin implements Closeable {
-
+public interface RSGroupAdmin {
   /**
-   * Create a new RSGroupAdmin client
-   * @param conn connection RSGroupAdmin instance will use
-   * @return a new RSGroupAdmin client
-   * @throws IOException on failure to create new client
+   * Gets {@code RSGroupInfo} for given group name.
    */
-  public static RSGroupAdmin newClient(Connection conn) throws IOException {
-    return new RSGroupAdminClient(conn);
-  }
+  RSGroupInfo getRSGroupInfo(String groupName) throws IOException;
 
   /**
-   * Gets the regionserver group information.
-   *
-   * @param groupName the group name
-   * @return An instance of RSGroupInfo
+   * Gets {@code RSGroupInfo} for the given table's group.
    */
-  public abstract RSGroupInfo getRSGroupInfo(String groupName) throws IOException;
+  RSGroupInfo getRSGroupInfoOfTable(TableName tableName) throws IOException;
 
   /**
-   * Gets the regionserver group info of table.
-   *
-   * @param tableName the table name
-   * @return An instance of RSGroupInfo.
+   * Move given set of servers to the specified target RegionServer group.
    */
-  public abstract RSGroupInfo getRSGroupInfoOfTable(TableName tableName) throws IOException;
+  void moveServers(Set<Address> servers, String targetGroup) throws IOException;
 
   /**
-   * Move a set of serves to another group
-   *
-   *
-   * @param servers set of servers, must be in the form HOST:PORT
-   * @param targetGroup the target group
-   * @throws java.io.IOException Signals that an I/O exception has occurred.
-   */
-  public abstract void moveServers(Set<HostAndPort> servers, String targetGroup) throws IOException;
-
-  /**
-   * Move tables to a new group.
+   * Move given set of tables to the specified target RegionServer group.
    * This will unassign all of a table's region so it can be reassigned to the correct group.
-   * @param tables list of tables to move
-   * @param targetGroup target group
-   * @throws java.io.IOException on failure to move tables
    */
-  public abstract void moveTables(Set<TableName> tables, String targetGroup) throws IOException;
+  void moveTables(Set<TableName> tables, String targetGroup) throws IOException;
 
   /**
-   * Add a new group
-   * @param name name of the group
-   * @throws java.io.IOException on failure to add group
+   * Creates a new RegionServer group with the given name.
    */
-  public abstract void addRSGroup(String name) throws IOException;
+  void addRSGroup(String groupName) throws IOException;
 
   /**
-   * Remove a regionserver group
-   * @param name name of the group
-   * @throws java.io.IOException on failure to remove group
+   * Removes RegionServer group associated with the given name.
    */
-  public abstract void removeRSGroup(String name) throws IOException;
+  void removeRSGroup(String groupName) throws IOException;
 
   /**
-   * Balance the regions in a group
+   * Balance regions in the given RegionServer group.
    *
-   * @param name the name of the group to balance
-   * @return boolean whether balance ran or not
-   * @throws java.io.IOException on unexpected failure to balance group
+   * @return boolean Whether balance ran or not
    */
-  public abstract boolean balanceRSGroup(String name) throws IOException;
+  boolean balanceRSGroup(String groupName) throws IOException;
 
   /**
-   * Lists the existing groups.
-   *
-   * @return Collection of RSGroupInfo.
+   * Lists current set of RegionServer groups.
    */
-  public abstract List<RSGroupInfo> listRSGroups() throws IOException;
+  List<RSGroupInfo> listRSGroups() throws IOException;
 
   /**
    * Retrieve the RSGroupInfo a server is affiliated to
    * @param hostPort HostPort to get RSGroupInfo for
-   * @return RSGroupInfo associated with the server
-   * @throws java.io.IOException on unexpected failure to retrieve GroupInfo
    */
-  public abstract RSGroupInfo getRSGroupOfServer(HostAndPort hostPort) throws IOException;
+  RSGroupInfo getRSGroupOfServer(Address hostPort) throws IOException;
+
+  /**
+   * Move given set of servers and tables to the specified target RegionServer group.
+   * @param servers set of servers to move
+   * @param tables set of tables to move
+   * @param targetGroup the target group name
+   * @throws IOException if moving the server and tables fail
+   */
+  void moveServersAndTables(Set<Address> servers, Set<TableName> tables,
+                            String targetGroup) throws IOException;
+
+  /**
+   * Remove decommissioned servers from rsgroup.
+   * 1. Sometimes we may find the server aborted due to some hardware failure and we must offline
+   * the server for repairing. Or we need to move some servers to join other clusters.
+   * So we need to remove these servers from the rsgroup.
+   * 2. Dead/recovering/live servers will be disallowed.
+   * @param servers set of servers to remove
+   */
+  void removeServers(Set<Address> servers) throws IOException;
 }

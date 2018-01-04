@@ -32,14 +32,12 @@ import java.util.List;
 import javax.xml.bind.JAXBContext;
 import javax.xml.bind.JAXBException;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.HRegionLocation;
 import org.apache.hadoop.hbase.HTableDescriptor;
-import org.apache.hadoop.hbase.KeyValue;
+import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Admin;
@@ -48,6 +46,7 @@ import org.apache.hadoop.hbase.client.Durability;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.RegionLocator;
 import org.apache.hadoop.hbase.client.Table;
+import org.apache.hadoop.hbase.regionserver.TestEndToEndSplitTransaction;
 import org.apache.hadoop.hbase.rest.client.Client;
 import org.apache.hadoop.hbase.rest.client.Cluster;
 import org.apache.hadoop.hbase.rest.client.Response;
@@ -63,10 +62,12 @@ import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Category({RestTests.class, MediumTests.class})
 public class TestTableResource {
-  private static final Log LOG = LogFactory.getLog(TestTableResource.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestTableResource.class);
 
   private static TableName TABLE = TableName.valueOf("TestTableResource");
   private static String COLUMN_FAMILY = "test";
@@ -90,7 +91,7 @@ public class TestTableResource {
         TableInfoModel.class,
         TableListModel.class,
         TableRegionModel.class);
-    Admin admin = TEST_UTIL.getHBaseAdmin();
+    Admin admin = TEST_UTIL.getAdmin();
     if (admin.tableExists(TABLE)) {
       return;
     }
@@ -98,7 +99,7 @@ public class TestTableResource {
     htd.addFamily(new HColumnDescriptor(COLUMN_FAMILY));
     admin.createTable(htd);
     byte[] k = new byte[3];
-    byte [][] famAndQf = KeyValue.parseColumn(Bytes.toBytes(COLUMN));
+    byte [][] famAndQf = CellUtil.parseColumn(Bytes.toBytes(COLUMN));
     List<Put> puts = new ArrayList<>();
     for (byte b1 = 'a'; b1 < 'z'; b1++) {
       for (byte b2 = 'a'; b2 < 'z'; b2++) {
@@ -127,6 +128,8 @@ public class TestTableResource {
     admin.split(TABLE);
     // give some time for the split to happen
 
+    TestEndToEndSplitTransaction.blockUntilRegionSplit(TEST_UTIL.getConfiguration(), 60000,
+      m.get(0).getRegionInfo().getRegionName(), true);
     long timeout = System.currentTimeMillis() + (15 * 1000);
     while (System.currentTimeMillis() < timeout && m.size()!=2){
       try {

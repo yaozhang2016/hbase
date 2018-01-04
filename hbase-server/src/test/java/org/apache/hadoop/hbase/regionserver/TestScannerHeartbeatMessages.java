@@ -21,52 +21,49 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
-import org.apache.hadoop.hbase.shaded.com.google.protobuf.RpcController;
-import org.apache.hadoop.hbase.shaded.com.google.protobuf.ServiceException;
-
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Callable;
 
-import org.apache.commons.lang.exception.ExceptionUtils;
-import org.apache.commons.logging.impl.Log4JLogger;
+import org.apache.commons.lang3.exception.ExceptionUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellComparator;
+import org.apache.hadoop.hbase.CellComparatorImpl;
 import org.apache.hadoop.hbase.CellUtil;
-import org.apache.hadoop.hbase.CoordinatedStateManager;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.HRegionInfo;
-import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.HTestConst;
 import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Put;
+import org.apache.hadoop.hbase.client.RegionInfo;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.ResultScanner;
 import org.apache.hadoop.hbase.client.Scan;
-import org.apache.hadoop.hbase.client.ScannerCallable;
 import org.apache.hadoop.hbase.client.Table;
+import org.apache.hadoop.hbase.client.TableDescriptor;
 import org.apache.hadoop.hbase.filter.Filter;
 import org.apache.hadoop.hbase.filter.FilterBase;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos.ScanRequest;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos.ScanResponse;
 import org.apache.hadoop.hbase.regionserver.HRegion.RegionScannerImpl;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.Threads;
 import org.apache.hadoop.hbase.wal.WAL;
-import org.apache.log4j.Level;
 import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+
+import org.apache.hbase.thirdparty.com.google.protobuf.RpcController;
+import org.apache.hbase.thirdparty.com.google.protobuf.ServiceException;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos.ScanRequest;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos.ScanResponse;
 
 /**
  * Here we test to make sure that scans return the expected Results when the server is sending the
@@ -121,8 +118,6 @@ public class TestScannerHeartbeatMessages {
 
   @BeforeClass
   public static void setUpBeforeClass() throws Exception {
-    ((Log4JLogger) ScannerCallable.LOG).getLogger().setLevel(Level.ALL);
-    ((Log4JLogger) HeartbeatRPCServices.LOG).getLogger().setLevel(Level.ALL);
     Configuration conf = TEST_UTIL.getConfiguration();
 
     conf.setStrings(HConstants.REGION_IMPL, HeartbeatHRegion.class.getName());
@@ -271,7 +266,7 @@ public class TestScannerHeartbeatMessages {
   public static class SparseFilter extends FilterBase {
 
     @Override
-    public ReturnCode filterKeyValue(Cell v) throws IOException {
+    public ReturnCode filterCell(final Cell v) throws IOException {
       try {
         Thread.sleep(CLIENT_TIMEOUT / 2 + 100);
       } catch (InterruptedException e) {
@@ -395,11 +390,6 @@ public class TestScannerHeartbeatMessages {
       super(conf);
     }
 
-    public HeartbeatHRegionServer(Configuration conf, CoordinatedStateManager csm)
-        throws IOException {
-      super(conf, csm);
-    }
-
     @Override
     protected RSRpcServices createRpcServices() throws IOException {
       return new HeartbeatRPCServices(this);
@@ -445,12 +435,12 @@ public class TestScannerHeartbeatMessages {
     private static volatile boolean sleepBetweenColumnFamilies = false;
 
     public HeartbeatHRegion(Path tableDir, WAL wal, FileSystem fs, Configuration confParam,
-        HRegionInfo regionInfo, HTableDescriptor htd, RegionServerServices rsServices) {
+        RegionInfo regionInfo, TableDescriptor htd, RegionServerServices rsServices) {
       super(tableDir, wal, fs, confParam, regionInfo, htd, rsServices);
     }
 
     public HeartbeatHRegion(HRegionFileSystem fs, WAL wal, Configuration confParam,
-        HTableDescriptor htd, RegionServerServices rsServices) {
+        TableDescriptor htd, RegionServerServices rsServices) {
       super(fs, wal, confParam, htd, rsServices);
     }
 
@@ -468,7 +458,7 @@ public class TestScannerHeartbeatMessages {
 
     // Instantiate the custom heartbeat region scanners
     @Override
-    protected RegionScanner instantiateRegionScanner(Scan scan,
+    protected RegionScannerImpl instantiateRegionScanner(Scan scan,
         List<KeyValueScanner> additionalScanners, long nonceGroup, long nonce) throws IOException {
       if (scan.isReversed()) {
         if (scan.getFilter() != null) {
@@ -500,9 +490,11 @@ public class TestScannerHeartbeatMessages {
     @Override
     protected void initializeKVHeap(List<KeyValueScanner> scanners,
         List<KeyValueScanner> joinedScanners, HRegion region) throws IOException {
-      this.storeHeap = new HeartbeatReversedKVHeap(scanners, region.getCellCompartor());
+      this.storeHeap =
+          new HeartbeatReversedKVHeap(scanners, (CellComparatorImpl) region.getCellComparator());
       if (!joinedScanners.isEmpty()) {
-        this.joinedHeap = new HeartbeatReversedKVHeap(joinedScanners, region.getCellCompartor());
+        this.joinedHeap = new HeartbeatReversedKVHeap(joinedScanners,
+            (CellComparatorImpl) region.getCellComparator());
       }
     }
   }
@@ -527,9 +519,11 @@ public class TestScannerHeartbeatMessages {
     @Override
     protected void initializeKVHeap(List<KeyValueScanner> scanners,
         List<KeyValueScanner> joinedScanners, HRegion region) throws IOException {
-      this.storeHeap = new HeartbeatKVHeap(scanners, region.getCellCompartor());
+      this.storeHeap =
+          new HeartbeatKVHeap(scanners, region.getCellComparator());
       if (!joinedScanners.isEmpty()) {
-        this.joinedHeap = new HeartbeatKVHeap(joinedScanners, region.getCellCompartor());
+        this.joinedHeap =
+            new HeartbeatKVHeap(joinedScanners, region.getCellComparator());
       }
     }
   }
@@ -564,7 +558,7 @@ public class TestScannerHeartbeatMessages {
    */
   private static final class HeartbeatReversedKVHeap extends ReversedKeyValueHeap {
     public HeartbeatReversedKVHeap(List<? extends KeyValueScanner> scanners,
-        CellComparator comparator) throws IOException {
+        CellComparatorImpl comparator) throws IOException {
       super(scanners, comparator);
     }
 

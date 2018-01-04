@@ -20,10 +20,11 @@ package org.apache.hadoop.hbase.master.balancer;
 
 import java.io.IOException;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.ScheduledChore;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.hbase.master.HMaster;
 
 /**
@@ -32,13 +33,13 @@ import org.apache.hadoop.hbase.master.HMaster;
  */
 @InterfaceAudience.Private
 public class BalancerChore extends ScheduledChore {
-  private static final Log LOG = LogFactory.getLog(BalancerChore.class);
+  private static final Logger LOG = LoggerFactory.getLogger(BalancerChore.class);
 
   private final HMaster master;
 
   public BalancerChore(HMaster master) {
     super(master.getServerName() + "-BalancerChore", master, master.getConfiguration().getInt(
-      "hbase.balancer.period", 300000));
+      HConstants.HBASE_BALANCER_PERIOD, HConstants.DEFAULT_HBASE_BALANCER_PERIOD));
     this.master = master;
   }
 

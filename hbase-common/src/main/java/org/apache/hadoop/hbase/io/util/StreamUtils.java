@@ -23,11 +23,11 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.ByteBuffer;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.nio.ByteBuff;
 import org.apache.hadoop.hbase.util.Pair;
+import org.apache.yetus.audience.InterfaceAudience;
 
-import com.google.common.base.Preconditions;
+import org.apache.hbase.thirdparty.com.google.common.base.Preconditions;
 
 /*
  * It seems like as soon as somebody sets himself to the task of creating VInt encoding, his mind
@@ -135,7 +135,7 @@ public class StreamUtils {
     int newOffset = offset;
     byte tmp = input[newOffset++];
     if (tmp >= 0) {
-      return new Pair<Integer, Integer>((int) tmp, newOffset - offset);
+      return new Pair<>((int) tmp, newOffset - offset);
     }
     int result = tmp & 0x7f;
     tmp = input[newOffset++];
@@ -160,7 +160,7 @@ public class StreamUtils {
             for (int i = 0; i < 5; i++) {
               tmp = input[newOffset++];
               if (tmp >= 0) {
-                return new Pair<Integer, Integer>(result, newOffset - offset);
+                return new Pair<>(result, newOffset - offset);
               }
             }
             throw new IOException("Malformed varint");
@@ -168,7 +168,7 @@ public class StreamUtils {
         }
       }
     }
-    return new Pair<Integer, Integer>(result, newOffset - offset);
+    return new Pair<>(result, newOffset - offset);
   }
 
   public static Pair<Integer, Integer> readRawVarint32(ByteBuffer input, int offset)
@@ -176,7 +176,7 @@ public class StreamUtils {
     int newOffset = offset;
     byte tmp = input.get(newOffset++);
     if (tmp >= 0) {
-      return new Pair<Integer, Integer>((int) tmp, newOffset - offset);
+      return new Pair<>((int) tmp, newOffset - offset);
     }
     int result = tmp & 0x7f;
     tmp = input.get(newOffset++);
@@ -201,7 +201,7 @@ public class StreamUtils {
             for (int i = 0; i < 5; i++) {
               tmp = input.get(newOffset++);
               if (tmp >= 0) {
-                return new Pair<Integer, Integer>(result, newOffset - offset);
+                return new Pair<>(result, newOffset - offset);
               }
             }
             throw new IOException("Malformed varint");
@@ -209,7 +209,7 @@ public class StreamUtils {
         }
       }
     }
-    return new Pair<Integer, Integer>(result, newOffset - offset);
+    return new Pair<>(result, newOffset - offset);
   }
 
   public static short toShort(byte hi, byte lo) {

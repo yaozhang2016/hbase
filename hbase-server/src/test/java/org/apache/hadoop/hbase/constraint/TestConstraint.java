@@ -24,8 +24,6 @@ import static org.junit.Assert.fail;
 
 import java.util.List;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HTableDescriptor;
@@ -42,14 +40,16 @@ import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Do the complex testing of constraints against a minicluster
  */
 @Category({MiscTests.class, MediumTests.class})
 public class TestConstraint {
-  private static final Log LOG = LogFactory
-      .getLog(TestConstraint.class);
+  private static final Logger LOG = LoggerFactory
+      .getLogger(TestConstraint.class);
 
   private static HBaseTestingUtility util;
   private static final TableName tableName = TableName.valueOf("test");
@@ -80,7 +80,7 @@ public class TestConstraint {
     // add a constraint
     Constraints.add(desc, CheckWasRunConstraint.class);
 
-    util.getHBaseAdmin().createTable(desc);
+    util.getAdmin().createTable(desc);
     Table table = util.getConnection().getTable(tableName);
     try {
       // test that we don't fail on a valid put
@@ -113,7 +113,7 @@ public class TestConstraint {
     // add a constraint that is sure to fail
     Constraints.add(desc, AllFailConstraint.class);
 
-    util.getHBaseAdmin().createTable(desc);
+    util.getAdmin().createTable(desc);
     Table table = util.getConnection().getTable(tableName);
 
     // test that we do fail on violation
@@ -124,13 +124,8 @@ public class TestConstraint {
     try {
       table.put(put);
       fail("This put should not have suceeded - AllFailConstraint was not run!");
-    } catch (RetriesExhaustedWithDetailsException e) {
-      List<Throwable> causes = e.getCauses();
-      assertEquals(
-          "More than one failure cause - should only be the failure constraint exception",
-          1, causes.size());
-      Throwable t = causes.get(0);
-      assertEquals(ConstraintException.class, t.getClass());
+    } catch (ConstraintException e) {
+      // expected
     }
     table.close();
   }
@@ -157,7 +152,7 @@ public class TestConstraint {
     // and then disable the failing constraint
     Constraints.disableConstraint(desc, AllFailConstraint.class);
 
-    util.getHBaseAdmin().createTable(desc);
+    util.getAdmin().createTable(desc);
     Table table = util.getConnection().getTable(tableName);
     try {
       // test that we don't fail because its disabled
@@ -190,7 +185,7 @@ public class TestConstraint {
     // then disable all the constraints
     Constraints.disable(desc);
 
-    util.getHBaseAdmin().createTable(desc);
+    util.getAdmin().createTable(desc);
     Table table = util.getConnection().getTable(tableName);
     try {
       // test that we do fail on violation
@@ -223,7 +218,7 @@ public class TestConstraint {
     Constraints.add(desc, CheckWasRunConstraint.class);
     CheckWasRunConstraint.wasRun = false;
 
-    util.getHBaseAdmin().createTable(desc);
+    util.getAdmin().createTable(desc);
     Table table = util.getConnection().getTable(tableName);
 
     // test that we do fail on violation
@@ -248,8 +243,8 @@ public class TestConstraint {
   public void cleanup() throws Exception {
     // cleanup
     CheckWasRunConstraint.wasRun = false;
-    util.getHBaseAdmin().disableTable(tableName);
-    util.getHBaseAdmin().deleteTable(tableName);
+    util.getAdmin().disableTable(tableName);
+    util.getAdmin().deleteTable(tableName);
   }
 
   @AfterClass

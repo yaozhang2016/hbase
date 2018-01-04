@@ -22,12 +22,11 @@ require 'shell/formatter'
 module Shell
   module Commands
     class Command
-
       def initialize(shell)
         @shell = shell
       end
 
-      #wrap an execution of cmd to catch hbase exceptions
+      # wrap an execution of cmd to catch hbase exceptions
       # cmd - command name to execute
       # args - arguments to pass to the command
       def command_safe(debug, cmd = :command, *args)
@@ -35,11 +34,13 @@ module Shell
         # See count.rb for example.
         @start_time = Time.now
         # send is internal ruby method to call 'cmd' with *args
-        #(everything is a message, so this is just the formal semantics to support that idiom)
+        # (everything is a message, so this is just the formal semantics to support that idiom)
         translate_hbase_exceptions(*args) { send(cmd, *args) }
       rescue => e
         rootCause = e
-        while rootCause != nil && rootCause.respond_to?(:cause) && rootCause.cause != nil
+
+        # JRuby9000 made RubyException respond to cause, ignore it for back compat
+        while !rootCause.is_a?(Exception) && rootCause.respond_to?(:cause) && !rootCause.cause.nil?
           rootCause = rootCause.cause
         end
         if @shell.interactive?
@@ -47,7 +48,6 @@ module Shell
           puts "ERROR: #{rootCause}"
           puts "Backtrace: #{rootCause.backtrace.join("\n           ")}" if debug
           puts
-          puts "Here is some help for this command:"
           puts help
           puts
         else
@@ -56,7 +56,7 @@ module Shell
       ensure
         # If end_time is not already set by the command, use current time.
         @end_time ||= Time.now
-        formatter.output_str("Took %.4f seconds" % [@end_time - @start_time])
+        formatter.output_str(format('Took %.4f seconds', @end_time - @start_time))
       end
 
       # Convenience functions to get different admins
@@ -99,57 +99,53 @@ module Shell
         @formatter ||= ::Shell::Formatter::Console.new
       end
 
+      # for testing purposes to catch the output of the commands
+      def set_formatter(formatter)
+        @formatter = formatter
+      end
+
       def translate_hbase_exceptions(*args)
         yield
-      rescue => e
-        # Since exceptions will be thrown from the java code, 'e' will always be NativeException.
-        # Check for the original java exception and use it if present.
-        raise e unless e.respond_to?(:cause) && e.cause != nil
-        cause = e.cause
-
-         # let individual command handle exceptions first
-        if self.respond_to?(:handle_exceptions)
-          self.handle_exceptions(cause, *args)
-        end
+      rescue => cause
+        # let individual command handle exceptions first
+        handle_exceptions(cause, *args) if respond_to?(:handle_exceptions)
         # Global HBase exception handling below if not handled by respective command above
-        if cause.kind_of?(org.apache.hadoop.hbase.TableNotFoundException) then
+        if cause.is_a?(org.apache.hadoop.hbase.TableNotFoundException)
           raise "Unknown table #{args.first}!"
         end
-        if cause.kind_of?(org.apache.hadoop.hbase.UnknownRegionException) then
+        if cause.is_a?(org.apache.hadoop.hbase.UnknownRegionException)
           raise "Unknown region #{args.first}!"
         end
-        if cause.kind_of?(org.apache.hadoop.hbase.NamespaceNotFoundException) then
+        if cause.is_a?(org.apache.hadoop.hbase.NamespaceNotFoundException)
           raise "Unknown namespace #{args.first}!"
         end
-        if cause.kind_of?(org.apache.hadoop.hbase.snapshot.SnapshotDoesNotExistException) then
+        if cause.is_a?(org.apache.hadoop.hbase.snapshot.SnapshotDoesNotExistException)
           raise "Unknown snapshot #{args.first}!"
         end
-        if cause.kind_of?(org.apache.hadoop.hbase.client.RetriesExhaustedWithDetailsException) then
+        if cause.is_a?(org.apache.hadoop.hbase.client.RetriesExhaustedWithDetailsException)
           exceptions = cause.getCauses
           exceptions.each do |exception|
-            if exception.kind_of?(org.apache.hadoop.hbase.regionserver.NoSuchColumnFamilyException) then
+            if exception.is_a?(org.apache.hadoop.hbase.regionserver.NoSuchColumnFamilyException)
               valid_cols = table(args.first).get_all_columns.map { |c| c + '*' }
-              raise "Unknown column family! Valid column names: #{valid_cols.join(", ")}"
+              raise "Unknown column family! Valid column names: #{valid_cols.join(', ')}"
             end
           end
         end
-        if cause.kind_of?(org.apache.hadoop.hbase.TableExistsException) then
+        if cause.is_a?(org.apache.hadoop.hbase.TableExistsException)
           raise "Table already exists: #{args.first}!"
         end
         # To be safe, here only AccessDeniedException is considered. In future
         # we might support more in more generic approach when possible.
-        if cause.kind_of?(org.apache.hadoop.hbase.security.AccessDeniedException) then
-          str = java.lang.String.new("#{cause}")
+        if cause.is_a?(org.apache.hadoop.hbase.security.AccessDeniedException)
+          str = java.lang.String.new(cause.to_s)
           # Error message is merged with stack trace, reference StringUtils.stringifyException
           # This is to parse and get the error message from the whole.
           strs = str.split("\n")
-          if strs.size > 0 then
-            raise "#{strs[0]}"
-          end
+          raise (strs[0]).to_s unless strs.empty?
         end
 
         # Throw the other exception which hasn't been handled above
-        raise e
+        raise cause
       end
     end
   end

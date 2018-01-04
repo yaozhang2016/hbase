@@ -19,16 +19,18 @@
 package org.apache.hadoop.hbase.quotas;
 
 import org.apache.hadoop.hbase.DoNotRetryIOException;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * Generic quota exceeded exception
  */
 @InterfaceAudience.Public
-@InterfaceStability.Evolving
 public class QuotaExceededException extends DoNotRetryIOException {
   public QuotaExceededException(String msg) {
     super(msg);
+  }
+
+  public QuotaExceededException(String msg, Throwable cause) {
+    super(msg, cause);
   }
 }

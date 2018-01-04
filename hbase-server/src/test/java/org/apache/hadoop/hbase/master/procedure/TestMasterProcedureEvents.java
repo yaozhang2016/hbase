@@ -18,14 +18,13 @@
 
 package org.apache.hadoop.hbase.master.procedure;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import static org.junit.Assert.assertEquals;
+
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
-import org.apache.hadoop.hbase.HConstants;
+import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.HTableDescriptor;
-import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.master.HMaster;
@@ -37,24 +36,24 @@ import org.apache.hadoop.hbase.procedure2.store.wal.WALProcedureStore;
 import org.apache.hadoop.hbase.regionserver.HRegionServer;
 import org.apache.hadoop.hbase.testclassification.MasterTests;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
-
 import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
-
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
+import org.junit.rules.TestName;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Category({MasterTests.class, MediumTests.class})
 public class TestMasterProcedureEvents {
-  private static final Log LOG = LogFactory.getLog(TestCreateTableProcedure.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestCreateTableProcedure.class);
 
   protected static final HBaseTestingUtility UTIL = new HBaseTestingUtility();
 
-  private static long nonceGroup = HConstants.NO_NONCE;
-  private static long nonce = HConstants.NO_NONCE;
+  @Rule
+  public TestName name = new TestName();
 
   private static void setupConf(Configuration conf) {
     conf.setInt(MasterProcedureConstants.MASTER_PROCEDURE_THREADS, 1);
@@ -79,7 +78,7 @@ public class TestMasterProcedureEvents {
 
   @After
   public void tearDown() throws Exception {
-    for (HTableDescriptor htd: UTIL.getHBaseAdmin().listTables()) {
+    for (HTableDescriptor htd: UTIL.getAdmin().listTables()) {
       LOG.info("Tear down, remove table=" + htd.getTableName());
       UTIL.deleteTable(htd.getTableName());
     }
@@ -87,7 +86,7 @@ public class TestMasterProcedureEvents {
 
   @Test(timeout = 30000)
   public void testMasterInitializedEvent() throws Exception {
-    TableName tableName = TableName.valueOf("testMasterInitializedEvent");
+    final TableName tableName = TableName.valueOf(name.getMethodName());
     HMaster master = UTIL.getMiniHBaseCluster().getMaster();
     ProcedureExecutor<MasterProcedureEnv> procExec = master.getMasterProcedureExecutor();
 
@@ -105,12 +104,12 @@ public class TestMasterProcedureEvents {
 
   @Test(timeout = 30000)
   public void testServerCrashProcedureEvent() throws Exception {
-    TableName tableName = TableName.valueOf("testServerCrashProcedureEventTb");
+    final TableName tableName = TableName.valueOf(name.getMethodName());
     HMaster master = UTIL.getMiniHBaseCluster().getMaster();
     ProcedureExecutor<MasterProcedureEnv> procExec = master.getMasterProcedureExecutor();
 
     while (!master.isServerCrashProcessingEnabled() || !master.isInitialized() ||
-        master.getAssignmentManager().getRegionStates().isRegionsInTransition()) {
+        master.getAssignmentManager().getRegionStates().hasRegionsInTransition()) {
       Thread.sleep(25);
     }
 
@@ -134,7 +133,7 @@ public class TestMasterProcedureEvents {
     while (!master.getServerManager().isServerDead(hrs.getServerName())) Thread.sleep(10);
 
     // Do some of the master processing of dead servers so when SCP runs, it has expected 'state'.
-    master.getServerManager().moveFromOnelineToDeadServers(hrs.getServerName());
+    master.getServerManager().moveFromOnlineToDeadServers(hrs.getServerName());
 
     // check event wait/wake
     testProcedureEventWaitWake(master, master.getServerCrashProcessingEnabledEvent(),
@@ -144,7 +143,7 @@ public class TestMasterProcedureEvents {
   private void testProcedureEventWaitWake(final HMaster master, final ProcedureEvent event,
       final Procedure proc) throws Exception {
     final ProcedureExecutor<MasterProcedureEnv> procExec = master.getMasterProcedureExecutor();
-    final MasterProcedureScheduler procSched = procExec.getEnvironment().getProcedureQueue();
+    final MasterProcedureScheduler procSched = procExec.getEnvironment().getProcedureScheduler();
 
     final long startPollCalls = procSched.getPollCalls();
     final long startNullPollCalls = procSched.getNullPollCalls();
@@ -152,24 +151,24 @@ public class TestMasterProcedureEvents {
     // check that nothing is in the event queue
     LOG.debug("checking " + event);
     assertEquals(false, event.isReady());
-    assertEquals(0, event.size());
+    assertEquals(0, event.getSuspendedProcedures().size());
 
     // submit the procedure
     LOG.debug("submit " + proc);
-    long procId = procExec.submitProcedure(proc, HConstants.NO_NONCE, HConstants.NO_NONCE);
+    long procId = procExec.submitProcedure(proc);
 
     // wait until the event is in the queue (proc executed and got into suspended state)
     LOG.debug("wait procedure suspended on " + event);
-    while (event.size() < 1) Thread.sleep(25);
+    while (event.getSuspendedProcedures().size() < 1) Thread.sleep(25);
 
     // check that the proc is in the event queue
-    LOG.debug("checking " + event + " size=" + event.size());
+    LOG.debug("checking " + event + " size=" + event.getSuspendedProcedures().size());
     assertEquals(false, event.isReady());
-    assertEquals(1, event.size());
+    assertEquals(1, event.getSuspendedProcedures().size());
 
     // wake the event
     LOG.debug("wake " + event);
-    procSched.wakeEvent(event);
+    event.wake(procSched);
     assertEquals(true, event.isReady());
 
     // wait until proc completes
@@ -178,7 +177,7 @@ public class TestMasterProcedureEvents {
 
     // check that nothing is in the event queue and the event is not suspended
     assertEquals(true, event.isReady());
-    assertEquals(0, event.size());
+    assertEquals(0, event.getSuspendedProcedures().size());
     LOG.debug("completed execution of " + proc +
       " pollCalls=" + (procSched.getPollCalls() - startPollCalls) +
       " nullPollCalls=" + (procSched.getNullPollCalls() - startNullPollCalls));

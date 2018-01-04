@@ -18,36 +18,30 @@
 
 package org.apache.hadoop.hbase.regionserver.compactions;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.hbase.HBaseConfiguration;
-import org.apache.hadoop.hbase.testclassification.MediumTests;
-import org.apache.hadoop.hbase.testclassification.RegionServerTests;
-import org.apache.hadoop.hbase.regionserver.HStore;
-import org.apache.hadoop.hbase.regionserver.StoreConfigInformation;
-import org.apache.hadoop.hbase.regionserver.StoreFile;
-import org.apache.hadoop.hbase.util.ReflectionUtils;
-import org.junit.Test;
-import org.junit.experimental.categories.Category;
-import org.junit.runner.RunWith;
-import org.junit.runners.Parameterized;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 
-import static org.mockito.Mockito.mock;
-
-import static org.mockito.Mockito.when;
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hbase.HBaseConfiguration;
+import org.apache.hadoop.hbase.regionserver.HStore;
+import org.apache.hadoop.hbase.regionserver.HStoreFile;
+import org.apache.hadoop.hbase.regionserver.StoreConfigInformation;
+import org.apache.hadoop.hbase.testclassification.MediumTests;
+import org.apache.hadoop.hbase.testclassification.RegionServerTests;
+import org.apache.hadoop.hbase.util.ReflectionUtils;
+import org.junit.Test;
+import org.junit.experimental.categories.Category;
+import org.junit.runner.RunWith;
+import org.junit.runners.Parameterized;
 
 @Category({RegionServerTests.class, MediumTests.class})
 @RunWith(Parameterized.class)
 public class PerfTestCompactionPolicies extends MockStoreFileGenerator {
-
-
-  private static final Log LOG = LogFactory.getLog(PerfTestCompactionPolicies.class);
 
   private final RatioBasedCompactionPolicy cp;
   private final StoreFileListGenerator generator;
@@ -63,13 +57,13 @@ public class PerfTestCompactionPolicies extends MockStoreFileGenerator {
 
 
 
-    Class[] policyClasses = new Class[]{
+    Class<?>[] policyClasses = new Class[]{
         EverythingPolicy.class,
         RatioBasedCompactionPolicy.class,
         ExploringCompactionPolicy.class,
     };
 
-    Class[] fileListGenClasses = new Class[]{
+    Class<?>[] fileListGenClasses = new Class[]{
         ExplicitFileListGenerator.class,
         ConstantSizeFileListGenerator.class,
         SemiConstantSizeFileListGenerator.class,
@@ -82,19 +76,19 @@ public class PerfTestCompactionPolicies extends MockStoreFileGenerator {
     int[] minFilesValues = new int[] {3};
     float[] ratioValues = new float[] {1.2f};
 
-    List<Object[]> params = new ArrayList<Object[]>(
+    List<Object[]> params = new ArrayList<>(
         maxFileValues.length
         * minFilesValues.length
         * fileListGenClasses.length
         * policyClasses.length);
 
 
-    for (Class policyClass :  policyClasses) {
-      for (Class genClass: fileListGenClasses) {
-        for (int maxFile:maxFileValues) {
-          for (int minFile:minFilesValues) {
-            for (float ratio:ratioValues) {
-              params.add(new Object[] {policyClass, genClass, maxFile, minFile, ratio});
+    for (Class<?> policyClass : policyClasses) {
+      for (Class<?> genClass : fileListGenClasses) {
+        for (int maxFile : maxFileValues) {
+          for (int minFile : minFilesValues) {
+            for (float ratio : ratioValues) {
+              params.add(new Object[] { policyClass, genClass, maxFile, minFile, ratio });
             }
           }
         }
@@ -151,9 +145,9 @@ public class PerfTestCompactionPolicies extends MockStoreFileGenerator {
   @Test
   public final void testSelection() throws Exception {
     long fileDiff = 0;
-    for (List<StoreFile> storeFileList : generator) {
-      List<StoreFile> currentFiles = new ArrayList<StoreFile>(18);
-      for (StoreFile file : storeFileList) {
+    for (List<HStoreFile> storeFileList : generator) {
+      List<HStoreFile> currentFiles = new ArrayList<>(18);
+      for (HStoreFile file : storeFileList) {
         currentFiles.add(file);
         currentFiles = runIteration(currentFiles);
       }
@@ -173,21 +167,20 @@ public class PerfTestCompactionPolicies extends MockStoreFileGenerator {
   }
 
 
-  private List<StoreFile> runIteration(List<StoreFile> startingStoreFiles) throws IOException {
-
-    List<StoreFile> storeFiles = new ArrayList<StoreFile>(startingStoreFiles);
-    CompactionRequest req = cp.selectCompaction(
-        storeFiles, new ArrayList<StoreFile>(), false, false, false);
+  private List<HStoreFile> runIteration(List<HStoreFile> startingStoreFiles) throws IOException {
+    List<HStoreFile> storeFiles = new ArrayList<>(startingStoreFiles);
+    CompactionRequestImpl req = cp.selectCompaction(
+        storeFiles, new ArrayList<>(), false, false, false);
     long newFileSize = 0;
 
-    Collection<StoreFile> filesToCompact = req.getFiles();
+    Collection<HStoreFile> filesToCompact = req.getFiles();
 
     if (!filesToCompact.isEmpty()) {
 
-      storeFiles = new ArrayList<StoreFile>(storeFiles);
+      storeFiles = new ArrayList<>(storeFiles);
       storeFiles.removeAll(filesToCompact);
 
-      for (StoreFile storeFile : filesToCompact) {
+      for (HStoreFile storeFile : filesToCompact) {
         newFileSize += storeFile.getReader().length();
       }
 

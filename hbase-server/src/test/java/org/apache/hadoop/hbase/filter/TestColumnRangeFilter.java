@@ -26,8 +26,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.*;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Result;
@@ -38,12 +36,16 @@ import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.testclassification.FilterTests;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.experimental.categories.Category;
+import org.junit.rules.TestName;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 
 class StringRange {
@@ -122,7 +124,10 @@ public class TestColumnRangeFilter {
 
   private final static HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
 
-  private static final Log LOG = LogFactory.getLog(TestColumnRangeFilter.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestColumnRangeFilter.class);
+
+  @Rule
+  public TestName name = new TestName();
 
   /**
    * @throws java.lang.Exception
@@ -159,26 +164,25 @@ public class TestColumnRangeFilter {
   @Test
   public void TestColumnRangeFilterClient() throws Exception {
     String family = "Family";
-    String table = "TestColumnRangeFilterClient";
-    Table ht = TEST_UTIL.createTable(TableName.valueOf(table),
+    Table ht = TEST_UTIL.createTable(TableName.valueOf(name.getMethodName()),
         Bytes.toBytes(family), Integer.MAX_VALUE);
 
     List<String> rows = generateRandomWords(10, 8);
     long maxTimestamp = 2;
     List<String> columns = generateRandomWords(20000, 8);
 
-    List<KeyValue> kvList = new ArrayList<KeyValue>();
+    List<KeyValue> kvList = new ArrayList<>();
 
-    Map<StringRange, List<KeyValue>> rangeMap = new HashMap<StringRange, List<KeyValue>>();
+    Map<StringRange, List<KeyValue>> rangeMap = new HashMap<>();
 
     rangeMap.put(new StringRange(null, true, "b", false),
-        new ArrayList<KeyValue>());
+        new ArrayList<>());
     rangeMap.put(new StringRange("p", true, "q", false),
-        new ArrayList<KeyValue>());
+        new ArrayList<>());
     rangeMap.put(new StringRange("r", false, "s", true),
-        new ArrayList<KeyValue>());
+        new ArrayList<>());
     rangeMap.put(new StringRange("z", false, null, false),
-        new ArrayList<KeyValue>());
+        new ArrayList<>());
     String valueString = "ValueString";
 
     for (String row : rows) {
@@ -212,7 +216,7 @@ public class TestColumnRangeFilter {
           s.isEndInclusive());
       scan.setFilter(filter);
       ResultScanner scanner = ht.getScanner(scan);
-      List<Cell> results = new ArrayList<Cell>();
+      List<Cell> results = new ArrayList<>();
       LOG.info("scan column range: " + s.toString());
       long timeBeforeScan = System.currentTimeMillis();
 
@@ -241,7 +245,7 @@ public class TestColumnRangeFilter {
   }
 
   List<String> generateRandomWords(int numberOfWords, int maxLengthOfWords) {
-    Set<String> wordSet = new HashSet<String>();
+    Set<String> wordSet = new HashSet<>();
     for (int i = 0; i < numberOfWords; i++) {
       int lengthOfWords = (int) (Math.random() * maxLengthOfWords) + 1;
       char[] wordChar = new char[lengthOfWords];
@@ -251,7 +255,7 @@ public class TestColumnRangeFilter {
       String word = new String(wordChar);
       wordSet.add(word);
     }
-    List<String> wordList = new ArrayList<String>(wordSet);
+    List<String> wordList = new ArrayList<>(wordSet);
     return wordList;
   }
 

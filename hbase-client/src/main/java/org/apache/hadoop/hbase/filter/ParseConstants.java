@@ -20,15 +20,13 @@ package org.apache.hadoop.hbase.filter;
 
 import java.nio.ByteBuffer;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * ParseConstants holds a bunch of constants related to parsing Filter Strings
  * Used by {@link ParseFilter}
  */
 @InterfaceAudience.Public
-@InterfaceStability.Stable
 public final class ParseConstants {
 
   /**

@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one or more contributor license
  * agreements. See the NOTICE file distributed with this work for additional information regarding
  * copyright ownership. The ASF licenses this file to you under the Apache License, Version 2.0 (the
@@ -17,7 +17,7 @@ import static org.junit.Assert.fail;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.spy;
 
-import com.google.common.collect.Lists;
+import org.apache.hbase.thirdparty.com.google.common.collect.Lists;
 
 import java.io.IOException;
 import java.lang.reflect.Field;
@@ -25,8 +25,6 @@ import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
@@ -40,6 +38,7 @@ import org.apache.hadoop.hbase.Server;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.ZooKeeperConnectionException;
 import org.apache.hadoop.hbase.client.ClusterConnection;
+import org.apache.hadoop.hbase.client.Connection;
 import org.apache.hadoop.hbase.replication.ReplicationException;
 import org.apache.hadoop.hbase.replication.ReplicationFactory;
 import org.apache.hadoop.hbase.replication.ReplicationPeerConfig;
@@ -52,9 +51,10 @@ import org.apache.hadoop.hbase.replication.master.ReplicationHFileCleaner;
 import org.apache.hadoop.hbase.replication.regionserver.Replication;
 import org.apache.hadoop.hbase.testclassification.MasterTests;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
+import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.hbase.zookeeper.MetaTableLocator;
 import org.apache.hadoop.hbase.zookeeper.RecoverableZooKeeper;
-import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher;
+import org.apache.hadoop.hbase.zookeeper.ZKWatcher;
 import org.apache.zookeeper.KeeperException;
 import org.apache.zookeeper.data.Stat;
 import org.junit.After;
@@ -64,10 +64,12 @@ import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.mockito.Mockito;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Category({ MasterTests.class, SmallTests.class })
 public class TestReplicationHFileCleaner {
-  private static final Log LOG = LogFactory.getLog(ReplicationQueuesZKImpl.class);
+  private static final Logger LOG = LoggerFactory.getLogger(ReplicationQueuesZKImpl.class);
   private final static HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
   private static Server server;
   private static ReplicationQueues rq;
@@ -138,8 +140,8 @@ public class TestReplicationHFileCleaner {
         + "for it in the queue.",
       cleaner.isFileDeletable(fs.getFileStatus(file)));
 
-    List<String> files = new ArrayList<String>(1);
-    files.add(file.getName());
+    List<Pair<Path, Path>> files = new ArrayList<>(1);
+    files.add(new Pair<>(null, file));
     // 4. Add the file to hfile-refs queue
     rq.addHFileRefs(peerId, files);
     // 5. Assert file should not be deletable
@@ -158,7 +160,7 @@ public class TestReplicationHFileCleaner {
     fs.createNewFile(deletablefile);
     assertTrue("Test file not created!", fs.exists(deletablefile));
 
-    List<FileStatus> files = new ArrayList<FileStatus>(2);
+    List<FileStatus> files = new ArrayList<>(2);
     FileStatus f = new FileStatus();
     f.setPath(deletablefile);
     files.add(f);
@@ -166,8 +168,8 @@ public class TestReplicationHFileCleaner {
     f.setPath(notDeletablefile);
     files.add(f);
 
-    List<String> hfiles = new ArrayList<>(1);
-    hfiles.add(notDeletablefile.getName());
+    List<Pair<Path, Path>> hfiles = new ArrayList<>(1);
+    hfiles.add(new Pair<>(null, notDeletablefile));
     // 2. Add one file to hfile-refs queue
     rq.addHFileRefs(peerId, hfiles);
 
@@ -239,7 +241,7 @@ public class TestReplicationHFileCleaner {
 
     // when zk is working both files should be returned
     cleaner = new ReplicationHFileCleaner();
-    ZooKeeperWatcher zkw = new ZooKeeperWatcher(conf, "testZooKeeperAbort-normal", null);
+    ZKWatcher zkw = new ZKWatcher(conf, "testZooKeeperAbort-normal", null);
     try {
       cleaner.setConf(conf, zkw);
       Iterable<FileStatus> filesToDelete = cleaner.getDeletableFiles(dummyFiles);
@@ -262,9 +264,9 @@ public class TestReplicationHFileCleaner {
     }
 
     @Override
-    public ZooKeeperWatcher getZooKeeper() {
+    public ZKWatcher getZooKeeper() {
       try {
-        return new ZooKeeperWatcher(getConfiguration(), "dummy server", this);
+        return new ZKWatcher(getConfiguration(), "dummy server", this);
       } catch (IOException e) {
         e.printStackTrace();
       }
@@ -319,9 +321,24 @@ public class TestReplicationHFileCleaner {
       // TODO Auto-generated method stub
       return null;
     }
+
+    @Override
+    public FileSystem getFileSystem() {
+      return null;
+    }
+
+    @Override
+    public boolean isStopping() {
+      return false;
+    }
+
+    @Override
+    public Connection createConnection(Configuration conf) throws IOException {
+      return null;
+    }
   }
 
-  static class FaultyZooKeeperWatcher extends ZooKeeperWatcher {
+  static class FaultyZooKeeperWatcher extends ZKWatcher {
     private RecoverableZooKeeper zk;
     public FaultyZooKeeperWatcher(Configuration conf, String identifier, Abortable abortable)
         throws ZooKeeperConnectionException, IOException {

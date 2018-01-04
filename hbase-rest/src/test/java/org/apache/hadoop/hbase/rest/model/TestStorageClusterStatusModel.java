@@ -40,12 +40,12 @@ public class TestStorageClusterStatusModel extends TestModelBase<StorageClusterS
       "<DeadNodes/><LiveNodes>" +
       "<Node heapSizeMB=\"128\" maxHeapSizeMB=\"1024\" name=\"test1\" requests=\"0\" startCode=\"1245219839331\">" +
       "<Region currentCompactedKVs=\"1\" memstoreSizeMB=\"0\" name=\"aGJhc2U6cm9vdCwsMA==\" readRequestsCount=\"1\" " +
-      "rootIndexSizeKB=\"1\" storefileIndexSizeMB=\"0\" storefileSizeMB=\"0\" storefiles=\"1\" stores=\"1\" " +
+      "rootIndexSizeKB=\"1\" storefileIndexSizeKB=\"0\" storefileSizeMB=\"0\" storefiles=\"1\" stores=\"1\" " +
       "totalCompactingKVs=\"1\" totalStaticBloomSizeKB=\"1\" totalStaticIndexSizeKB=\"1\" writeRequestsCount=\"2\"/>" +
       "</Node>" +
       "<Node heapSizeMB=\"512\" maxHeapSizeMB=\"1024\" name=\"test2\" requests=\"0\" startCode=\"1245239331198\">" +
       "<Region currentCompactedKVs=\"1\" memstoreSizeMB=\"0\" name=\"aGJhc2U6bWV0YSwsMTI0NjAwMDA0MzcyNA==\" " +
-      "readRequestsCount=\"1\" rootIndexSizeKB=\"1\" storefileIndexSizeMB=\"0\" storefileSizeMB=\"0\" " +
+      "readRequestsCount=\"1\" rootIndexSizeKB=\"1\" storefileIndexSizeKB=\"0\" storefileSizeMB=\"0\" " +
       "storefiles=\"1\" stores=\"1\" totalCompactingKVs=\"1\" totalStaticBloomSizeKB=\"1\" " +
       "totalStaticIndexSizeKB=\"1\" writeRequestsCount=\"2\"/></Node></LiveNodes></ClusterStatus>";
 
@@ -61,13 +61,13 @@ public class TestStorageClusterStatusModel extends TestModelBase<StorageClusterS
     AS_JSON =
       "{\"regions\":2,\"requests\":0,\"averageLoad\":1.0,\"LiveNodes\":[{\"name\":\"test1\"," +
           "\"Region\":[{\"name\":\"aGJhc2U6cm9vdCwsMA==\",\"stores\":1,\"storefiles\":1," +
-          "\"storefileSizeMB\":0,\"memstoreSizeMB\":0,\"storefileIndexSizeMB\":0," +
+          "\"storefileSizeMB\":0,\"memStoreSizeMB\":0,\"storefileIndexSizeKB\":0," +
           "\"readRequestsCount\":1,\"writeRequestsCount\":2,\"rootIndexSizeKB\":1," +
           "\"totalStaticIndexSizeKB\":1,\"totalStaticBloomSizeKB\":1,\"totalCompactingKVs\":1," +
           "\"currentCompactedKVs\":1}],\"requests\":0,\"startCode\":1245219839331," +
           "\"heapSizeMB\":128,\"maxHeapSizeMB\":1024},{\"name\":\"test2\"," +
           "\"Region\":[{\"name\":\"aGJhc2U6bWV0YSwsMTI0NjAwMDA0MzcyNA==\",\"stores\":1," +
-          "\"storefiles\":1,\"storefileSizeMB\":0,\"memstoreSizeMB\":0,\"storefileIndexSizeMB\":0," +
+          "\"storefiles\":1,\"storefileSizeMB\":0,\"memStoreSizeMB\":0,\"storefileIndexSizeKB\":0," +
           "\"readRequestsCount\":1,\"writeRequestsCount\":2,\"rootIndexSizeKB\":1," +
           "\"totalStaticIndexSizeKB\":1,\"totalStaticBloomSizeKB\":1,\"totalCompactingKVs\":1," +
           "\"currentCompactedKVs\":1}],\"requests\":0,\"startCode\":1245239331198," +
@@ -98,7 +98,7 @@ public class TestStorageClusterStatusModel extends TestModelBase<StorageClusterS
     assertEquals(node.getStartCode(), 1245219839331L);
     assertEquals(node.getHeapSizeMB(), 128);
     assertEquals(node.getMaxHeapSizeMB(), 1024);
-    Iterator<StorageClusterStatusModel.Node.Region> regions = 
+    Iterator<StorageClusterStatusModel.Node.Region> regions =
       node.getRegions().iterator();
     StorageClusterStatusModel.Node.Region region = regions.next();
     assertTrue(Bytes.toString(region.getName()).equals(
@@ -106,8 +106,8 @@ public class TestStorageClusterStatusModel extends TestModelBase<StorageClusterS
     assertEquals(region.getStores(), 1);
     assertEquals(region.getStorefiles(), 1);
     assertEquals(region.getStorefileSizeMB(), 0);
-    assertEquals(region.getMemstoreSizeMB(), 0);
-    assertEquals(region.getStorefileIndexSizeMB(), 0);
+    assertEquals(region.getMemStoreSizeMB(), 0);
+    assertEquals(region.getStorefileIndexSizeKB(), 0);
     assertEquals(region.getReadRequestsCount(), 1);
     assertEquals(region.getWriteRequestsCount(), 2);
     assertEquals(region.getRootIndexSizeKB(), 1);
@@ -128,8 +128,8 @@ public class TestStorageClusterStatusModel extends TestModelBase<StorageClusterS
     assertEquals(region.getStores(), 1);
     assertEquals(region.getStorefiles(), 1);
     assertEquals(region.getStorefileSizeMB(), 0);
-    assertEquals(region.getMemstoreSizeMB(), 0);
-    assertEquals(region.getStorefileIndexSizeMB(), 0);
+    assertEquals(region.getMemStoreSizeMB(), 0);
+    assertEquals(region.getStorefileIndexSizeKB(), 0);
     assertEquals(region.getReadRequestsCount(), 1);
     assertEquals(region.getWriteRequestsCount(), 2);
     assertEquals(region.getRootIndexSizeKB(), 1);
@@ -137,7 +137,7 @@ public class TestStorageClusterStatusModel extends TestModelBase<StorageClusterS
     assertEquals(region.getTotalStaticBloomSizeKB(), 1);
     assertEquals(region.getTotalCompactingKVs(), 1);
     assertEquals(region.getCurrentCompactedKVs(), 1);
-    
+
     assertFalse(regions.hasNext());
     assertFalse(nodes.hasNext());
   }

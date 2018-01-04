@@ -28,9 +28,6 @@ import java.net.ServerSocket;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.commons.logging.impl.Log4JLogger;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.BlockLocation;
 import org.apache.hadoop.fs.FSDataInputStream;
@@ -44,6 +41,7 @@ import org.apache.hadoop.hbase.MiniHBaseCluster;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Table;
+import org.apache.hadoop.hbase.master.LoadBalancer;
 import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.HRegionServer;
 import org.apache.hadoop.hbase.regionserver.Region;
@@ -63,24 +61,22 @@ import org.apache.hadoop.hdfs.protocol.LocatedBlock;
 import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
 import org.apache.hadoop.ipc.RemoteException;
-import org.apache.log4j.Level;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.junit.rules.TestName;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Tests for the hdfs fix from HBASE-6435.
  */
 @Category({MiscTests.class, LargeTests.class})
 public class TestBlockReorder {
-  private static final Log LOG = LogFactory.getLog(TestBlockReorder.class);
-
-  static {
-    ((Log4JLogger) DFSClient.LOG).getLogger().setLevel(Level.ALL);
-    ((Log4JLogger) HFileSystem.LOG).getLogger().setLevel(Level.ALL);
-  }
+  private static final Logger LOG = LoggerFactory.getLogger(TestBlockReorder.class);
 
   private Configuration conf;
   private MiniDFSCluster cluster;
@@ -89,6 +85,9 @@ public class TestBlockReorder {
   private static final String host1 = "host1";
   private static final String host2 = "host2";
   private static final String host3 = "host3";
+
+  @Rule
+  public TestName name = new TestName();
 
   @Before
   public void setUp() throws Exception {
@@ -254,7 +253,8 @@ public class TestBlockReorder {
 
     MiniHBaseCluster hbm = htu.startMiniHBaseCluster(1, 1);
     hbm.waitForActiveAndReadyMaster();
-    HRegionServer targetRs = hbm.getMaster();
+    HRegionServer targetRs = LoadBalancer.isTablesOnMaster(hbm.getConf())? hbm.getMaster():
+      hbm.getRegionServer(0);
 
     // We want to have a datanode with the same name as the region server, so
     //  we're going to get the regionservername, and start a new datanode with this name.
@@ -268,7 +268,7 @@ public class TestBlockReorder {
     // We use the regionserver file system & conf as we expect it to have the hook.
     conf = targetRs.getConfiguration();
     HFileSystem rfs = (HFileSystem) targetRs.getFileSystem();
-    Table h = htu.createTable(TableName.valueOf("table"), sb);
+    Table h = htu.createTable(TableName.valueOf(name.getMethodName()), sb);
 
     // Now, we have 4 datanodes and a replication count of 3. So we don't know if the datanode
     // with the same node will be used. We can't really stop an existing datanode, this would
@@ -285,20 +285,20 @@ public class TestBlockReorder {
 
     int nbTest = 0;
     while (nbTest < 10) {
-      final List<Region> regions = targetRs.getOnlineRegions(h.getName());
+      final List<HRegion> regions = targetRs.getRegions(h.getName());
       final CountDownLatch latch = new CountDownLatch(regions.size());
       // listen for successful log rolls
-      final WALActionsListener listener = new WALActionsListener.Base() {
+      final WALActionsListener listener = new WALActionsListener() {
             @Override
             public void postLogRoll(final Path oldPath, final Path newPath) throws IOException {
               latch.countDown();
             }
           };
-      for (Region region : regions) {
-        ((HRegion)region).getWAL().registerWALActionsListener(listener);
+      for (HRegion region : regions) {
+        region.getWAL().registerWALActionsListener(listener);
       }
 
-      htu.getHBaseAdmin().rollWALWriter(targetRs.getServerName());
+      htu.getAdmin().rollWALWriter(targetRs.getServerName());
 
       // wait
       try {

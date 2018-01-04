@@ -29,20 +29,20 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.Abortable;
 import org.apache.hadoop.hbase.DaemonThreadFactory;
 import org.apache.hadoop.hbase.regionserver.RegionServerServices;
-import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher;
+import org.apache.hadoop.hbase.zookeeper.ZKWatcher;
 import org.apache.hadoop.hbase.errorhandling.ForeignException;
 import org.apache.hadoop.hbase.errorhandling.ForeignExceptionDispatcher;
 import org.apache.zookeeper.KeeperException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class SimpleRSProcedureManager extends RegionServerProcedureManager {
 
-  private static final Log LOG = LogFactory.getLog(SimpleRSProcedureManager.class);
+  private static final Logger LOG = LoggerFactory.getLogger(SimpleRSProcedureManager.class);
 
   private RegionServerServices rss;
   private ProcedureMemberRpcs memberRpcs;
@@ -51,7 +51,7 @@ public class SimpleRSProcedureManager extends RegionServerProcedureManager {
   @Override
   public void initialize(RegionServerServices rss) throws KeeperException {
     this.rss = rss;
-    ZooKeeperWatcher zkw = rss.getZooKeeper();
+    ZKWatcher zkw = rss.getZooKeeper();
     this.memberRpcs = new ZKProcedureMemberRpcs(zkw, getProcedureSignature());
 
     ThreadPoolExecutor pool =
@@ -119,15 +119,15 @@ public class SimpleRSProcedureManager extends RegionServerProcedureManager {
     private final ExecutorCompletionService<Void> taskPool;
     private final ThreadPoolExecutor executor;
     private volatile boolean aborted;
-    private final List<Future<Void>> futures = new ArrayList<Future<Void>>();
+    private final List<Future<Void>> futures = new ArrayList<>();
     private final String name;
 
     public SimpleSubprocedurePool(String name, Configuration conf) {
       this.name = name;
       executor = new ThreadPoolExecutor(1, 1, 500, TimeUnit.SECONDS,
-          new LinkedBlockingQueue<Runnable>(),
+          new LinkedBlockingQueue<>(),
           new DaemonThreadFactory("rs(" + name + ")-procedure-pool"));
-      taskPool = new ExecutorCompletionService<Void>(executor);
+      taskPool = new ExecutorCompletionService<>(executor);
     }
 
     /**

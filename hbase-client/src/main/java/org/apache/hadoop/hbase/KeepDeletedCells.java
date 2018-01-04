@@ -18,8 +18,7 @@
  */
 package org.apache.hadoop.hbase;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * Ways to keep cells marked for delete around.
@@ -29,7 +28,6 @@ import org.apache.hadoop.hbase.classification.InterfaceStability;
  * this way for backwards compatibility.
  */
 @InterfaceAudience.Public
-@InterfaceStability.Evolving
 public enum KeepDeletedCells {
   /** Deleted Cells are not retained. */
   FALSE,
@@ -47,4 +45,7 @@ public enum KeepDeletedCells {
    * time remove deleted cells after the TTL.
    */
   TTL;
+  public static KeepDeletedCells getValue(String val) {
+    return valueOf(val.toUpperCase());
+  }
 }

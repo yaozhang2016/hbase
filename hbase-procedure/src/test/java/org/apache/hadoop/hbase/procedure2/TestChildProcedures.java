@@ -20,12 +20,9 @@ package org.apache.hadoop.hbase.procedure2;
 
 import java.io.IOException;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.HBaseCommonTestingUtility;
-import org.apache.hadoop.hbase.ProcedureInfo;
 import org.apache.hadoop.hbase.procedure2.store.ProcedureStore;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.apache.hadoop.hbase.testclassification.MasterTests;
@@ -33,14 +30,15 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 @Category({MasterTests.class, SmallTests.class})
 public class TestChildProcedures {
-  private static final Log LOG = LogFactory.getLog(TestChildProcedures.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestChildProcedures.class);
 
   private static final int PROCEDURE_EXECUTOR_SLOTS = 1;
 
@@ -62,7 +60,7 @@ public class TestChildProcedures {
 
     logDir = new Path(testDir, "proc-logs");
     procEnv = new TestProcEnv();
-    procStore = ProcedureTestingUtility.createStore(htu.getConfiguration(), fs, logDir);
+    procStore = ProcedureTestingUtility.createStore(htu.getConfiguration(), logDir);
     procExecutor = new ProcedureExecutor(htu.getConfiguration(), procEnv, procStore);
     procExecutor.testing = new ProcedureExecutor.Testing();
     procStore.start(PROCEDURE_EXECUTOR_SLOTS);
@@ -138,7 +136,7 @@ public class TestChildProcedures {
 
   private void assertProcFailed(long procId) {
     assertTrue("expected completed proc", procExecutor.isFinished(procId));
-    ProcedureInfo result = procExecutor.getResult(procId);
+    Procedure<?> result = procExecutor.getResult(procId);
     assertEquals(true, result.isFailed());
     LOG.info(result.getException().getMessage());
   }
@@ -146,6 +144,7 @@ public class TestChildProcedures {
   public static class TestRootProcedure extends SequentialProcedure<TestProcEnv> {
     public TestRootProcedure() {}
 
+    @Override
     public Procedure[] execute(TestProcEnv env) {
       if (env.toggleKillBeforeStoreUpdate) {
         ProcedureTestingUtility.toggleKillBeforeStoreUpdate(procExecutor);
@@ -153,6 +152,7 @@ public class TestChildProcedures {
       return new Procedure[] { new TestChildProcedure(), new TestChildProcedure() };
     }
 
+    @Override
     public void rollback(TestProcEnv env) {
     }
 
@@ -165,6 +165,7 @@ public class TestChildProcedures {
   public static class TestChildProcedure extends SequentialProcedure<TestProcEnv> {
     public TestChildProcedure() {}
 
+    @Override
     public Procedure[] execute(TestProcEnv env) {
       if (env.toggleKillBeforeStoreUpdate) {
         ProcedureTestingUtility.toggleKillBeforeStoreUpdate(procExecutor);
@@ -175,6 +176,7 @@ public class TestChildProcedures {
       return null;
     }
 
+    @Override
     public void rollback(TestProcEnv env) {
     }
 

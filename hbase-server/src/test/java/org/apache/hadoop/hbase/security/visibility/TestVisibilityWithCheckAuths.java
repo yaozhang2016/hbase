@@ -70,7 +70,6 @@ public class TestVisibilityWithCheckAuths {
   public static void setupBeforeClass() throws Exception {
     // setup configuration
     conf = TEST_UTIL.getConfiguration();
-    conf.setBoolean(HConstants.DISTRIBUTED_LOG_REPLAY_KEY, false);
     VisibilityTestUtil.enableVisiblityLabels(conf);
     conf.setBoolean(VisibilityConstants.CHECK_AUTHS_FOR_MUTATION, true);
     conf.setClass(VisibilityUtils.VISIBILITY_LABEL_GENERATOR_CLASS, SimpleScanLabelGenerator.class,
@@ -122,14 +121,14 @@ public class TestVisibilityWithCheckAuths {
     };
     SUPERUSER.runAs(action);
     final TableName tableName = TableName.valueOf(TEST_NAME.getMethodName());
-    Admin hBaseAdmin = TEST_UTIL.getHBaseAdmin();
+    Admin hBaseAdmin = TEST_UTIL.getAdmin();
     HColumnDescriptor colDesc = new HColumnDescriptor(fam);
     colDesc.setMaxVersions(5);
     HTableDescriptor desc = new HTableDescriptor(tableName);
     desc.addFamily(colDesc);
     hBaseAdmin.createTable(desc);
     try {
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
       PrivilegedExceptionAction<Void> actiona = new PrivilegedExceptionAction<Void>() {
         @Override
         public Void run() throws Exception {
@@ -191,7 +190,7 @@ public class TestVisibilityWithCheckAuths {
           try (Connection connection = ConnectionFactory.createConnection(conf);
                Table table = connection.getTable(tableName)) {
             Append append = new Append(row1);
-            append.add(fam, qual, Bytes.toBytes("b"));
+            append.addColumn(fam, qual, Bytes.toBytes("b"));
             table.append(append);
           }
           return null;
@@ -204,7 +203,7 @@ public class TestVisibilityWithCheckAuths {
           try (Connection connection = ConnectionFactory.createConnection(conf);
                Table table = connection.getTable(tableName)) {
             Append append = new Append(row1);
-            append.add(fam, qual, Bytes.toBytes("c"));
+            append.addColumn(fam, qual, Bytes.toBytes("c"));
             append.setCellVisibility(new CellVisibility(PUBLIC));
             table.append(append);
             Assert.fail("Testcase should fail with AccesDeniedException");

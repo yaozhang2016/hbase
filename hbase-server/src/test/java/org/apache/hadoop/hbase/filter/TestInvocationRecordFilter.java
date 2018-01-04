@@ -34,7 +34,6 @@ import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.InternalScanner;
-import org.apache.hadoop.hbase.regionserver.Region;
 import org.apache.hadoop.hbase.testclassification.FilterTests;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.apache.hadoop.hbase.util.Bytes;
@@ -61,7 +60,7 @@ public class TestInvocationRecordFilter {
   private static final String VALUE_PREFIX = "value";
 
   private final static HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
-  private Region region;
+  private HRegion region;
 
   @Before
   public void setUp() throws Exception {
@@ -84,8 +83,8 @@ public class TestInvocationRecordFilter {
 
   @Test
   public void testFilterInvocation() throws Exception {
-    List<Integer> selectQualifiers = new ArrayList<Integer>();
-    List<Integer> expectedQualifiers = new ArrayList<Integer>();
+    List<Integer> selectQualifiers = new ArrayList<>();
+    List<Integer> expectedQualifiers = new ArrayList<>();
 
     selectQualifiers.add(-1);
     verifyInvocationResults(selectQualifiers.toArray(new Integer[selectQualifiers.size()]),
@@ -127,7 +126,7 @@ public class TestInvocationRecordFilter {
 
     get.setFilter(new InvocationRecordFilter());
 
-    List<KeyValue> expectedValues = new ArrayList<KeyValue>();
+    List<KeyValue> expectedValues = new ArrayList<>();
     for (int i = 0; i < expectedQualifiers.length; i++) {
       expectedValues.add(new KeyValue(ROW_BYTES, FAMILY_NAME_BYTES, Bytes
           .toBytes(QUALIFIER_PREFIX + expectedQualifiers[i]),
@@ -136,8 +135,8 @@ public class TestInvocationRecordFilter {
     }
 
     Scan scan = new Scan(get);
-    List<Cell> actualValues = new ArrayList<Cell>();
-    List<Cell> temp = new ArrayList<Cell>();
+    List<Cell> actualValues = new ArrayList<>();
+    List<Cell> temp = new ArrayList<>();
     InternalScanner scanner = this.region.getScanner(scan);
     while (scanner.next(temp)) {
       actualValues.addAll(temp);
@@ -161,13 +160,13 @@ public class TestInvocationRecordFilter {
    */
   private static class InvocationRecordFilter extends FilterBase {
 
-    private List<Cell> visitedKeyValues = new ArrayList<Cell>();
+    private List<Cell> visitedKeyValues = new ArrayList<>();
 
     public void reset() {
       visitedKeyValues.clear();
     }
 
-    public ReturnCode filterKeyValue(Cell ignored) {
+    public ReturnCode filterCell(final Cell ignored) {
       visitedKeyValues.add(ignored);
       return ReturnCode.INCLUDE;
     }

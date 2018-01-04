@@ -20,8 +20,7 @@ package org.apache.hadoop.hbase;
 
 import java.io.IOException;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * This exception is thrown by the master when a region server clock skew is
@@ -29,7 +28,6 @@ import org.apache.hadoop.hbase.classification.InterfaceStability;
  */
 @SuppressWarnings("serial")
 @InterfaceAudience.Public
-@InterfaceStability.Stable
 public class ClockOutOfSyncException extends IOException {
   public ClockOutOfSyncException(String message) {
     super(message);

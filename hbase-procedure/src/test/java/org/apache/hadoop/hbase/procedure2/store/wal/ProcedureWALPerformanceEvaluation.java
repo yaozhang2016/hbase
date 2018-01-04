@@ -93,9 +93,9 @@ public class ProcedureWALPerformanceEvaluation extends AbstractHBaseTool {
     System.out.println("Logs directory : " + logDir.toString());
     fs.delete(logDir, true);
     if ("nosync".equals(syncType)) {
-      store = new NoSyncWalProcedureStore(conf, fs, logDir);
+      store = new NoSyncWalProcedureStore(conf, logDir);
     } else {
-      store = ProcedureTestingUtility.createWalStore(conf, fs, logDir);
+      store = ProcedureTestingUtility.createWalStore(conf, logDir);
     }
     store.start(numThreads);
     store.recoverLease();
@@ -107,10 +107,10 @@ public class ProcedureWALPerformanceEvaluation extends AbstractHBaseTool {
   private void tearDownProcedureStore() {
     store.stop(false);
     try {
-      store.getFileSystem().delete(store.getLogDir(), true);
+      store.getFileSystem().delete(store.getWALDir(), true);
     } catch (IOException e) {
       System.err.println("Error: Couldn't delete log dir. You can delete it manually to free up "
-          + "disk space. Location: " + store.getLogDir().toString());
+          + "disk space. Location: " + store.getWALDir().toString());
       e.printStackTrace();
     }
   }
@@ -149,7 +149,7 @@ public class ProcedureWALPerformanceEvaluation extends AbstractHBaseTool {
       // Start worker threads.
       long start = System.currentTimeMillis();
       for (int i = 0; i < numThreads; i++) {
-        futures[i] = executor.submit(this.new Worker(start));
+        futures[i] = executor.submit(new Worker(start));
       }
       boolean failure = false;
       try {
@@ -197,8 +197,8 @@ public class ProcedureWALPerformanceEvaluation extends AbstractHBaseTool {
    * If procedure store fails to roll log file (throws IOException), all threads quit, and at
    * least one returns value of {@link AbstractHBaseTool#EXIT_FAILURE}.
    */
-  class Worker implements Callable<Integer> {
-    final long start;
+  private final class Worker implements Callable<Integer> {
+    private final long start;
 
     public Worker(long start) {
       this.start = start;
@@ -243,10 +243,9 @@ public class ProcedureWALPerformanceEvaluation extends AbstractHBaseTool {
     }
   }
 
-  public class NoSyncWalProcedureStore extends WALProcedureStore {
-    public NoSyncWalProcedureStore(final Configuration conf, final FileSystem fs,
-        final Path logDir) {
-      super(conf, fs, logDir, new WALProcedureStore.LeaseRecovery() {
+  private class NoSyncWalProcedureStore extends WALProcedureStore {
+    public NoSyncWalProcedureStore(final Configuration conf, final Path logDir) throws IOException {
+      super(conf, logDir, null, new WALProcedureStore.LeaseRecovery() {
         @Override
         public void recoverFileLease(FileSystem fs, Path path) throws IOException {
           // no-op
@@ -255,13 +254,8 @@ public class ProcedureWALPerformanceEvaluation extends AbstractHBaseTool {
     }
 
     @Override
-    protected long syncSlots(FSDataOutputStream stream, ByteSlot[] slots, int offset, int count)
-        throws IOException {
-      long totalSynced = 0;
-      for (int i = 0; i < count; ++i) {
-        totalSynced += slots[offset + i].size();
-      }
-      return totalSynced;
+    protected void syncStream(FSDataOutputStream stream) {
+      // no-op
     }
   }
 

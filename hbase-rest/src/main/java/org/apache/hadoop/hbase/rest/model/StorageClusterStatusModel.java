@@ -30,11 +30,13 @@ import javax.xml.bind.annotation.XmlElementWrapper;
 import javax.xml.bind.annotation.XmlRootElement;
 
 import org.apache.hadoop.hbase.util.ByteStringer;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.hbase.rest.ProtobufMessageHandler;
 import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.rest.protobuf.generated.StorageClusterStatusMessage.StorageClusterStatus;
 import org.apache.hadoop.hbase.util.Bytes;
+
+import com.fasterxml.jackson.annotation.JsonProperty;
 
 /**
  * Representation of the status of a storage cluster:
@@ -115,7 +117,7 @@ public class StorageClusterStatusModel
       private int storefiles;
       private int storefileSizeMB;
       private int memstoreSizeMB;
-      private int storefileIndexSizeMB;
+      private long storefileIndexSizeKB;
       private long readRequestsCount;
       private long writeRequestsCount;
       private int rootIndexSizeKB;
@@ -145,10 +147,10 @@ public class StorageClusterStatusModel
        * @param storefiles the number of store files
        * @param storefileSizeMB total size of store files, in MB
        * @param memstoreSizeMB total size of memstore, in MB
-       * @param storefileIndexSizeMB total size of store file indexes, in MB
+       * @param storefileIndexSizeKB total size of store file indexes, in KB
        */
       public Region(byte[] name, int stores, int storefiles,
-          int storefileSizeMB, int memstoreSizeMB, int storefileIndexSizeMB,
+          int storefileSizeMB, int memstoreSizeMB, long storefileIndexSizeKB,
           long readRequestsCount, long writeRequestsCount, int rootIndexSizeKB,
           int totalStaticIndexSizeKB, int totalStaticBloomSizeKB,
           long totalCompactingKVs, long currentCompactedKVs) {
@@ -157,7 +159,7 @@ public class StorageClusterStatusModel
         this.storefiles = storefiles;
         this.storefileSizeMB = storefileSizeMB;
         this.memstoreSizeMB = memstoreSizeMB;
-        this.storefileIndexSizeMB = storefileIndexSizeMB;
+        this.storefileIndexSizeKB = storefileIndexSizeKB;
         this.readRequestsCount = readRequestsCount;
         this.writeRequestsCount = writeRequestsCount;
         this.rootIndexSizeKB = rootIndexSizeKB;
@@ -203,16 +205,16 @@ public class StorageClusterStatusModel
        * @return memstore size, in MB
        */
       @XmlAttribute
-      public int getMemstoreSizeMB() {
+      public int getMemStoreSizeMB() {
         return memstoreSizeMB;
       }
 
       /**
-       * @return the total size of store file indexes, in MB
+       * @return the total size of store file indexes, in KB
        */
       @XmlAttribute
-      public int getStorefileIndexSizeMB() {
-        return storefileIndexSizeMB;
+      public long getStorefileIndexSizeKB() {
+        return storefileIndexSizeKB;
       }
 
       /**
@@ -356,15 +358,15 @@ public class StorageClusterStatusModel
       /**
        * @param memstoreSizeMB memstore size, in MB
        */
-      public void setMemstoreSizeMB(int memstoreSizeMB) {
+      public void setMemStoreSizeMB(int memstoreSizeMB) {
         this.memstoreSizeMB = memstoreSizeMB;
       }
 
       /**
-       * @param storefileIndexSizeMB total size of store file indexes, in MB
+       * @param storefileIndexSizeKB total size of store file indexes, in KB
        */
-      public void setStorefileIndexSizeMB(int storefileIndexSizeMB) {
-        this.storefileIndexSizeMB = storefileIndexSizeMB;
+      public void setStorefileIndexSizeKB(long storefileIndexSizeKB) {
+        this.storefileIndexSizeKB = storefileIndexSizeKB;
       }
     }
 
@@ -373,19 +375,19 @@ public class StorageClusterStatusModel
     private long requests;
     private int heapSizeMB;
     private int maxHeapSizeMB;
-    private List<Region> regions = new ArrayList<Region>();
+    private List<Region> regions = new ArrayList<>();
 
     /**
      * Add a region name to the list
      * @param name the region name
      */
     public void addRegion(byte[] name, int stores, int storefiles,
-        int storefileSizeMB, int memstoreSizeMB, int storefileIndexSizeMB,
+        int storefileSizeMB, int memstoreSizeMB, long storefileIndexSizeKB,
         long readRequestsCount, long writeRequestsCount, int rootIndexSizeKB,
         int totalStaticIndexSizeKB, int totalStaticBloomSizeKB,
         long totalCompactingKVs, long currentCompactedKVs) {
       regions.add(new Region(name, stores, storefiles, storefileSizeMB,
-        memstoreSizeMB, storefileIndexSizeMB, readRequestsCount,
+        memstoreSizeMB, storefileIndexSizeKB, readRequestsCount,
         writeRequestsCount, rootIndexSizeKB, totalStaticIndexSizeKB,
         totalStaticBloomSizeKB, totalCompactingKVs, currentCompactedKVs));
     }
@@ -505,8 +507,8 @@ public class StorageClusterStatusModel
     }
   }
 
-  private List<Node> liveNodes = new ArrayList<Node>();
-  private List<String> deadNodes = new ArrayList<String>();
+  private List<Node> liveNodes = new ArrayList<>();
+  private List<String> deadNodes = new ArrayList<>();
   private int regions;
   private long requests;
   private double averageLoad;
@@ -561,6 +563,8 @@ public class StorageClusterStatusModel
    */
   @XmlElement(name = "Node")
   @XmlElementWrapper(name = "LiveNodes")
+  // workaround https://github.com/FasterXML/jackson-dataformat-xml/issues/192
+  @JsonProperty("LiveNodes")
   public List<Node> getLiveNodes() {
     return liveNodes;
   }
@@ -570,6 +574,8 @@ public class StorageClusterStatusModel
    */
   @XmlElement(name = "Node")
   @XmlElementWrapper(name = "DeadNodes")
+  // workaround https://github.com/FasterXML/jackson-dataformat-xml/issues/192
+  @JsonProperty("DeadNodes")
   public List<String> getDeadNodes() {
     return deadNodes;
   }
@@ -624,7 +630,7 @@ public class StorageClusterStatusModel
    * @param requests the total number of requests per second handled by the
    * cluster
    */
-  public void setRequests(int requests) {
+  public void setRequests(long requests) {
     this.requests = requests;
   }
 
@@ -673,8 +679,8 @@ public class StorageClusterStatusModel
           sb.append(region.storefileSizeMB);
           sb.append("\n            memstoreSizeMB=");
           sb.append(region.memstoreSizeMB);
-          sb.append("\n            storefileIndexSizeMB=");
-          sb.append(region.storefileIndexSizeMB);
+          sb.append("\n            storefileIndexSizeKB=");
+          sb.append(region.storefileIndexSizeKB);
           sb.append("\n            readRequestsCount=");
           sb.append(region.readRequestsCount);
           sb.append("\n            writeRequestsCount=");
@@ -728,8 +734,8 @@ public class StorageClusterStatusModel
         regionBuilder.setStores(region.stores);
         regionBuilder.setStorefiles(region.storefiles);
         regionBuilder.setStorefileSizeMB(region.storefileSizeMB);
-        regionBuilder.setMemstoreSizeMB(region.memstoreSizeMB);
-        regionBuilder.setStorefileIndexSizeMB(region.storefileIndexSizeMB);
+        regionBuilder.setMemStoreSizeMB(region.memstoreSizeMB);
+        regionBuilder.setStorefileIndexSizeKB(region.storefileIndexSizeKB);
         regionBuilder.setReadRequestsCount(region.readRequestsCount);
         regionBuilder.setWriteRequestsCount(region.writeRequestsCount);
         regionBuilder.setRootIndexSizeKB(region.rootIndexSizeKB);
@@ -774,8 +780,8 @@ public class StorageClusterStatusModel
           region.getStores(),
           region.getStorefiles(),
           region.getStorefileSizeMB(),
-          region.getMemstoreSizeMB(),
-          region.getStorefileIndexSizeMB(),
+          region.getMemStoreSizeMB(),
+          region.getStorefileIndexSizeKB(),
           region.getReadRequestsCount(),
           region.getWriteRequestsCount(),
           region.getRootIndexSizeKB(),

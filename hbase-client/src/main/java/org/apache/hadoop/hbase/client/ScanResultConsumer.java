@@ -17,47 +17,21 @@
  */
 package org.apache.hadoop.hbase.client;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
-import org.apache.hadoop.hbase.client.Result;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
- * Receives {@link Result} from an asynchronous scanner.
+ * Receives {@link Result} for an asynchronous scan.
  * <p>
- * Notice that, the {@link #onNext(Result[])} method will be called in the thread which we send
- * request to HBase service. So if you want the asynchronous scanner fetch data from HBase in
- * background while you process the returned data, you need to move the processing work to another
- * thread to make the {@code onNext} call return immediately. And please do NOT do any time
- * consuming tasks in all methods below unless you know what you are doing.
+ * All results that match the given scan object will be passed to this class by calling
+ * {@link #onNext(Result)}. {@link #onComplete()} means the scan is finished, and
+ * {@link #onError(Throwable)} means we hit an unrecoverable error and the scan is terminated.
  */
 @InterfaceAudience.Public
-@InterfaceStability.Unstable
-public interface ScanResultConsumer {
+public interface ScanResultConsumer extends ScanResultConsumerBase {
 
   /**
-   * @param results the data fetched from HBase service.
-   * @return {@code false} if you want to stop the scanner process. Otherwise {@code true}
+   * @param result the data fetched from HBase service.
+   * @return {@code false} if you want to terminate the scan process. Otherwise {@code true}
    */
-  boolean onNext(Result[] results);
-
-  /**
-   * Indicate that there is an heartbeat message but we have not cumulated enough cells to call
-   * onNext.
-   * <p>
-   * This method give you a chance to terminate a slow scan operation.
-   * @return {@code false} if you want to stop the scanner process. Otherwise {@code true}
-   */
-  boolean onHeartbeat();
-
-  /**
-   * Indicate that we hit an unrecoverable error and the scan operation is terminated.
-   * <p>
-   * We will not call {@link #onComplete()} after calling {@link #onError(Throwable)}.
-   */
-  void onError(Throwable error);
-
-  /**
-   * Indicate that the scan operation is completed normally.
-   */
-  void onComplete();
+  boolean onNext(Result result);
 }

@@ -25,37 +25,44 @@ import java.io.IOException;
 
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hbase.client.TableDescriptor;
+import org.apache.hadoop.hbase.client.TableDescriptorBuilder;
 import org.apache.hadoop.hbase.testclassification.MiscTests;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.apache.hadoop.hbase.util.FSTableDescriptors;
-import org.junit.*;
+import org.junit.Rule;
+import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.junit.rules.TestName;
 
 @Category({MiscTests.class, SmallTests.class})
 public class TestFSTableDescriptorForceCreation {
   private static final HBaseTestingUtility UTIL = new HBaseTestingUtility();
 
+  @Rule
+  public TestName name = new TestName();
+
   @Test
   public void testShouldCreateNewTableDescriptorIfForcefulCreationIsFalse()
       throws IOException {
-    final String name = "newTable2";
+    final String name = this.name.getMethodName();
     FileSystem fs = FileSystem.get(UTIL.getConfiguration());
     Path rootdir = new Path(UTIL.getDataTestDir(), name);
     FSTableDescriptors fstd = new FSTableDescriptors(UTIL.getConfiguration(), fs, rootdir);
-    HTableDescriptor htd = new HTableDescriptor(TableName.valueOf(name));
 
-    assertTrue("Should create new table descriptor", fstd.createTableDescriptor(htd, false));
+    assertTrue("Should create new table descriptor",
+      fstd.createTableDescriptor(TableDescriptorBuilder.newBuilder(TableName.valueOf(name)).build(), false));
   }
 
   @Test
   public void testShouldNotCreateTheSameTableDescriptorIfForcefulCreationIsFalse()
       throws IOException {
-    final String name = "testAlreadyExists";
+    final String name = this.name.getMethodName();
     FileSystem fs = FileSystem.get(UTIL.getConfiguration());
     // Cleanup old tests if any detritus laying around.
     Path rootdir = new Path(UTIL.getDataTestDir(), name);
     FSTableDescriptors fstd = new FSTableDescriptors(UTIL.getConfiguration(), fs, rootdir);
-    HTableDescriptor htd = new HTableDescriptor(name);
+    TableDescriptor htd = TableDescriptorBuilder.newBuilder(TableName.valueOf(name)).build();
     fstd.add(htd);
     assertFalse("Should not create new table descriptor", fstd.createTableDescriptor(htd, false));
   }
@@ -63,11 +70,11 @@ public class TestFSTableDescriptorForceCreation {
   @Test
   public void testShouldAllowForcefulCreationOfAlreadyExistingTableDescriptor()
       throws Exception {
-    final String name = "createNewTableNew2";
+    final String name = this.name.getMethodName();
     FileSystem fs = FileSystem.get(UTIL.getConfiguration());
     Path rootdir = new Path(UTIL.getDataTestDir(), name);
     FSTableDescriptors fstd = new FSTableDescriptors(UTIL.getConfiguration(), fs, rootdir);
-    HTableDescriptor htd = new HTableDescriptor(TableName.valueOf(name));
+    TableDescriptor htd = TableDescriptorBuilder.newBuilder(TableName.valueOf(name)).build();
     fstd.createTableDescriptor(htd, false);
     assertTrue("Should create new table descriptor",
         fstd.createTableDescriptor(htd, true));

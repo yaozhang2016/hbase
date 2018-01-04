@@ -1,5 +1,4 @@
 /*
- *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -18,7 +17,12 @@
  */
 package org.apache.hadoop.hbase.client;
 
-import com.google.common.collect.Lists;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 import java.io.IOException;
 import java.lang.reflect.Field;
@@ -26,6 +30,7 @@ import java.lang.reflect.Modifier;
 import java.net.SocketTimeoutException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.Random;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.SynchronousQueue;
@@ -36,8 +41,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.CategoryBasedTimeout;
 import org.apache.hadoop.hbase.Cell;
@@ -49,9 +52,10 @@ import org.apache.hadoop.hbase.RegionLocations;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.Waiter;
-import org.apache.hadoop.hbase.coprocessor.BaseRegionObserver;
 import org.apache.hadoop.hbase.coprocessor.ObserverContext;
+import org.apache.hadoop.hbase.coprocessor.RegionCoprocessor;
 import org.apache.hadoop.hbase.coprocessor.RegionCoprocessorEnvironment;
+import org.apache.hadoop.hbase.coprocessor.RegionObserver;
 import org.apache.hadoop.hbase.exceptions.ClientExceptionsUtil;
 import org.apache.hadoop.hbase.exceptions.DeserializationException;
 import org.apache.hadoop.hbase.exceptions.RegionMovedException;
@@ -60,12 +64,12 @@ import org.apache.hadoop.hbase.filter.FilterBase;
 import org.apache.hadoop.hbase.ipc.HBaseRpcController;
 import org.apache.hadoop.hbase.ipc.RpcClient;
 import org.apache.hadoop.hbase.ipc.RpcControllerFactory;
-import org.apache.hadoop.hbase.ipc.ServerTooBusyException;
 import org.apache.hadoop.hbase.master.HMaster;
+import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.HRegionServer;
 import org.apache.hadoop.hbase.regionserver.Region;
 import org.apache.hadoop.hbase.regionserver.RegionServerStoppedException;
-import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
+import org.apache.hadoop.hbase.wal.WALEdit;
 import org.apache.hadoop.hbase.testclassification.LargeTests;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
@@ -79,14 +83,11 @@ import org.junit.Ignore;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.junit.rules.TestName;
 import org.junit.rules.TestRule;
-
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.apache.hbase.thirdparty.com.google.common.collect.Lists;
 
 /**
  * This class is for testing HBaseConnectionManager features
@@ -97,7 +98,7 @@ public class TestHCM {
       .withTimeout(this.getClass())
       .withLookingForStuckThread(true)
       .build();
-  private static final Log LOG = LogFactory.getLog(TestHCM.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestHCM.class);
   private final static HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
   private static final TableName TABLE_NAME =
       TableName.valueOf("test");
@@ -113,10 +114,13 @@ public class TestHCM {
   private static Random _randy = new Random();
   private static final int RPC_RETRY = 5;
 
+  @Rule
+  public TestName name = new TestName();
+
 /**
 * This copro sleeps 20 second. The first call it fails. The second time, it works.
 */
-  public static class SleepAndFailFirstTime extends BaseRegionObserver {
+  public static class SleepAndFailFirstTime implements RegionCoprocessor, RegionObserver {
     static final AtomicLong ct = new AtomicLong(0);
     static final String SLEEP_TIME_CONF_KEY =
         "hbase.coprocessor.SleepAndFailFirstTime.sleepTime";
@@ -124,6 +128,11 @@ public class TestHCM {
     static final AtomicLong sleepTime = new AtomicLong(DEFAULT_SLEEP_TIME);
 
     public SleepAndFailFirstTime() {
+    }
+
+    @Override
+    public Optional<RegionObserver> getRegionObserver() {
+      return Optional.of(this);
     }
 
     @Override
@@ -168,13 +177,19 @@ public class TestHCM {
       if (ct.incrementAndGet() == 1) {
         throw new IOException("first call I fail");
       }
-      return super.preIncrement(e, increment);
+      return null;
     }
 
   }
 
-  public static class SleepCoprocessor extends BaseRegionObserver {
+  public static class SleepCoprocessor implements RegionCoprocessor, RegionObserver {
     public static final int SLEEP_TIME = 5000;
+
+    @Override
+    public Optional<RegionObserver> getRegionObserver() {
+      return Optional.of(this);
+    }
+
     @Override
     public void preGetOp(final ObserverContext<RegionCoprocessorEnvironment> e,
         final Get get, final List<Cell> results) throws IOException {
@@ -191,7 +206,7 @@ public class TestHCM {
     public Result preIncrement(final ObserverContext<RegionCoprocessorEnvironment> e,
                                final Increment increment) throws IOException {
       Threads.sleep(SLEEP_TIME);
-      return super.preIncrement(e, increment);
+      return null;
     }
 
     @Override
@@ -202,45 +217,25 @@ public class TestHCM {
 
   }
 
-  public static class SleepLongerAtFirstCoprocessor extends BaseRegionObserver {
-    public static final int SLEEP_TIME = 2000;
-    static final AtomicLong ct = new AtomicLong(0);
-    @Override
-    public void preGetOp(final ObserverContext<RegionCoprocessorEnvironment> e,
-        final Get get, final List<Cell> results) throws IOException {
-      // After first sleep, all requests are timeout except the last retry. If we handle
-      // all the following requests, finally the last request is also timeout. If we drop all
-      // timeout requests, we can handle the last request immediately and it will not timeout.
-      if (ct.incrementAndGet() <= 1) {
-        Threads.sleep(SLEEP_TIME * RPC_RETRY * 2);
-      } else {
-        Threads.sleep(SLEEP_TIME);
-      }
-    }
-  }
-
   @BeforeClass
   public static void setUpBeforeClass() throws Exception {
     TEST_UTIL.getConfiguration().setBoolean(HConstants.STATUS_PUBLISHED, true);
     // Up the handlers; this test needs more than usual.
     TEST_UTIL.getConfiguration().setInt(HConstants.REGION_SERVER_HIGH_PRIORITY_HANDLER_COUNT, 10);
     TEST_UTIL.getConfiguration().setInt(HConstants.HBASE_CLIENT_RETRIES_NUMBER, RPC_RETRY);
-    // simulate queue blocking in testDropTimeoutRequest
-    TEST_UTIL.getConfiguration().setInt(HConstants.REGION_SERVER_HANDLER_COUNT, 1);
-    // Used in testServerBusyException
-    TEST_UTIL.getConfiguration().setInt(HConstants.HBASE_CLIENT_PERSERVER_REQUESTS_THRESHOLD, 3);
+    TEST_UTIL.getConfiguration().setInt(HConstants.REGION_SERVER_HANDLER_COUNT, 3);
     TEST_UTIL.startMiniCluster(2);
+
   }
 
   @AfterClass public static void tearDownAfterClass() throws Exception {
     TEST_UTIL.shutdownMiniCluster();
   }
 
-  @Test
   public void testClusterConnection() throws IOException {
     ThreadPoolExecutor otherPool = new ThreadPoolExecutor(1, 1,
         5, TimeUnit.SECONDS,
-        new SynchronousQueue<Runnable>(),
+        new SynchronousQueue<>(),
         Threads.newDaemonThreadFactory("test-hcm"));
 
     Connection con1 = ConnectionFactory.createConnection(TEST_UTIL.getConfiguration());
@@ -248,7 +243,7 @@ public class TestHCM {
     // make sure the internally created ExecutorService is the one passed
     assertTrue(otherPool == ((ConnectionImplementation) con2).getCurrentBatchPool());
 
-    TableName tableName = TableName.valueOf("testClusterConnection");
+    final TableName tableName = TableName.valueOf(name.getMethodName());
     TEST_UTIL.createTable(tableName, FAM_NAM).close();
     Table table = con1.getTable(tableName, otherPool);
 
@@ -321,11 +316,13 @@ public class TestHCM {
   }
 
   // Fails too often!  Needs work.  HBASE-12558
+  // May only fail on non-linux machines? E.g. macosx.
   @Ignore @Test (expected = RegionServerStoppedException.class)
+  // Depends on mulitcast messaging facility that seems broken in hbase2
+  // See  HBASE-19261 "ClusterStatusPublisher where Master could optionally broadcast notice of
+  // dead servers is broke"
   public void testClusterStatus() throws Exception {
-
-    TableName tn =
-        TableName.valueOf("testClusterStatus");
+    final TableName tableName = TableName.valueOf(name.getMethodName());
     byte[] cf = "cf".getBytes();
     byte[] rk = "rk1".getBytes();
 
@@ -333,17 +330,17 @@ public class TestHCM {
     rs.waitForServerOnline();
     final ServerName sn = rs.getRegionServer().getServerName();
 
-    Table t = TEST_UTIL.createTable(tn, cf);
-    TEST_UTIL.waitTableAvailable(tn);
+    Table t = TEST_UTIL.createTable(tableName, cf);
+    TEST_UTIL.waitTableAvailable(tableName);
     TEST_UTIL.waitUntilNoRegionsInTransition();
 
     final ConnectionImplementation hci =  (ConnectionImplementation)TEST_UTIL.getConnection();
-    try (RegionLocator l = TEST_UTIL.getConnection().getRegionLocator(tn)) {
+    try (RegionLocator l = TEST_UTIL.getConnection().getRegionLocator(tableName)) {
       while (l.getRegionLocation(rk).getPort() != sn.getPort()) {
-        TEST_UTIL.getHBaseAdmin().move(l.getRegionLocation(rk).getRegionInfo().
+        TEST_UTIL.getAdmin().move(l.getRegionLocation(rk).getRegionInfo().
             getEncodedNameAsBytes(), Bytes.toBytes(sn.toString()));
         TEST_UTIL.waitUntilNoRegionsInTransition();
-        hci.clearRegionCache(tn);
+        hci.clearRegionCache(tableName);
       }
       Assert.assertNotNull(hci.clusterStatusListener);
       TEST_UTIL.assertRegionOnServer(l.getRegionLocation(rk).getRegionInfo(), sn, 20000);
@@ -399,7 +396,7 @@ public class TestHCM {
    */
   @Test
   public void testGetOperationTimeout() throws Exception {
-    HTableDescriptor hdt = TEST_UTIL.createTableDescriptor("HCM-testGetOperationTimeout");
+    HTableDescriptor hdt = TEST_UTIL.createTableDescriptor(TableName.valueOf(name.getMethodName()));
     hdt.addCoprocessor(SleepAndFailFirstTime.class.getName());
     Table table = TEST_UTIL.createTable(hdt, new byte[][]{FAM_NAM}, TEST_UTIL.getConfiguration());
     table.setRpcTimeout(Integer.MAX_VALUE);
@@ -428,7 +425,7 @@ public class TestHCM {
 
   @Test
   public void testPutOperationTimeout() throws Exception {
-    HTableDescriptor hdt = TEST_UTIL.createTableDescriptor("HCM-testPutOperationTimeout");
+    HTableDescriptor hdt = TEST_UTIL.createTableDescriptor(TableName.valueOf(name.getMethodName()));
     hdt.addCoprocessor(SleepAndFailFirstTime.class.getName());
     Table table = TEST_UTIL.createTable(hdt, new byte[][] { FAM_NAM },TEST_UTIL.getConfiguration());
     table.setRpcTimeout(Integer.MAX_VALUE);
@@ -443,7 +440,7 @@ public class TestHCM {
       table.setOperationTimeout(30 * 1000);
       table.put(new Put(FAM_NAM).addColumn(FAM_NAM, FAM_NAM, FAM_NAM));
       Assert.fail("We expect an exception here");
-    } catch (RetriesExhaustedWithDetailsException e) {
+    } catch (SocketTimeoutException e) {
       // The client has a CallTimeout class, but it's not shared.We're not very clean today,
       //  in the general case you can expect the call to stop, but the exception may vary.
       // In this test however, we're sure that it will be a socket timeout.
@@ -457,7 +454,7 @@ public class TestHCM {
 
   @Test
   public void testDeleteOperationTimeout() throws Exception {
-    HTableDescriptor hdt = TEST_UTIL.createTableDescriptor("HCM-testDeleteOperationTimeout");
+    HTableDescriptor hdt = TEST_UTIL.createTableDescriptor(TableName.valueOf(name.getMethodName()));
     hdt.addCoprocessor(SleepAndFailFirstTime.class.getName());
     Table table = TEST_UTIL.createTable(hdt, new byte[][] { FAM_NAM },TEST_UTIL.getConfiguration());
     table.setRpcTimeout(Integer.MAX_VALUE);
@@ -486,7 +483,7 @@ public class TestHCM {
 
   @Test
   public void testRpcTimeout() throws Exception {
-    HTableDescriptor hdt = TEST_UTIL.createTableDescriptor("HCM-testRpcTimeout");
+    HTableDescriptor hdt = TEST_UTIL.createTableDescriptor(TableName.valueOf(name.getMethodName()));
     hdt.addCoprocessor(SleepCoprocessor.class.getName());
     Configuration c = new Configuration(TEST_UTIL.getConfiguration());
 
@@ -513,7 +510,7 @@ public class TestHCM {
 
   @Test
   public void testIncrementRpcTimeout() throws Exception {
-    HTableDescriptor hdt = TEST_UTIL.createTableDescriptor("HCM-testIncrementRpcTimeout");
+    HTableDescriptor hdt = TEST_UTIL.createTableDescriptor(TableName.valueOf(name.getMethodName()));
     hdt.addCoprocessor(SleepCoprocessor.class.getName());
     Configuration c = new Configuration(TEST_UTIL.getConfiguration());
 
@@ -544,7 +541,7 @@ public class TestHCM {
 
   @Test
   public void testDeleteRpcTimeout() throws Exception {
-    HTableDescriptor hdt = TEST_UTIL.createTableDescriptor("HCM-testDeleteRpcTimeout");
+    HTableDescriptor hdt = TEST_UTIL.createTableDescriptor(TableName.valueOf(name.getMethodName()));
     hdt.addCoprocessor(SleepCoprocessor.class.getName());
     Configuration c = new Configuration(TEST_UTIL.getConfiguration());
 
@@ -563,7 +560,7 @@ public class TestHCM {
 
   @Test
   public void testPutRpcTimeout() throws Exception {
-    HTableDescriptor hdt = TEST_UTIL.createTableDescriptor("HCM-testPutRpcTimeout");
+    HTableDescriptor hdt = TEST_UTIL.createTableDescriptor(TableName.valueOf(name.getMethodName()));
     hdt.addCoprocessor(SleepCoprocessor.class.getName());
     Configuration c = new Configuration(TEST_UTIL.getConfiguration());
 
@@ -582,7 +579,7 @@ public class TestHCM {
 
   @Test
   public void testGetRpcTimeout() throws Exception {
-    HTableDescriptor hdt = TEST_UTIL.createTableDescriptor("HCM-testGetRpcTimeout");
+    HTableDescriptor hdt = TEST_UTIL.createTableDescriptor(TableName.valueOf(name.getMethodName()));
     hdt.addCoprocessor(SleepCoprocessor.class.getName());
     Configuration c = new Configuration(TEST_UTIL.getConfiguration());
 
@@ -607,27 +604,12 @@ public class TestHCM {
     }
   }
 
-  @Test
-  public void testDropTimeoutRequest() throws Exception {
-    // Simulate the situation that the server is slow and client retries for several times because
-    // of timeout. When a request can be handled after waiting in the queue, we will drop it if
-    // it has been considered as timeout at client. If we don't drop it, the server will waste time
-    // on handling timeout requests and finally all requests timeout and client throws exception.
-    HTableDescriptor hdt = TEST_UTIL.createTableDescriptor("HCM-testDropTimeputRequest");
-    hdt.addCoprocessor(SleepLongerAtFirstCoprocessor.class.getName());
-    Configuration c = new Configuration(TEST_UTIL.getConfiguration());
-    try (Table t = TEST_UTIL.createTable(hdt, new byte[][] { FAM_NAM }, c)) {
-      t.setRpcTimeout(SleepLongerAtFirstCoprocessor.SLEEP_TIME * 2);
-      t.get(new Get(FAM_NAM));
-    }
-  }
-
   /**
    * Test starting from 0 index when RpcRetryingCaller calculate the backoff time.
    */
   @Test
   public void testRpcRetryingCallerSleep() throws Exception {
-    HTableDescriptor hdt = TEST_UTIL.createTableDescriptor("HCM-testRpcRetryingCallerSleep");
+    HTableDescriptor hdt = TEST_UTIL.createTableDescriptor(TableName.valueOf(name.getMethodName()));
     hdt.addCoprocessorWithSpec("|" + SleepAndFailFirstTime.class.getName() + "||"
         + SleepAndFailFirstTime.SLEEP_TIME_CONF_KEY + "=2000");
     TEST_UTIL.createTable(hdt, new byte[][] { FAM_NAM }).close();
@@ -638,7 +620,7 @@ public class TestHCM {
     c.setInt(HConstants.HBASE_RPC_TIMEOUT_KEY, 4000);
 
     Connection connection = ConnectionFactory.createConnection(c);
-    Table table = connection.getTable(TableName.valueOf("HCM-testRpcRetryingCallerSleep"));
+    Table table = connection.getTable(TableName.valueOf(name.getMethodName()));
     table.setOperationTimeout(8000);
     // Check that it works. Because 2s + 3s * RETRY_BACKOFF[0] + 2s < 8s
     table.get(new Get(FAM_NAM));
@@ -665,11 +647,11 @@ public class TestHCM {
   public void testCallableSleep() throws Exception {
     long pauseTime;
     long baseTime = 100;
-    TableName tableName = TableName.valueOf("HCM-testCallableSleep");
+    final TableName tableName = TableName.valueOf(name.getMethodName());
     TEST_UTIL.createTable(tableName, FAM_NAM);
     ClientServiceCallable<Object> regionServerCallable = new ClientServiceCallable<Object>(
         TEST_UTIL.getConnection(), tableName, ROW,
-        new RpcControllerFactory(TEST_UTIL.getConfiguration()).newController()) {
+        new RpcControllerFactory(TEST_UTIL.getConfiguration()).newController(), HConstants.PRIORITY_UNSET) {
       @Override
       protected Object rpcCall() throws Exception {
         return null;
@@ -746,7 +728,7 @@ public class TestHCM {
     // 4 steps: ready=0; doGets=1; mustStop=2; stopped=3
     final AtomicInteger step = new AtomicInteger(0);
 
-    final AtomicReference<Throwable> failed = new AtomicReference<Throwable>(null);
+    final AtomicReference<Throwable> failed = new AtomicReference<>(null);
     Thread t = new Thread("testConnectionCloseThread") {
       @Override
       public void run() {
@@ -765,7 +747,7 @@ public class TestHCM {
           }
         } catch (Throwable t) {
           failed.set(t);
-          LOG.error(t);
+          LOG.error(t.toString(), t);
         }
         step.set(3);
       }
@@ -804,7 +786,7 @@ public class TestHCM {
     table.close();
     connection.close();
     Assert.assertTrue("Unexpected exception is " + failed.get(), failed.get() == null);
-    TEST_UTIL.getHBaseAdmin().setBalancerRunning(previousBalance, true);
+    TEST_UTIL.getAdmin().setBalancerRunning(previousBalance, true);
   }
 
   /**
@@ -812,10 +794,10 @@ public class TestHCM {
    */
   @Test
   public void testConnectionIdle() throws Exception {
-    TableName tableName = TableName.valueOf("HCM-testConnectionIdle");
+    final TableName tableName = TableName.valueOf(name.getMethodName());
     TEST_UTIL.createTable(tableName, FAM_NAM).close();
     int idleTime =  20000;
-    boolean previousBalance = TEST_UTIL.getHBaseAdmin().setBalancerRunning(false, true);
+    boolean previousBalance = TEST_UTIL.getAdmin().setBalancerRunning(false, true);
 
     Configuration c2 = new Configuration(TEST_UTIL.getConfiguration());
     // We want to work on a separate connection.
@@ -863,7 +845,7 @@ public class TestHCM {
 
     connection.close();
     EnvironmentEdgeManager.reset();
-    TEST_UTIL.getHBaseAdmin().setBalancerRunning(previousBalance, true);
+    TEST_UTIL.getAdmin().setBalancerRunning(previousBalance, true);
   }
 
     /**
@@ -873,11 +855,10 @@ public class TestHCM {
      */
   @Test
   public void testConnectionCut() throws Exception {
-
-    TableName tableName = TableName.valueOf("HCM-testConnectionCut");
+    final TableName tableName = TableName.valueOf(name.getMethodName());
 
     TEST_UTIL.createTable(tableName, FAM_NAM).close();
-    boolean previousBalance = TEST_UTIL.getHBaseAdmin().setBalancerRunning(false, true);
+    boolean previousBalance = TEST_UTIL.getAdmin().setBalancerRunning(false, true);
 
     Configuration c2 = new Configuration(TEST_UTIL.getConfiguration());
     // We want to work on a separate connection.
@@ -932,7 +913,7 @@ public class TestHCM {
     } finally {
       syncBlockingFilter.set(true);
       t.join();
-      TEST_UTIL.getHBaseAdmin().setBalancerRunning(previousBalance, true);
+      TEST_UTIL.getAdmin().setBalancerRunning(previousBalance, true);
     }
 
     table.close();
@@ -955,7 +936,7 @@ public class TestHCM {
       return false;
     }
     @Override
-    public ReturnCode filterKeyValue(Cell ignored) throws IOException {
+    public ReturnCode filterCell(final Cell ignored) throws IOException {
       return ReturnCode.INCLUDE;
     }
 
@@ -970,7 +951,7 @@ public class TestHCM {
    * @throws Exception
    */
   @Test
-  public void testRegionCaching() throws Exception{
+  public void testRegionCaching() throws Exception {
     TEST_UTIL.createMultiRegionTable(TABLE_NAME, FAM_NAM).close();
     Configuration conf =  new Configuration(TEST_UTIL.getConfiguration());
     // test with no retry, or client cache will get updated after the first failure
@@ -982,12 +963,15 @@ public class TestHCM {
     Put put = new Put(ROW);
     put.addColumn(FAM_NAM, ROW, ROW);
     table.put(put);
+
     ConnectionImplementation conn = (ConnectionImplementation) connection;
 
     assertNotNull(conn.getCachedLocation(TABLE_NAME, ROW));
 
-    final int nextPort = conn.getCachedLocation(TABLE_NAME, ROW).getRegionLocation().getPort() + 1;
+    // Here we mess with the cached location making it so the region at TABLE_NAME, ROW is at
+    // a location where the port is current port number +1 -- i.e. a non-existent location.
     HRegionLocation loc = conn.getCachedLocation(TABLE_NAME, ROW).getRegionLocation();
+    final int nextPort = loc.getPort() + 1;
     conn.updateCachedLocation(loc.getRegionInfo(), loc.getServerName(),
         ServerName.valueOf("127.0.0.1", nextPort,
         HConstants.LATEST_TIMESTAMP), HConstants.LATEST_TIMESTAMP);
@@ -1008,7 +992,7 @@ public class TestHCM {
     assertNotNull(conn.getCachedLocation(TABLE_NAME, ROW));
     assertNotNull(conn.getCachedLocation(TableName.valueOf(TABLE_NAME.getName()), ROW.clone()));
 
-    TEST_UTIL.getHBaseAdmin().setBalancerRunning(false, false);
+    TEST_UTIL.getAdmin().setBalancerRunning(false, false);
     HMaster master = TEST_UTIL.getMiniHBaseCluster().getMaster();
 
     // We can wait for all regions to be online, that makes log reading easier when debugging
@@ -1021,7 +1005,7 @@ public class TestHCM {
 
     // Choose the other server.
     int curServerId = TEST_UTIL.getHBaseCluster().getServerWith(regionName);
-    int destServerId = (curServerId == 0 ? 1 : 0);
+    int destServerId = curServerId == 0? 1: 0;
 
     HRegionServer curServer = TEST_UTIL.getHBaseCluster().getRegionServer(curServerId);
     HRegionServer destServer = TEST_UTIL.getHBaseCluster().getRegionServer(destServerId);
@@ -1035,12 +1019,12 @@ public class TestHCM {
     Assert.assertNotNull(curServer.getOnlineRegion(regionName));
     Assert.assertNull(destServer.getOnlineRegion(regionName));
     Assert.assertFalse(TEST_UTIL.getMiniHBaseCluster().getMaster().
-        getAssignmentManager().getRegionStates().isRegionsInTransition());
+        getAssignmentManager().hasRegionsInTransition());
 
     // Moving. It's possible that we don't have all the regions online at this point, so
-    //  the test must depends only on the region we're looking at.
+    //  the test must depend only on the region we're looking at.
     LOG.info("Move starting region="+toMove.getRegionInfo().getRegionNameAsString());
-    TEST_UTIL.getHBaseAdmin().move(
+    TEST_UTIL.getAdmin().move(
       toMove.getRegionInfo().getEncodedNameAsBytes(),
       destServerName.getServerName().getBytes()
     );
@@ -1048,7 +1032,7 @@ public class TestHCM {
     while (destServer.getOnlineRegion(regionName) == null ||
         destServer.getRegionsInTransitionInRS().containsKey(encodedRegionNameBytes) ||
         curServer.getRegionsInTransitionInRS().containsKey(encodedRegionNameBytes) ||
-        master.getAssignmentManager().getRegionStates().isRegionsInTransition()) {
+        master.getAssignmentManager().hasRegionsInTransition()) {
       // wait for the move to be finished
       Thread.sleep(1);
     }
@@ -1075,7 +1059,7 @@ public class TestHCM {
     try {
       table.put(put3);
       Assert.fail("Unreachable point");
-    } catch (RetriesExhaustedWithDetailsException e){
+    } catch (RetriesExhaustedWithDetailsException e) {
       LOG.info("Put done, exception caught: " + e.getClass());
       Assert.assertEquals(1, e.getNumExceptions());
       Assert.assertEquals(1, e.getCauses().size());
@@ -1083,6 +1067,13 @@ public class TestHCM {
 
       // Check that we unserialized the exception as expected
       Throwable cause = ClientExceptionsUtil.findException(e.getCause(0));
+      Assert.assertNotNull(cause);
+      Assert.assertTrue(cause instanceof RegionMovedException);
+    } catch (RetriesExhaustedException ree) {
+      // hbase2 throws RetriesExhaustedException instead of RetriesExhaustedWithDetailsException
+      // as hbase1 used to do. Keep an eye on this to see if this changed behavior is an issue.
+      LOG.info("Put done, exception caught: " + ree.getClass());
+      Throwable cause = ClientExceptionsUtil.findException(ree.getCause());
       Assert.assertNotNull(cause);
       Assert.assertTrue(cause instanceof RegionMovedException);
     }
@@ -1099,7 +1090,7 @@ public class TestHCM {
 
     // We move it back to do another test with a scan
     LOG.info("Move starting region=" + toMove.getRegionInfo().getRegionNameAsString());
-    TEST_UTIL.getHBaseAdmin().move(
+    TEST_UTIL.getAdmin().move(
       toMove.getRegionInfo().getEncodedNameAsBytes(),
       curServer.getServerName().getServerName().getBytes()
     );
@@ -1107,7 +1098,7 @@ public class TestHCM {
     while (curServer.getOnlineRegion(regionName) == null ||
         destServer.getRegionsInTransitionInRS().containsKey(encodedRegionNameBytes) ||
         curServer.getRegionsInTransitionInRS().containsKey(encodedRegionNameBytes) ||
-        master.getAssignmentManager().getRegionStates().isRegionsInTransition()) {
+        master.getAssignmentManager().hasRegionsInTransition()) {
       // wait for the move to be finished
       Thread.sleep(1);
     }
@@ -1296,15 +1287,14 @@ public class TestHCM {
   public void testMulti() throws Exception {
     Table table = TEST_UTIL.createMultiRegionTable(TABLE_NAME3, FAM_NAM);
     try {
-      ConnectionImplementation conn =
-           (ConnectionImplementation)TEST_UTIL.getConnection();
+      ConnectionImplementation conn = (ConnectionImplementation)TEST_UTIL.getConnection();
 
       // We're now going to move the region and check that it works for the client
       // First a new put to add the location in the cache
       conn.clearRegionCache(TABLE_NAME3);
       Assert.assertEquals(0, conn.getNumberOfCachedRegionLocations(TABLE_NAME3));
 
-      TEST_UTIL.getHBaseAdmin().setBalancerRunning(false, false);
+      TEST_UTIL.getAdmin().setBalancerRunning(false, false);
       HMaster master = TEST_UTIL.getMiniHBaseCluster().getMaster();
 
       // We can wait for all regions to be online, that makes log reading easier when debugging
@@ -1327,9 +1317,10 @@ public class TestHCM {
       HRegionServer destServer = TEST_UTIL.getHBaseCluster().getRegionServer(destServerId);
 
       ServerName destServerName = destServer.getServerName();
+      ServerName metaServerName = TEST_UTIL.getHBaseCluster().getServerHoldingMeta();
 
        //find another row in the cur server that is less than ROW_X
-      List<Region> regions = curServer.getOnlineRegions(TABLE_NAME3);
+      List<HRegion> regions = curServer.getRegions(TABLE_NAME3);
       byte[] otherRow = null;
        for (Region region : regions) {
          if (!region.getRegionInfo().getEncodedName().equals(toMove.getRegionInfo().getEncodedName())
@@ -1352,12 +1343,12 @@ public class TestHCM {
       Assert.assertNotNull(curServer.getOnlineRegion(regionName));
       Assert.assertNull(destServer.getOnlineRegion(regionName));
       Assert.assertFalse(TEST_UTIL.getMiniHBaseCluster().getMaster().
-          getAssignmentManager().getRegionStates().isRegionsInTransition());
+          getAssignmentManager().hasRegionsInTransition());
 
        // Moving. It's possible that we don't have all the regions online at this point, so
-      //  the test must depends only on the region we're looking at.
-      LOG.info("Move starting region="+toMove.getRegionInfo().getRegionNameAsString());
-      TEST_UTIL.getHBaseAdmin().move(
+      //  the test depends only on the region we're looking at.
+      LOG.info("Move starting region=" + toMove.getRegionInfo().getRegionNameAsString());
+      TEST_UTIL.getAdmin().move(
           toMove.getRegionInfo().getEncodedNameAsBytes(),
           destServerName.getServerName().getBytes()
       );
@@ -1365,7 +1356,7 @@ public class TestHCM {
       while (destServer.getOnlineRegion(regionName) == null ||
           destServer.getRegionsInTransitionInRS().containsKey(encodedRegionNameBytes) ||
           curServer.getRegionsInTransitionInRS().containsKey(encodedRegionNameBytes) ||
-          master.getAssignmentManager().getRegionStates().isRegionsInTransition()) {
+          master.getAssignmentManager().hasRegionsInTransition()) {
         // wait for the move to be finished
         Thread.sleep(1);
       }
@@ -1459,7 +1450,7 @@ public class TestHCM {
   public void testConnectionRideOverClusterRestart() throws IOException, InterruptedException {
     Configuration config = new Configuration(TEST_UTIL.getConfiguration());
 
-    TableName tableName = TableName.valueOf("testConnectionRideOverClusterRestart");
+    final TableName tableName = TableName.valueOf(name.getMethodName());
     TEST_UTIL.createTable(tableName, new byte[][] {FAM_NAM}).close();
 
     Connection connection = ConnectionFactory.createConnection(config);
@@ -1476,110 +1467,5 @@ public class TestHCM {
     TEST_UTIL.deleteTable(tableName);
     table.close();
     connection.close();
-  }
-
-  private class TestPutThread extends Thread {
-    Table table;
-    int getServerBusyException = 0;
-
-    TestPutThread(Table table){
-      this.table = table;
-    }
-
-    @Override
-    public void run() {
-      try {
-        Put p = new Put(ROW);
-        p.addColumn(FAM_NAM, new byte[]{0}, new byte[]{0});
-        table.put(p);
-      } catch (RetriesExhaustedWithDetailsException e) {
-        if (e.exceptions.get(0).getCause() instanceof ServerTooBusyException) {
-          getServerBusyException = 1;
-        }
-      } catch (IOException ignore) {
-      }
-    }
-  }
-
-  private class TestGetThread extends Thread {
-    Table table;
-    int getServerBusyException = 0;
-
-    TestGetThread(Table table){
-      this.table = table;
-    }
-
-    @Override
-    public void run() {
-      try {
-        Get g = new Get(ROW);
-        g.addColumn(FAM_NAM, new byte[]{0});
-        table.get(g);
-      } catch (RetriesExhaustedException e) {
-        if (e.getCause().getCause() instanceof ServerTooBusyException) {
-          getServerBusyException = 1;
-        }
-      } catch (IOException ignore) {
-      }
-    }
-  }
-
-  @Test()
-  public void testServerBusyException() throws Exception {
-    HTableDescriptor hdt = TEST_UTIL.createTableDescriptor("HCM-testServerBusy");
-    hdt.addCoprocessor(SleepCoprocessor.class.getName());
-    Configuration c = new Configuration(TEST_UTIL.getConfiguration());
-    TEST_UTIL.createTable(hdt, new byte[][] { FAM_NAM }, c);
-
-    TestGetThread tg1 =
-        new TestGetThread(TEST_UTIL.getConnection().getTable(hdt.getTableName()));
-    TestGetThread tg2 =
-        new TestGetThread(TEST_UTIL.getConnection().getTable(hdt.getTableName()));
-    TestGetThread tg3 =
-        new TestGetThread(TEST_UTIL.getConnection().getTable(hdt.getTableName()));
-    TestGetThread tg4 =
-        new TestGetThread(TEST_UTIL.getConnection().getTable(hdt.getTableName()));
-    TestGetThread tg5 =
-        new TestGetThread(TEST_UTIL.getConnection().getTable(hdt.getTableName()));
-    tg1.start();
-    tg2.start();
-    tg3.start();
-    tg4.start();
-    tg5.start();
-    tg1.join();
-    tg2.join();
-    tg3.join();
-    tg4.join();
-    tg5.join();
-    assertEquals(2,
-        tg1.getServerBusyException + tg2.getServerBusyException + tg3.getServerBusyException
-            + tg4.getServerBusyException + tg5.getServerBusyException);
-
-    // Put has its own logic in HTable, test Put alone. We use AsyncProcess for Put (use multi at
-    // RPC level) and it wrap exceptions to RetriesExhaustedWithDetailsException.
-
-    TestPutThread tp1 =
-        new TestPutThread(TEST_UTIL.getConnection().getTable(hdt.getTableName()));
-    TestPutThread tp2 =
-        new TestPutThread(TEST_UTIL.getConnection().getTable(hdt.getTableName()));
-    TestPutThread tp3 =
-        new TestPutThread(TEST_UTIL.getConnection().getTable(hdt.getTableName()));
-    TestPutThread tp4 =
-        new TestPutThread(TEST_UTIL.getConnection().getTable(hdt.getTableName()));
-    TestPutThread tp5 =
-        new TestPutThread(TEST_UTIL.getConnection().getTable(hdt.getTableName()));
-    tp1.start();
-    tp2.start();
-    tp3.start();
-    tp4.start();
-    tp5.start();
-    tp1.join();
-    tp2.join();
-    tp3.join();
-    tp4.join();
-    tp5.join();
-    assertEquals(2,
-        tp1.getServerBusyException + tp2.getServerBusyException + tp3.getServerBusyException
-            + tp4.getServerBusyException + tp5.getServerBusyException);
   }
 }

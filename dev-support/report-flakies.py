@@ -51,6 +51,9 @@ parser.add_argument('--max-builds', metavar='n', action='append', type=int,
                     help='The maximum number of builds to use (if available on jenkins). Specify '
                          '0 to analyze all builds. Not required, but if specified, number of uses '
                          'should be same as that of --urls since the values are matched.')
+parser.add_argument('--is-yetus', metavar='True/False', action='append', choices=['True', 'False'],
+                    help='True, if build is yetus style i.e. look for maven output in artifacts; '
+                         'False, if maven output is in <url>/consoleText itself.')
 parser.add_argument(
     "--mvn", action="store_true",
     help="Writes two strings for including/excluding these flaky tests using maven flags. These "
@@ -66,18 +69,29 @@ if args.verbose:
     logger.setLevel(logging.INFO)
 
 
-def get_bad_tests(build_url):
+def get_bad_tests(build_url, is_yetus):
     """
-    Given url of an executed build, analyzes its console text, and returns
+    Given url of an executed build, analyzes its maven output, and returns
     [list of all tests, list of timeout tests, list of failed tests].
-    Returns None if can't get console text or if there is any other error.
+    Returns None if can't get maven output from the build or if there is any other error.
     """
     logger.info("Analyzing %s", build_url)
     response = requests.get(build_url + "/api/json").json()
     if response["building"]:
         logger.info("Skipping this build since it is in progress.")
         return {}
-    console_url = build_url + "/consoleText"
+    console_url = None
+    if is_yetus:
+        for artifact in response["artifacts"]:
+            if artifact["fileName"] == "patch-unit-root.txt":
+                console_url = build_url + "/artifact/" + artifact["relativePath"]
+                break
+        if console_url is None:
+            logger.info("Can't find 'patch-unit-root.txt' artifact for Yetus build %s\n. Ignoring "
+                        "this build.", build_url)
+            return
+    else:
+        console_url = build_url + "/consoleText"
     build_result = findHangingTests.get_bad_tests(console_url)
     if not build_result:
         logger.info("Ignoring build %s", build_url)
@@ -93,6 +107,7 @@ def expand_multi_config_projects(cli_args):
     job_urls = cli_args.urls
     excluded_builds_arg = cli_args.excluded_builds
     max_builds_arg = cli_args.max_builds
+    is_yetus_arg = cli_args.is_yetus
     if excluded_builds_arg is not None and len(excluded_builds_arg) != len(job_urls):
         raise Exception("Number of --excluded-builds arguments should be same as that of --urls "
                         "since values are matched.")
@@ -102,6 +117,9 @@ def expand_multi_config_projects(cli_args):
     final_expanded_urls = []
     for (i, job_url) in enumerate(job_urls):
         max_builds = 10000  # Some high number
+        is_yetus = False
+        if is_yetus_arg is not None:
+            is_yetus = is_yetus_arg[i] == "True"
         if max_builds_arg is not None and max_builds_arg[i] != 0:
             max_builds = int(max_builds_arg[i])
         excluded_builds = []
@@ -111,10 +129,10 @@ def expand_multi_config_projects(cli_args):
         if response.has_key("activeConfigurations"):
             for config in response["activeConfigurations"]:
                 final_expanded_urls.append({'url':config["url"], 'max_builds': max_builds,
-                                            'excludes': excluded_builds})
+                                            'excludes': excluded_builds, 'is_yetus': is_yetus})
         else:
             final_expanded_urls.append({'url':job_url, 'max_builds': max_builds,
-                                        'excludes': excluded_builds})
+                                        'excludes': excluded_builds, 'is_yetus': is_yetus})
     return final_expanded_urls
 
 
@@ -125,6 +143,9 @@ all_hanging_tests = set()
 # Contains { <url> : { <bad_test> : { 'all': [<build ids>], 'failed': [<build ids>],
 #                                     'timeout': [<build ids>], 'hanging': [<builds ids>] } } }
 url_to_bad_test_results = OrderedDict()
+# Contains { <url> : [run_ids] }
+# Used for common min/max build ids when generating sparklines.
+url_to_build_ids = OrderedDict()
 
 # Iterates over each url, gets test results and prints flaky tests.
 expanded_urls = expand_multi_config_projects(args)
@@ -136,17 +157,17 @@ for url_max_build in expanded_urls:
         builds = json_response["builds"]
         logger.info("Analyzing job: %s", url)
     else:
-        builds = [{'number' : json_response["id"], 'url': url}]
+        builds = [{'number': json_response["id"], 'url': url}]
         logger.info("Analyzing build : %s", url)
     build_id_to_results = {}
     num_builds = 0
-    build_ids = []
+    url_to_build_ids[url] = []
     build_ids_without_tests_run = []
     for build in builds:
         build_id = build["number"]
         if build_id in excludes:
             continue
-        result = get_bad_tests(build["url"])
+        result = get_bad_tests(build["url"], url_max_build['is_yetus'])
         if not result:
             continue
         if len(result[0]) > 0:
@@ -154,9 +175,10 @@ for url_max_build in expanded_urls:
         else:
             build_ids_without_tests_run.append(build_id)
         num_builds += 1
-        build_ids.append(build_id)
+        url_to_build_ids[url].append(build_id)
         if num_builds == url_max_build["max_builds"]:
             break
+    url_to_build_ids[url].sort()
 
     # Collect list of bad tests.
     bad_tests = set()
@@ -217,10 +239,10 @@ for url_max_build in expanded_urls:
                 len(test_status['hanging']), test_status['flakyness'])
     else:
         print "No flaky tests founds."
-        if len(build_ids) == len(build_ids_without_tests_run):
+        if len(url_to_build_ids[url]) == len(build_ids_without_tests_run):
             print "None of the analyzed builds have test result."
 
-    print "Builds analyzed: {}".format(build_ids)
+    print "Builds analyzed: {}".format(url_to_build_ids[url])
     print "Builds without any test runs: {}".format(build_ids_without_tests_run)
     print ""
 
@@ -248,4 +270,4 @@ with open(os.path.join(dev_support_dir, "flaky-dashboard-template.html"), "r") a
 with open("dashboard.html", "w") as f:
     datetime = time.strftime("%m/%d/%Y %H:%M:%S")
     f.write(template.render(datetime=datetime, bad_tests_count=len(all_bad_tests),
-                            results=url_to_bad_test_results))
+                            results=url_to_bad_test_results, build_ids=url_to_build_ids))

@@ -54,11 +54,35 @@ public interface MetricsRegionServerSource extends BaseSource, JvmPauseMonitorSo
   void updatePut(long t);
 
   /**
+   * Update the PutBatch time histogram if a batch contains a Put op
+   * @param t time it took
+   */
+  void updatePutBatch(long t);
+
+  /**
    * Update the Delete time histogram
    *
    * @param t time it took
    */
   void updateDelete(long t);
+
+  /**
+   * Update the Delete time histogram if a batch contains a delete op
+   * @param t time it took
+   */
+  void updateDeleteBatch(long t);
+
+  /**
+   * Update checkAndDelete histogram
+   * @param t time it took
+   */
+  void updateCheckAndDelete(long t);
+
+  /**
+   * Update checkAndPut histogram
+   * @param t time it took
+   */
+  void updateCheckAndPut(long t);
 
   /**
    * Update the Get time histogram .
@@ -151,7 +175,7 @@ public interface MetricsRegionServerSource extends BaseSource, JvmPauseMonitorSo
    * Update the flush memstore size histogram
    * @param bytes the number of bytes in the memstore
    */
-  void updateFlushMemstoreSize(long bytes);
+  void updateFlushMemStoreSize(long bytes);
 
   /**
    * Update the flush output file size histogram
@@ -220,6 +244,9 @@ public interface MetricsRegionServerSource extends BaseSource, JvmPauseMonitorSo
   String TOTAL_REQUEST_COUNT = "totalRequestCount";
   String TOTAL_REQUEST_COUNT_DESC =
       "Total number of requests this RegionServer has answered.";
+  String TOTAL_ROW_ACTION_REQUEST_COUNT = "totalRowActionRequestCount";
+  String TOTAL_ROW_ACTION_REQUEST_COUNT_DESC =
+      "Total number of region requests this RegionServer has answered, count by row-level action";
   String READ_REQUEST_COUNT = "readRequestCount";
   String READ_REQUEST_COUNT_DESC =
       "Number of read requests this region server has answered.";
@@ -321,7 +348,22 @@ public interface MetricsRegionServerSource extends BaseSource, JvmPauseMonitorSo
   String BLOCK_CACHE_GENERAL_BLOOM_META_HIT_COUNT = "blockCacheGeneralBloomMetaHitCount";
   String BLOCK_CACHE_DELETE_FAMILY_BLOOM_HIT_COUNT = "blockCacheDeleteFamilyBloomHitCount";
   String BLOCK_CACHE_TRAILER_HIT_COUNT = "blockCacheTrailerHitCount";
-
+  String L1_CACHE_HIT_COUNT = "l1CacheHitCount";
+  String L1_CACHE_HIT_COUNT_DESC = "L1 cache hit count.";
+  String L1_CACHE_MISS_COUNT = "l1CacheMissCount";
+  String L1_CACHE_MISS_COUNT_DESC = "L1 cache miss count.";
+  String L1_CACHE_HIT_RATIO = "l1CacheHitRatio";
+  String L1_CACHE_HIT_RATIO_DESC = "L1 cache hit ratio.";
+  String L1_CACHE_MISS_RATIO = "l1CacheMissRatio";
+  String L1_CACHE_MISS_RATIO_DESC = "L1 cache miss ratio.";
+  String L2_CACHE_HIT_COUNT = "l2CacheHitCount";
+  String L2_CACHE_HIT_COUNT_DESC = "L2 cache hit count.";
+  String L2_CACHE_MISS_COUNT = "l2CacheMissCount";
+  String L2_CACHE_MISS_COUNT_DESC = "L2 cache miss count.";
+  String L2_CACHE_HIT_RATIO = "l2CacheHitRatio";
+  String L2_CACHE_HIT_RATIO_DESC = "L2 cache hit ratio.";
+  String L2_CACHE_MISS_RATIO = "l2CacheMissRatio";
+  String L2_CACHE_MISS_RATIO_DESC = "L2 cache miss ratio.";
   String RS_START_TIME_NAME = "regionServerStartTime";
   String ZOOKEEPER_QUORUM_NAME = "zookeeperQuorum";
   String SERVER_NAME_NAME = "serverName";
@@ -334,25 +376,29 @@ public interface MetricsRegionServerSource extends BaseSource, JvmPauseMonitorSo
   String UPDATES_BLOCKED_DESC =
       "Number of MS updates have been blocked so that the memstore can be flushed.";
   String DELETE_KEY = "delete";
+  String CHECK_AND_DELETE_KEY = "checkAndDelete";
+  String CHECK_AND_PUT_KEY = "checkAndPut";
+  String DELETE_BATCH_KEY = "deleteBatch";
   String GET_SIZE_KEY = "getSize";
   String GET_KEY = "get";
   String INCREMENT_KEY = "increment";
-  String MUTATE_KEY = "mutate";
+  String PUT_KEY = "put";
+  String PUT_BATCH_KEY = "putBatch";
   String APPEND_KEY = "append";
   String REPLAY_KEY = "replay";
   String SCAN_KEY = "scan";
   String SCAN_SIZE_KEY = "scanSize";
   String SCAN_TIME_KEY = "scanTime";
 
-  String SLOW_MUTATE_KEY = "slowPutCount";
+  String SLOW_PUT_KEY = "slowPutCount";
   String SLOW_GET_KEY = "slowGetCount";
   String SLOW_DELETE_KEY = "slowDeleteCount";
   String SLOW_INCREMENT_KEY = "slowIncrementCount";
   String SLOW_APPEND_KEY = "slowAppendCount";
-  String SLOW_MUTATE_DESC =
-      "The number of Multis that took over 1000ms to complete";
+  String SLOW_PUT_DESC =
+      "The number of batches containing puts that took over 1000ms to complete";
   String SLOW_DELETE_DESC =
-      "The number of Deletes that took over 1000ms to complete";
+      "The number of batches containing delete(s) that took over 1000ms to complete";
   String SLOW_GET_DESC = "The number of Gets that took over 1000ms to complete";
   String SLOW_INCREMENT_DESC =
       "The number of Increments that took over 1000ms to complete";

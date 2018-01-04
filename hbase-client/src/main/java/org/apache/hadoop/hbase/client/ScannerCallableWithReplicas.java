@@ -18,10 +18,7 @@
 
 package org.apache.hadoop.hbase.client;
 
-import static org.apache.hadoop.hbase.client.ConnectionUtils.createClosestRowAfter;
-import static org.apache.hadoop.hbase.client.ConnectionUtils.createClosestRowBefore;
-
-import com.google.common.annotations.VisibleForTesting;
+import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
 
 import java.io.IOException;
 import java.io.InterruptedIOException;
@@ -35,13 +32,15 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hbase.DoNotRetryIOException;
 import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.RegionLocations;
 import org.apache.hadoop.hbase.TableName;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.apache.hadoop.hbase.client.ScannerCallable.MoreResults;
 import org.apache.hadoop.hbase.util.Pair;
 
 /**
@@ -58,7 +57,7 @@ import org.apache.hadoop.hbase.util.Pair;
  */
 @InterfaceAudience.Private
 class ScannerCallableWithReplicas implements RetryingCallable<Result[]> {
-  private static final Log LOG = LogFactory.getLog(ScannerCallableWithReplicas.class);
+  private static final Logger LOG = LoggerFactory.getLogger(ScannerCallableWithReplicas.class);
   volatile ScannerCallable currentScannerCallable;
   AtomicBoolean replicaSwitched = new AtomicBoolean(false);
   final ClusterConnection cConnection;
@@ -71,8 +70,9 @@ class ScannerCallableWithReplicas implements RetryingCallable<Result[]> {
   private final TableName tableName;
   private Configuration conf;
   private int scannerTimeout;
-  private Set<ScannerCallable> outstandingCallables = new HashSet<ScannerCallable>();
+  private Set<ScannerCallable> outstandingCallables = new HashSet<>();
   private boolean someRPCcancelled = false; //required for testing purposes only
+  private int regionReplication = 0;
 
   public ScannerCallableWithReplicas(TableName tableName, ClusterConnection cConnection,
       ScannerCallable baseCallable, ExecutorService pool, int timeBeforeReplicas, Scan scan,
@@ -113,20 +113,12 @@ class ScannerCallableWithReplicas implements RetryingCallable<Result[]> {
     return currentScannerCallable.getHRegionInfo();
   }
 
-  public boolean getServerHasMoreResults() {
-    return currentScannerCallable.getServerHasMoreResults();
+  public MoreResults moreResultsInRegion() {
+    return currentScannerCallable.moreResultsInRegion();
   }
 
-  public void setServerHasMoreResults(boolean serverHasMoreResults) {
-    currentScannerCallable.setServerHasMoreResults(serverHasMoreResults);
-  }
-
-  public boolean hasMoreResultsContext() {
-    return currentScannerCallable.hasMoreResultsContext();
-  }
-
-  public void setHasMoreResultsContext(boolean serverHasMoreResultsContext) {
-    currentScannerCallable.setHasMoreResultsContext(serverHasMoreResultsContext);
+  public MoreResults moreResultsForScan() {
+    return currentScannerCallable.moreResultsForScan();
   }
 
   @Override
@@ -152,21 +144,42 @@ class ScannerCallableWithReplicas implements RetryingCallable<Result[]> {
     //2. We should close the "losing" scanners (scanners other than the ones we hear back
     //   from first)
     //
-    RegionLocations rl = RpcRetryingCallerWithReadReplicas.getRegionLocations(true,
-        RegionReplicaUtil.DEFAULT_REPLICA_ID, cConnection, tableName,
-        currentScannerCallable.getRow());
+    // Since RegionReplication is a table attribute, it wont change as long as table is enabled,
+    // it just needs to be set once.
 
+    if (regionReplication <= 0) {
+      RegionLocations rl = null;
+      try {
+        rl = RpcRetryingCallerWithReadReplicas.getRegionLocations(true,
+            RegionReplicaUtil.DEFAULT_REPLICA_ID, cConnection, tableName,
+            currentScannerCallable.getRow());
+      } catch (RetriesExhaustedException | DoNotRetryIOException e) {
+        // We cannot get the primary replica region location, it is possible that the region server
+        // hosting meta table is down, it needs to proceed to try cached replicas directly.
+        if (cConnection instanceof ConnectionImplementation) {
+          rl = ((ConnectionImplementation) cConnection)
+              .getCachedLocation(tableName, currentScannerCallable.getRow());
+          if (rl == null) {
+            throw e;
+          }
+        } else {
+          // For completeness
+          throw e;
+        }
+      }
+      regionReplication = rl.size();
+    }
     // allocate a boundedcompletion pool of some multiple of number of replicas.
     // We want to accomodate some RPCs for redundant replica scans (but are still in progress)
     ResultBoundedCompletionService<Pair<Result[], ScannerCallable>> cs =
-        new ResultBoundedCompletionService<Pair<Result[], ScannerCallable>>(
+        new ResultBoundedCompletionService<>(
             RpcRetryingCallerFactory.instantiate(ScannerCallableWithReplicas.this.conf), pool,
-            rl.size() * 5);
+            regionReplication * 5);
 
     AtomicBoolean done = new AtomicBoolean(false);
     replicaSwitched.set(false);
     // submit call for the primary replica.
-    addCallsForCurrentReplica(cs, rl);
+    addCallsForCurrentReplica(cs);
     int startIndex = 0;
 
     try {
@@ -189,7 +202,7 @@ class ScannerCallableWithReplicas implements RetryingCallable<Result[]> {
 
       // If rl's size is 1 or scan's consitency is strong, it needs to throw
       // out the exception from the primary replica
-      if ((rl.size() == 1) || (scan.getConsistency() == Consistency.STRONG)) {
+      if ((regionReplication == 1) || (scan.getConsistency() == Consistency.STRONG)) {
         // Rethrow the first exception
         RpcRetryingCallerWithReadReplicas.throwEnrichedException(e, retries);
       }
@@ -202,13 +215,13 @@ class ScannerCallableWithReplicas implements RetryingCallable<Result[]> {
     }
 
     // submit call for the all of the secondaries at once
-    int endIndex = rl.size();
+    int endIndex = regionReplication;
     if (scan.getConsistency() == Consistency.STRONG) {
       // When scan's consistency is strong, do not send to the secondaries
       endIndex = 1;
     } else {
       // TODO: this may be an overkill for large region replication
-      addCallsForOtherReplicas(cs, rl, 0, rl.size() - 1);
+      addCallsForOtherReplicas(cs, 0, regionReplication - 1);
     }
 
     try {
@@ -296,16 +309,19 @@ class ScannerCallableWithReplicas implements RetryingCallable<Result[]> {
     return currentScannerCallable != null && currentScannerCallable.isHeartbeatMessage();
   }
 
+  public Cursor getCursor() {
+    return currentScannerCallable != null ? currentScannerCallable.getCursor() : null;
+  }
+
   private void addCallsForCurrentReplica(
-      ResultBoundedCompletionService<Pair<Result[], ScannerCallable>> cs, RegionLocations rl) {
+      ResultBoundedCompletionService<Pair<Result[], ScannerCallable>> cs) {
     RetryingRPC retryingOnReplica = new RetryingRPC(currentScannerCallable);
     outstandingCallables.add(currentScannerCallable);
     cs.submit(retryingOnReplica, scannerTimeout, currentScannerCallable.id);
   }
 
   private void addCallsForOtherReplicas(
-      ResultBoundedCompletionService<Pair<Result[], ScannerCallable>> cs, RegionLocations rl,
-      int min, int max) {
+      ResultBoundedCompletionService<Pair<Result[], ScannerCallable>> cs, int min, int max) {
 
     for (int id = min; id <= max; id++) {
       if (currentScannerCallable.id == id) {
@@ -324,24 +340,17 @@ class ScannerCallableWithReplicas implements RetryingCallable<Result[]> {
    * @param callable The callable to set the start row on
    */
   private void setStartRowForReplicaCallable(ScannerCallable callable) {
-    if (this.lastResult == null || callable == null) return;
-
-    if (this.lastResult.isPartial()) {
-      // The last result was a partial result which means we have not received all of the cells
-      // for this row. Thus, use the last result's row as the start row. If a replica switch
-      // occurs, the scanner will ensure that any accumulated partial results are cleared,
-      // and the scan can resume from this row.
-      callable.getScan().setStartRow(this.lastResult.getRow());
-    } else {
-      // The last result was not a partial result which means it contained all of the cells for
-      // that row (we no longer need any information from it). Set the start row to the next
-      // closest row that could be seen.
-      if (callable.getScan().isReversed()) {
-        callable.getScan().setStartRow(createClosestRowBefore(this.lastResult.getRow()));
-      } else {
-        callable.getScan().setStartRow(createClosestRowAfter(this.lastResult.getRow()));
-      }
+    if (this.lastResult == null || callable == null) {
+      return;
     }
+    // 1. The last result was a partial result which means we have not received all of the cells
+    // for this row. Thus, use the last result's row as the start row. If a replica switch
+    // occurs, the scanner will ensure that any accumulated partial results are cleared,
+    // and the scan can resume from this row.
+    // 2. The last result was not a partial result which means it contained all of the cells for
+    // that row (we no longer need any information from it). Set the start row to the next
+    // closest row that could be seen.
+    callable.getScan().withStartRow(this.lastResult.getRow(), this.lastResult.mayHaveMoreCellsInRow());
   }
 
   @VisibleForTesting
@@ -376,7 +385,7 @@ class ScannerCallableWithReplicas implements RetryingCallable<Result[]> {
         return null;
       }
       Result[] res = this.caller.callWithoutRetries(this.callable, callTimeout);
-      return new Pair<Result[], ScannerCallable>(res, this.callable);
+      return new Pair<>(res, this.callable);
     }
 
     @Override

@@ -19,36 +19,36 @@
 package org.apache.hadoop.hbase.master.procedure;
 
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.HRegionInfo;
-import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.TableNotDisabledException;
 import org.apache.hadoop.hbase.TableNotFoundException;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.hadoop.hbase.client.RegionInfo;
+import org.apache.hadoop.hbase.client.RegionInfoBuilder;
+import org.apache.hadoop.hbase.client.TableDescriptor;
 import org.apache.hadoop.hbase.exceptions.HBaseException;
 import org.apache.hadoop.hbase.master.MasterCoprocessorHost;
+import org.apache.hadoop.hbase.procedure2.ProcedureStateSerializer;
+import org.apache.hadoop.hbase.util.ModifyRegionUtils;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProcedureProtos;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProcedureProtos.TruncateTableState;
-import org.apache.hadoop.hbase.util.ModifyRegionUtils;
 
 @InterfaceAudience.Private
 public class TruncateTableProcedure
     extends AbstractStateMachineTableProcedure<TruncateTableState> {
-  private static final Log LOG = LogFactory.getLog(TruncateTableProcedure.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TruncateTableProcedure.class);
 
   private boolean preserveSplits;
-  private List<HRegionInfo> regions;
-  private HTableDescriptor hTableDescriptor;
+  private List<RegionInfo> regions;
+  private TableDescriptor tableDescriptor;
   private TableName tableName;
 
   public TruncateTableProcedure() {
@@ -85,7 +85,7 @@ public class TruncateTableProcedure
 
           // TODO: Move out... in the acquireLock()
           LOG.debug("waiting for '" + getTableName() + "' regions in transition");
-          regions = ProcedureSyncWait.getRegionsFromMeta(env, getTableName());
+          regions = env.getAssignmentManager().getRegionStates().getRegionsOfTable(getTableName());
           assert regions != null && !regions.isEmpty() : "unexpected 0 regions";
           ProcedureSyncWait.waitRegionInTransition(env, regions);
 
@@ -95,7 +95,7 @@ public class TruncateTableProcedure
           setNextState(TruncateTableState.TRUNCATE_TABLE_REMOVE_FROM_META);
           break;
         case TRUNCATE_TABLE_REMOVE_FROM_META:
-          hTableDescriptor = env.getMasterServices().getTableDescriptors()
+          tableDescriptor = env.getMasterServices().getTableDescriptors()
               .get(tableName);
           DeleteTableProcedure.deleteFromMeta(env, getTableName(), regions);
           DeleteTableProcedure.deleteAssignmentState(env, getTableName());
@@ -103,30 +103,38 @@ public class TruncateTableProcedure
           break;
         case TRUNCATE_TABLE_CLEAR_FS_LAYOUT:
           DeleteTableProcedure.deleteFromFs(env, getTableName(), regions, true);
+          // NOTE: It's very important that we create new HRegions before next state, so that
+          // they get persisted in procedure state before we start using them for anything.
+          // Otherwise, if we create them in next step and master crashes after creating fs
+          // layout but before saving state, region re-created after recovery will have different
+          // regionId(s) and encoded names. That will lead to unwanted regions in FS layout
+          // (which were created before the crash).
           if (!preserveSplits) {
             // if we are not preserving splits, generate a new single region
-            regions = Arrays.asList(ModifyRegionUtils.createHRegionInfos(hTableDescriptor, null));
+            regions = Arrays.asList(ModifyRegionUtils.createRegionInfos(tableDescriptor, null));
           } else {
             regions = recreateRegionInfo(regions);
           }
           setNextState(TruncateTableState.TRUNCATE_TABLE_CREATE_FS_LAYOUT);
           break;
         case TRUNCATE_TABLE_CREATE_FS_LAYOUT:
-          regions = CreateTableProcedure.createFsLayout(env, hTableDescriptor, regions);
+          regions = CreateTableProcedure.createFsLayout(env, tableDescriptor, regions);
           CreateTableProcedure.updateTableDescCache(env, getTableName());
           setNextState(TruncateTableState.TRUNCATE_TABLE_ADD_TO_META);
           break;
         case TRUNCATE_TABLE_ADD_TO_META:
-          regions = CreateTableProcedure.addTableToMeta(env, hTableDescriptor, regions);
+          regions = CreateTableProcedure.addTableToMeta(env, tableDescriptor, regions);
           setNextState(TruncateTableState.TRUNCATE_TABLE_ASSIGN_REGIONS);
           break;
         case TRUNCATE_TABLE_ASSIGN_REGIONS:
-          CreateTableProcedure.assignRegions(env, getTableName(), regions);
+          CreateTableProcedure.setEnablingState(env, getTableName());
+          addChildProcedure(env.getAssignmentManager().createRoundRobinAssignProcedures(regions));
           setNextState(TruncateTableState.TRUNCATE_TABLE_POST_OPERATION);
-          hTableDescriptor = null;
+          tableDescriptor = null;
           regions = null;
           break;
         case TRUNCATE_TABLE_POST_OPERATION:
+          CreateTableProcedure.setEnabledState(env, getTableName());
           postTruncate(env);
           LOG.debug("truncate '" + getTableName() + "' completed");
           return Flow.NO_MORE_STATE;
@@ -197,12 +205,6 @@ public class TruncateTableProcedure
   }
 
   @Override
-  public boolean abort(final MasterProcedureEnv env) {
-    // TODO: We may be able to abort if the procedure is not started yet.
-    return false;
-  }
-
-  @Override
   public void toStringClassDetails(StringBuilder sb) {
     sb.append(getClass().getSimpleName());
     sb.append(" (table=");
@@ -213,36 +215,38 @@ public class TruncateTableProcedure
   }
 
   @Override
-  public void serializeStateData(final OutputStream stream) throws IOException {
-    super.serializeStateData(stream);
+  protected void serializeStateData(ProcedureStateSerializer serializer)
+      throws IOException {
+    super.serializeStateData(serializer);
 
     MasterProcedureProtos.TruncateTableStateData.Builder state =
       MasterProcedureProtos.TruncateTableStateData.newBuilder()
         .setUserInfo(MasterProcedureUtil.toProtoUserInfo(getUser()))
         .setPreserveSplits(preserveSplits);
-    if (hTableDescriptor != null) {
-      state.setTableSchema(ProtobufUtil.convertToTableSchema(hTableDescriptor));
+    if (tableDescriptor != null) {
+      state.setTableSchema(ProtobufUtil.toTableSchema(tableDescriptor));
     } else {
       state.setTableName(ProtobufUtil.toProtoTableName(tableName));
     }
     if (regions != null) {
-      for (HRegionInfo hri: regions) {
-        state.addRegionInfo(HRegionInfo.convert(hri));
+      for (RegionInfo hri: regions) {
+        state.addRegionInfo(ProtobufUtil.toRegionInfo(hri));
       }
     }
-    state.build().writeDelimitedTo(stream);
+    serializer.serialize(state.build());
   }
 
   @Override
-  public void deserializeStateData(final InputStream stream) throws IOException {
-    super.deserializeStateData(stream);
+  protected void deserializeStateData(ProcedureStateSerializer serializer)
+      throws IOException {
+    super.deserializeStateData(serializer);
 
     MasterProcedureProtos.TruncateTableStateData state =
-      MasterProcedureProtos.TruncateTableStateData.parseDelimitedFrom(stream);
+        serializer.deserialize(MasterProcedureProtos.TruncateTableStateData.class);
     setUser(MasterProcedureUtil.toUserInfo(state.getUserInfo()));
     if (state.hasTableSchema()) {
-      hTableDescriptor = ProtobufUtil.convertToHTableDesc(state.getTableSchema());
-      tableName = hTableDescriptor.getTableName();
+      tableDescriptor = ProtobufUtil.toTableDescriptor(state.getTableSchema());
+      tableName = tableDescriptor.getTableName();
     } else {
       tableName = ProtobufUtil.toTableName(state.getTableName());
     }
@@ -250,17 +254,20 @@ public class TruncateTableProcedure
     if (state.getRegionInfoCount() == 0) {
       regions = null;
     } else {
-      regions = new ArrayList<HRegionInfo>(state.getRegionInfoCount());
+      regions = new ArrayList<>(state.getRegionInfoCount());
       for (HBaseProtos.RegionInfo hri: state.getRegionInfoList()) {
-        regions.add(HRegionInfo.convert(hri));
+        regions.add(ProtobufUtil.toRegionInfo(hri));
       }
     }
   }
 
-  private static List<HRegionInfo> recreateRegionInfo(final List<HRegionInfo> regions) {
-    ArrayList<HRegionInfo> newRegions = new ArrayList<HRegionInfo>(regions.size());
-    for (HRegionInfo hri: regions) {
-      newRegions.add(new HRegionInfo(hri.getTable(), hri.getStartKey(), hri.getEndKey()));
+  private static List<RegionInfo> recreateRegionInfo(final List<RegionInfo> regions) {
+    ArrayList<RegionInfo> newRegions = new ArrayList<>(regions.size());
+    for (RegionInfo hri: regions) {
+      newRegions.add(RegionInfoBuilder.newBuilder(hri.getTable())
+          .setStartKey(hri.getStartKey())
+          .setEndKey(hri.getEndKey())
+          .build());
     }
     return newRegions;
   }

@@ -26,7 +26,7 @@ import java.util.List;
 
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.hbase.CellComparator;
+import org.apache.hadoop.hbase.CellComparatorImpl;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.KeyValue;
@@ -66,14 +66,14 @@ public class TestReseekTo {
             .withOutputStream(fout)
             .withFileContext(context)
             // NOTE: This test is dependent on this deprecated nonstandard comparator
-            .withComparator(CellComparator.COMPARATOR)
+            .withComparator(CellComparatorImpl.COMPARATOR)
             .create();
     int numberOfKeys = 1000;
 
     String valueString = "Value";
 
-    List<Integer> keyList = new ArrayList<Integer>();
-    List<String> valueList = new ArrayList<String>();
+    List<Integer> keyList = new ArrayList<>();
+    List<String> valueList = new ArrayList<>();
 
     for (int key = 0; key < numberOfKeys; key++) {
       String value = valueString + key;
@@ -109,8 +109,8 @@ public class TestReseekTo {
     writer.close();
     fout.close();
 
-    HFile.Reader reader = HFile.createReader(TEST_UTIL.getTestFileSystem(),
-        ncTFile, cacheConf, TEST_UTIL.getConfiguration());
+    HFile.Reader reader = HFile.createReader(TEST_UTIL.getTestFileSystem(), ncTFile, cacheConf,
+      true, TEST_UTIL.getConfiguration());
     reader.loadFileInfo();
     HFileScanner scanner = reader.getScanner(false, true);
 

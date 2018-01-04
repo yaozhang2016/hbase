@@ -30,8 +30,6 @@ import java.util.HashSet;
 import java.util.Random;
 import java.util.Set;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.Path;
@@ -51,11 +49,14 @@ import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 import org.junit.runners.Parameterized.Parameter;
 import org.junit.runners.Parameterized.Parameters;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @RunWith(Parameterized.class)
 @Category({ RegionServerTests.class, LargeTests.class })
 public class TestBoundedRegionGroupingStrategy {
-  private static final Log LOG = LogFactory.getLog(TestBoundedRegionGroupingStrategy.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(TestBoundedRegionGroupingStrategy.class);
 
   private static final HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
 
@@ -178,7 +179,7 @@ public class TestBoundedRegionGroupingStrategy {
       FSUtils.setRootDir(CONF, TEST_UTIL.getDataTestDirOnTestFS());
 
       wals = new WALFactory(CONF, null, "setMembershipDedups");
-      final Set<WAL> seen = new HashSet<WAL>(temp * 4);
+      final Set<WAL> seen = new HashSet<>(temp * 4);
       final Random random = new Random();
       int count = 0;
       // we know that this should see one of the wals more than once

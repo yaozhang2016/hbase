@@ -124,7 +124,11 @@ module Hbase
     #-------------------------------------------------------------------------------
 
     define_test "split should work" do
-      command(:split, 'hbase:meta', nil)
+      begin
+        command(:split, 'hbase:meta', nil)
+      rescue org.apache.hadoop.hbase.ipc.RemoteWithExtrasException => e
+        puts "can not split hbase:meta"
+      end
     end
 
     #-------------------------------------------------------------------------------
@@ -173,7 +177,7 @@ module Hbase
         command(:create, @create_test_name)
       end
     end
-    
+
     define_test "create should fail without columns when called with options" do
       drop_test_table(@create_test_name)
       assert_raise(ArgumentError) do
@@ -192,23 +196,50 @@ module Hbase
       command(:create, @create_test_name, { NAME => 'a'}, { NAME => 'b'})
       assert_equal(['a:', 'b:'], table(@create_test_name).get_all_columns.sort)
     end
-    
+
+    define_test "create should be able to set column options" do
+      drop_test_table(@create_test_name)
+      command(:create, @create_test_name,
+            { NAME => 'a',
+              CACHE_BLOOMS_ON_WRITE => 'TRUE',
+              CACHE_INDEX_ON_WRITE => 'TRUE',
+              EVICT_BLOCKS_ON_CLOSE => 'TRUE',
+              COMPRESSION_COMPACT => 'GZ'})
+      assert_equal(['a:'], table(@create_test_name).get_all_columns.sort)
+      assert_match(/CACHE_BLOOMS_ON_WRITE/, admin.describe(@create_test_name))
+      assert_match(/CACHE_INDEX_ON_WRITE/, admin.describe(@create_test_name))
+      assert_match(/EVICT_BLOCKS_ON_CLOSE/, admin.describe(@create_test_name))
+      assert_match(/GZ/, admin.describe(@create_test_name))
+    end
+
     define_test "create should be able to set table options" do
       drop_test_table(@create_test_name)
       command(:create, @create_test_name, 'a', 'b', 'MAX_FILESIZE' => 12345678,
-              OWNER => '987654321')
+              OWNER => '987654321',
+              PRIORITY => '77',
+              FLUSH_POLICY => 'org.apache.hadoop.hbase.regionserver.FlushAllLargeStoresPolicy',
+              REGION_MEMSTORE_REPLICATION => 'TRUE',
+              SPLIT_POLICY => 'org.apache.hadoop.hbase.regionserver.ConstantSizeRegionSplitPolicy',
+              COMPACTION_ENABLED => 'false')
       assert_equal(['a:', 'b:'], table(@create_test_name).get_all_columns.sort)
       assert_match(/12345678/, admin.describe(@create_test_name))
       assert_match(/987654321/, admin.describe(@create_test_name))
+      assert_match(/77/, admin.describe(@create_test_name))
+      assert_match(/COMPACTION_ENABLED/, admin.describe(@create_test_name))
+      assert_match(/REGION_MEMSTORE_REPLICATION/, admin.describe(@create_test_name))
+      assert_match(/org.apache.hadoop.hbase.regionserver.FlushAllLargeStoresPolicy/,
+        admin.describe(@create_test_name))
+      assert_match(/org.apache.hadoop.hbase.regionserver.ConstantSizeRegionSplitPolicy/,
+        admin.describe(@create_test_name))
     end
-        
+
     define_test "create should ignore table_att" do
       drop_test_table(@create_test_name)
       command(:create, @create_test_name, 'a', 'b', METHOD => 'table_att', OWNER => '987654321')
       assert_equal(['a:', 'b:'], table(@create_test_name).get_all_columns.sort)
       assert_match(/987654321/, admin.describe(@create_test_name))
     end
-    
+
     define_test "create should work with SPLITALGO" do
       drop_test_table(@create_test_name)
       command(:create, @create_test_name, 'a', 'b',
@@ -216,11 +247,19 @@ module Hbase
       assert_equal(['a:', 'b:'], table(@create_test_name).get_all_columns.sort)
     end
 
+    define_test "create should work when attributes value 'false' is not enclosed in single quotation marks" do
+      drop_test_table(@create_test_name)
+      command(:create, @create_test_name,{NAME => 'a', BLOCKCACHE => false}, {COMPACTION_ENABLED => false})
+      assert_equal(['a:'], table(@create_test_name).get_all_columns.sort)
+      assert_match(/BLOCKCACHE/, admin.describe(@create_test_name))
+      assert_match(/COMPACTION_ENABLED/, admin.describe(@create_test_name))
+    end
+
     #-------------------------------------------------------------------------------
 
     define_test "describe should fail for non-existent tables" do
-      assert_raise(NativeException) do
-        admin.describe('.NOT.EXISTS.')
+      assert_raise(ArgumentError) do
+        admin.describe('NOT.EXISTS')
       end
     end
 
@@ -243,6 +282,39 @@ module Hbase
       output = capture_stdout { command(:truncate, @test_name) }
       assert(!output.empty?)
     end
+
+    #-------------------------------------------------------------------------------
+
+    define_test "truncate_preserve should empty a table" do
+      table(@test_name).put(1, "x:a", 1)
+      table(@test_name).put(2, "x:a", 2)
+      assert_equal(2, table(@test_name)._count_internal)
+      # This is hacky.  Need to get the configuration into admin instance
+      command(:truncate_preserve, @test_name)
+      assert_equal(0, table(@test_name)._count_internal)
+    end
+
+    define_test "truncate_preserve should yield log records" do
+      output = capture_stdout { command(:truncate_preserve, @test_name) }
+      assert(!output.empty?)
+    end
+
+    define_test "truncate_preserve should maintain the previous region boundaries" do
+      drop_test_table(@create_test_name)
+      admin.create(@create_test_name, 'a', {NUMREGIONS => 10, SPLITALGO => 'HexStringSplit'})
+      splits = table(@create_test_name)._get_splits_internal()
+      command(:truncate_preserve, @create_test_name)
+      assert_equal(splits, table(@create_test_name)._get_splits_internal())
+    end
+
+    define_test "truncate_preserve should be fine when truncateTable method doesn't support" do
+      drop_test_table(@create_test_name)
+      admin.create(@create_test_name, 'a', {NUMREGIONS => 10, SPLITALGO => 'HexStringSplit'})
+      splits = table(@create_test_name)._get_splits_internal()
+      $TEST_CLUSTER.getConfiguration.setBoolean("hbase.client.truncatetable.support", false)
+      admin.truncate_preserve(@create_test_name, $TEST_CLUSTER.getConfiguration)
+      assert_equal(splits, table(@create_test_name)._get_splits_internal())
+    end
   end
 
   # Simple administration methods tests
@@ -260,17 +332,16 @@ module Hbase
       shutdown
     end
 
-    define_test "close_region should allow encoded & non-encoded region names" do
+    define_test "unassign should allow encoded region names" do
       region = command(:locate_region, @test_name, '')
-      serverName = region.getServerName().getServerName()
       regionName = region.getRegionInfo().getRegionNameAsString()
-      encodedRegionName = region.getRegionInfo().getEncodedName()
+      command(:unassign, regionName, true)
+    end
 
-      # Close region with just region name.
-      command(:close_region, regionName, nil)
-      # Close region with region name and server.
-      command(:close_region, regionName, serverName)
-      command(:close_region, encodedRegionName, serverName)
+    define_test "unassign should allow non-encoded region names" do
+      region = command(:locate_region, @test_name, '')
+      encodedRegionName = region.getRegionInfo().getEncodedName()
+      command(:unassign, encodedRegionName, true)
     end
   end
 
@@ -358,7 +429,7 @@ module Hbase
       command(:alter, @test_name, 'MAX_FILESIZE' => 12345678)
       assert_match(/12345678/, admin.describe(@test_name))
     end
-    
+
     define_test "alter should be able to change coprocessor attributes" do
       drop_test_table(@test_name)
       create_test_table(@test_name)
@@ -402,6 +473,36 @@ module Hbase
       assert_match(eval("/" + key_2 + "/"), admin.describe(@test_name))
 
       command(:alter, @test_name, 'METHOD' => 'table_att_unset', 'NAME' => [ key_1, key_2 ])
+      assert_no_match(eval("/" + key_1 + "/"), admin.describe(@test_name))
+      assert_no_match(eval("/" + key_2 + "/"), admin.describe(@test_name))
+    end
+
+    define_test "alter should be able to remove a table configuration" do
+      drop_test_table(@test_name)
+      create_test_table(@test_name)
+
+      key = "TestConf"
+      command(:alter, @test_name, CONFIGURATION => {key => 1})
+
+      # eval() is used to convert a string to regex
+      assert_match(eval("/" + key + "/"), admin.describe(@test_name))
+
+      command(:alter, @test_name, 'METHOD' => 'table_conf_unset', 'NAME' => key)
+      assert_no_match(eval("/" + key + "/"), admin.describe(@test_name))
+    end
+
+    define_test "alter should be able to remove a list of table configuration" do
+      drop_test_table(@test_name)
+
+      key_1 = "TestConf1"
+      key_2 = "TestConf2"
+      command(:create, @test_name, { NAME => 'i'}, CONFIGURATION => { key_1 => 1, key_2 => 2 })
+
+      # eval() is used to convert a string to regex
+      assert_match(eval("/" + key_1 + "/"), admin.describe(@test_name))
+      assert_match(eval("/" + key_2 + "/"), admin.describe(@test_name))
+
+      command(:alter, @test_name, 'METHOD' => 'table_conf_unset', 'NAME' => [ key_1, key_2 ])
       assert_no_match(eval("/" + key_1 + "/"), admin.describe(@test_name))
       assert_no_match(eval("/" + key_2 + "/"), admin.describe(@test_name))
     end

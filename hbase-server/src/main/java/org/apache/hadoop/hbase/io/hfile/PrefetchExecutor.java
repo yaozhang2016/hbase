@@ -29,21 +29,19 @@ import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.HConstants;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class PrefetchExecutor {
 
-  private static final Log LOG = LogFactory.getLog(PrefetchExecutor.class);
+  private static final Logger LOG = LoggerFactory.getLogger(PrefetchExecutor.class);
 
   /** Futures for tracking block prefetch activity */
-  private static final Map<Path,Future<?>> prefetchFutures =
-    new ConcurrentSkipListMap<Path,Future<?>>();
+  private static final Map<Path,Future<?>> prefetchFutures = new ConcurrentSkipListMap<>();
   /** Executor pool shared among all HFiles for block prefetch */
   private static final ScheduledExecutorService prefetchExecutorPool;
   /** Delay before beginning prefetch */

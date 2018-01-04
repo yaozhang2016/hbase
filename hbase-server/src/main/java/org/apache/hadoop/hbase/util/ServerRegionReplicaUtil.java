@@ -23,29 +23,34 @@ import java.io.IOException;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.hbase.HRegionInfo;
+import org.apache.hadoop.hbase.ReplicationPeerNotFoundException;
+import org.apache.hadoop.hbase.client.Admin;
+import org.apache.hadoop.hbase.client.ConnectionFactory;
+import org.apache.hadoop.hbase.client.RegionInfo;
 import org.apache.hadoop.hbase.client.RegionReplicaUtil;
-import org.apache.hadoop.hbase.client.replication.ReplicationAdmin;
 import org.apache.hadoop.hbase.io.HFileLink;
 import org.apache.hadoop.hbase.io.Reference;
 import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.StoreFileInfo;
-import org.apache.hadoop.hbase.replication.ReplicationException;
 import org.apache.hadoop.hbase.replication.ReplicationPeerConfig;
 import org.apache.hadoop.hbase.replication.regionserver.RegionReplicaReplicationEndpoint;
 import org.apache.hadoop.hbase.zookeeper.ZKConfig;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Similar to {@link RegionReplicaUtil} but for the server side
  */
 public class ServerRegionReplicaUtil extends RegionReplicaUtil {
 
+  private static final Logger LOG = LoggerFactory.getLogger(ServerRegionReplicaUtil.class);
+
   /**
    * Whether asynchronous WAL replication to the secondary region replicas is enabled or not.
    * If this is enabled, a replication peer named "region_replica_replication" will be created
    * which will tail the logs and replicate the mutatations to region replicas for tables that
    * have region replication &gt; 1. If this is enabled once, disabling this replication also
-   * requires disabling the replication peer using shell or ReplicationAdmin java class.
+   * requires disabling the replication peer using shell or {@link Admin} java class.
    * Replication to secondary region replicas works over standard inter-cluster replication.·
    */
   public static final String REGION_REPLICA_REPLICATION_CONF_KEY
@@ -74,9 +79,9 @@ public class ServerRegionReplicaUtil extends RegionReplicaUtil {
 
   /**
    * Returns the regionInfo object to use for interacting with the file system.
-   * @return An HRegionInfo object to interact with the filesystem
+   * @return An RegionInfo object to interact with the filesystem
    */
-  public static HRegionInfo getRegionInfoForFs(HRegionInfo regionInfo) {
+  public static RegionInfo getRegionInfoForFs(RegionInfo regionInfo) {
     if (regionInfo == null) {
       return null;
     }
@@ -89,7 +94,7 @@ public class ServerRegionReplicaUtil extends RegionReplicaUtil {
    * @return whether the replica is read only
    */
   public static boolean isReadOnly(HRegion region) {
-    return region.getTableDesc().isReadOnly()
+    return region.getTableDescriptor().isReadOnly()
       || !isDefaultReplica(region.getRegionInfo());
   }
 
@@ -113,11 +118,11 @@ public class ServerRegionReplicaUtil extends RegionReplicaUtil {
    * @throws IOException
    */
   public static StoreFileInfo getStoreFileInfo(Configuration conf, FileSystem fs,
-      HRegionInfo regionInfo, HRegionInfo regionInfoForFs, String familyName, Path path)
+      RegionInfo regionInfo, RegionInfo regionInfoForFs, String familyName, Path path)
       throws IOException {
 
     // if this is a primary region, just return the StoreFileInfo constructed from path
-    if (regionInfo.equals(regionInfoForFs)) {
+    if (RegionInfo.COMPARATOR.compare(regionInfo, regionInfoForFs) == 0) {
       return new StoreFileInfo(conf, fs, path);
     }
 
@@ -142,18 +147,25 @@ public class ServerRegionReplicaUtil extends RegionReplicaUtil {
     if (!isRegionReplicaReplicationEnabled(conf)) {
       return;
     }
-    ReplicationAdmin repAdmin = new ReplicationAdmin(conf);
+    Admin admin = ConnectionFactory.createConnection(conf).getAdmin();
+    ReplicationPeerConfig peerConfig = null;
     try {
-      if (repAdmin.getPeerConfig(REGION_REPLICA_REPLICATION_PEER) == null) {
-        ReplicationPeerConfig peerConfig = new ReplicationPeerConfig();
+      peerConfig = admin.getReplicationPeerConfig(REGION_REPLICA_REPLICATION_PEER);
+    } catch (ReplicationPeerNotFoundException e) {
+      LOG.warn("Region replica replication peer id=" + REGION_REPLICA_REPLICATION_PEER
+          + " not exist", e);
+    }
+    try {
+      if (peerConfig == null) {
+        LOG.info("Region replica replication peer id=" + REGION_REPLICA_REPLICATION_PEER
+            + " not exist. Creating...");
+        peerConfig = new ReplicationPeerConfig();
         peerConfig.setClusterKey(ZKConfig.getZooKeeperClusterKey(conf));
         peerConfig.setReplicationEndpointImpl(RegionReplicaReplicationEndpoint.class.getName());
-        repAdmin.addPeer(REGION_REPLICA_REPLICATION_PEER, peerConfig, null);
+        admin.addReplicationPeer(REGION_REPLICA_REPLICATION_PEER, peerConfig);
       }
-    } catch (ReplicationException ex) {
-      throw new IOException(ex);
     } finally {
-      repAdmin.close();
+      admin.close();
     }
   }
 

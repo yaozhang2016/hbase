@@ -26,8 +26,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.client.Admin;
@@ -39,15 +37,22 @@ import org.apache.hadoop.hbase.testclassification.VerySlowRegionServerTests;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.junit.rules.TestName;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** Unit tests to test retrieving table/region compaction state*/
 @Category({VerySlowRegionServerTests.class, LargeTests.class})
 public class TestCompactionState {
-  private static final Log LOG = LogFactory.getLog(TestCompactionState.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestCompactionState.class);
   private final static HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
   private final static Random random = new Random();
+
+  @Rule
+  public TestName name = new TestName();
 
   @BeforeClass
   public static void setUpBeforeClass() throws Exception {
@@ -61,48 +66,48 @@ public class TestCompactionState {
 
   @Test(timeout=600000)
   public void testMajorCompaction() throws IOException, InterruptedException {
-    compaction("testMajorCompaction", 8, CompactionState.MAJOR, false);
+    compaction(name.getMethodName(), 8, CompactionState.MAJOR, false);
   }
 
   @Test(timeout=600000)
   public void testMinorCompaction() throws IOException, InterruptedException {
-    compaction("testMinorCompaction", 15, CompactionState.MINOR, false);
+    compaction(name.getMethodName(), 15, CompactionState.MINOR, false);
   }
 
   @Test(timeout=600000)
   public void testMajorCompactionOnFamily() throws IOException, InterruptedException {
-    compaction("testMajorCompactionOnFamily", 8, CompactionState.MAJOR, true);
+    compaction(name.getMethodName(), 8, CompactionState.MAJOR, true);
   }
 
   @Test(timeout=600000)
   public void testMinorCompactionOnFamily() throws IOException, InterruptedException {
-    compaction("testMinorCompactionOnFamily", 15, CompactionState.MINOR, true);
+    compaction(name.getMethodName(), 15, CompactionState.MINOR, true);
   }
 
   @Test
   public void testInvalidColumnFamily() throws IOException, InterruptedException {
-    TableName table = TableName.valueOf("testInvalidColumnFamily");
+    final TableName tableName = TableName.valueOf(name.getMethodName());
     byte [] family = Bytes.toBytes("family");
     byte [] fakecf = Bytes.toBytes("fakecf");
     boolean caughtMinorCompact = false;
     boolean caughtMajorCompact = false;
     Table ht = null;
     try {
-      ht = TEST_UTIL.createTable(table, family);
-      Admin admin = TEST_UTIL.getHBaseAdmin();
+      ht = TEST_UTIL.createTable(tableName, family);
+      Admin admin = TEST_UTIL.getAdmin();
       try {
-        admin.compact(table, fakecf);
+        admin.compact(tableName, fakecf);
       } catch (IOException ioe) {
         caughtMinorCompact = true;
       }
       try {
-        admin.majorCompact(table, fakecf);
+        admin.majorCompact(tableName, fakecf);
       } catch (IOException ioe) {
         caughtMajorCompact = true;
       }
     } finally {
       if (ht != null) {
-        TEST_UTIL.deleteTable(table);
+        TEST_UTIL.deleteTable(tableName);
       }
       assertTrue(caughtMinorCompact);
       assertTrue(caughtMajorCompact);
@@ -133,11 +138,11 @@ public class TestCompactionState {
       ht = TEST_UTIL.createTable(table, families);
       loadData(ht, families, 3000, flushes);
       HRegionServer rs = TEST_UTIL.getMiniHBaseCluster().getRegionServer(0);
-      List<Region> regions = rs.getOnlineRegions(table);
+      List<HRegion> regions = rs.getRegions(table);
       int countBefore = countStoreFilesInFamilies(regions, families);
       int countBeforeSingleFamily = countStoreFilesInFamily(regions, family);
       assertTrue(countBefore > 0); // there should be some data files
-      Admin admin = TEST_UTIL.getHBaseAdmin();
+      Admin admin = TEST_UTIL.getAdmin();
       if (expectedState == CompactionState.MINOR) {
         if (singleFamily) {
           admin.compact(table, family);
@@ -201,13 +206,13 @@ public class TestCompactionState {
   }
 
   private static int countStoreFilesInFamily(
-      List<Region> regions, final byte[] family) {
+      List<HRegion> regions, final byte[] family) {
     return countStoreFilesInFamilies(regions, new byte[][]{family});
   }
 
-  private static int countStoreFilesInFamilies(List<Region> regions, final byte[][] families) {
+  private static int countStoreFilesInFamilies(List<HRegion> regions, final byte[][] families) {
     int count = 0;
-    for (Region region: regions) {
+    for (HRegion region: regions) {
       count += region.getStoreFileList(families).size();
     }
     return count;
@@ -215,7 +220,7 @@ public class TestCompactionState {
 
   private static void loadData(final Table ht, final byte[][] families,
       final int rows, final int flushes) throws IOException {
-    List<Put> puts = new ArrayList<Put>(rows);
+    List<Put> puts = new ArrayList<>(rows);
     byte[] qualifier = Bytes.toBytes("val");
     for (int i = 0; i < flushes; i++) {
       for (int k = 0; k < rows; k++) {

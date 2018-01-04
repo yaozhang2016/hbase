@@ -31,8 +31,6 @@ import java.lang.reflect.Proxy;
 import java.lang.reflect.UndeclaredThrowableException;
 import java.net.URI;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
@@ -40,29 +38,36 @@ import org.apache.hadoop.fs.FilterFileSystem;
 import org.apache.hadoop.fs.LocalFileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.ServerName;
+import org.apache.hadoop.hbase.util.FSUtils;
+import org.apache.hadoop.hbase.util.ReflectionUtils;
 import org.apache.hadoop.hbase.wal.AbstractFSWALProvider;
 import org.apache.hadoop.hdfs.DFSClient;
 import org.apache.hadoop.hdfs.DistributedFileSystem;
+import org.apache.hadoop.hdfs.protocol.BlockStoragePolicy;
 import org.apache.hadoop.hdfs.protocol.ClientProtocol;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
+import org.apache.hadoop.hdfs.protocol.HdfsFileStatus;
 import org.apache.hadoop.hdfs.protocol.LocatedBlock;
 import org.apache.hadoop.hdfs.protocol.LocatedBlocks;
+import org.apache.hadoop.hdfs.server.blockmanagement.BlockStoragePolicySuite;
 import org.apache.hadoop.ipc.RPC;
 import org.apache.hadoop.util.Progressable;
-import org.apache.hadoop.util.ReflectionUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import edu.umd.cs.findbugs.annotations.Nullable;
 
 /**
  * An encapsulation for the FileSystem object that hbase uses to access
- * data. This class allows the flexibility of using  
+ * data. This class allows the flexibility of using
  * separate filesystem objects for reading and writing hfiles and wals.
- * In future, if we want to make wals be in a different filesystem,
- * this is the place to make it happen.
  */
 public class HFileSystem extends FilterFileSystem {
-  public static final Log LOG = LogFactory.getLog(HFileSystem.class);
+  public static final Logger LOG = LoggerFactory.getLogger(HFileSystem.class);
 
   private final FileSystem noChecksumFs;   // read hfile data from storage
   private final boolean useHBaseChecksum;
+  private static volatile byte unspecifiedStoragePolicyId = Byte.MIN_VALUE;
 
   /**
    * Create a FileSystem object for HBase regionservers.
@@ -79,7 +84,7 @@ public class HFileSystem extends FilterFileSystem {
     // the underlying filesystem that has checksums switched on.
     this.fs = FileSystem.get(conf);
     this.useHBaseChecksum = useHBaseChecksum;
-    
+
     fs.initialize(getDefaultUri(conf), conf);
     
     // disable checksum verification for local fileSystem, see HBASE-11218
@@ -112,7 +117,7 @@ public class HFileSystem extends FilterFileSystem {
 
   /**
    * Wrap a FileSystem object within a HFileSystem. The noChecksumFs and
-   * writefs are both set to be the same specified fs. 
+   * writefs are both set to be the same specified fs.
    * Do not verify hbase-checksums while reading data from filesystem.
    * @param fs Set the noChecksumFs and writeFs to this specified filesystem.
    */
@@ -139,6 +144,75 @@ public class HFileSystem extends FilterFileSystem {
    */
   public FileSystem getBackingFs() throws IOException {
     return fs;
+  }
+
+  /**
+   * Set the source path (directory/file) to the specified storage policy.
+   * @param path The source path (directory/file).
+   * @param policyName The name of the storage policy: 'HOT', 'COLD', etc.
+   * See see hadoop 2.6+ org.apache.hadoop.hdfs.protocol.HdfsConstants for possible list e.g
+   * 'COLD', 'WARM', 'HOT', 'ONE_SSD', 'ALL_SSD', 'LAZY_PERSIST'.
+   */
+  public void setStoragePolicy(Path path, String policyName) {
+    FSUtils.setStoragePolicy(this.fs, path, policyName);
+  }
+
+  /**
+   * Get the storage policy of the source path (directory/file).
+   * @param path The source path (directory/file).
+   * @return Storage policy name, or {@code null} if not using {@link DistributedFileSystem} or
+   *         exception thrown when trying to get policy
+   */
+  @Nullable
+  public String getStoragePolicyName(Path path) {
+    try {
+      Object blockStoragePolicySpi =
+          ReflectionUtils.invokeMethod(this.fs, "getStoragePolicy", path);
+      return (String) ReflectionUtils.invokeMethod(blockStoragePolicySpi, "getName");
+    } catch (Exception e) {
+      // Maybe fail because of using old HDFS version, try the old way
+      if (LOG.isTraceEnabled()) {
+        LOG.trace("Failed to get policy directly", e);
+      }
+      return getStoragePolicyForOldHDFSVersion(path);
+    }
+  }
+
+  /**
+   * Before Hadoop 2.8.0, there's no getStoragePolicy method for FileSystem interface, and we need
+   * to keep compatible with it. See HADOOP-12161 for more details.
+   * @param path Path to get storage policy against
+   * @return the storage policy name
+   */
+  private String getStoragePolicyForOldHDFSVersion(Path path) {
+    try {
+      if (this.fs instanceof DistributedFileSystem) {
+        DistributedFileSystem dfs = (DistributedFileSystem) this.fs;
+        HdfsFileStatus status = dfs.getClient().getFileInfo(path.toUri().getPath());
+        if (null != status) {
+          if (unspecifiedStoragePolicyId < 0) {
+            // Get the unspecified id field through reflection to avoid compilation error.
+            // In later version BlockStoragePolicySuite#ID_UNSPECIFIED is moved to
+            // HdfsConstants#BLOCK_STORAGE_POLICY_ID_UNSPECIFIED
+            Field idUnspecified = BlockStoragePolicySuite.class.getField("ID_UNSPECIFIED");
+            unspecifiedStoragePolicyId = idUnspecified.getByte(BlockStoragePolicySuite.class);
+          }
+          byte storagePolicyId = status.getStoragePolicy();
+          if (storagePolicyId != unspecifiedStoragePolicyId) {
+            BlockStoragePolicy[] policies = dfs.getStoragePolicies();
+            for (BlockStoragePolicy policy : policies) {
+              if (policy.getId() == storagePolicyId) {
+                return policy.getName();
+              }
+            }
+          }
+        }
+      }
+    } catch (Throwable e) {
+      LOG.warn("failed to get block storage policy of [" + path + "]", e);
+    }
+
+    return null;
   }
 
   /**
@@ -176,7 +250,7 @@ public class HFileSystem extends FilterFileSystem {
     Class<?> clazz = conf.getClass("fs." + uri.getScheme() + ".impl", null);
     if (clazz != null) {
       // This will be true for Hadoop 1.0, or 0.20.
-      fs = (FileSystem)ReflectionUtils.newInstance(clazz, conf);
+      fs = (FileSystem) org.apache.hadoop.util.ReflectionUtils.newInstance(clazz, conf);
       fs.initialize(uri, conf);
     } else {
       // For Hadoop 2.0, we have to go through FileSystem for the filesystem

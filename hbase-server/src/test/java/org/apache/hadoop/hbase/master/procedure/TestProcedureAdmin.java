@@ -18,19 +18,19 @@
 
 package org.apache.hadoop.hbase.master.procedure;
 
-import java.util.Random;
-import java.util.List;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import java.util.List;
+import java.util.Random;
+
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hbase.CategoryBasedTimeout;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
-import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.HTableDescriptor;
-import org.apache.hadoop.hbase.ProcedureInfo;
-import org.apache.hadoop.hbase.ProcedureState;
 import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.client.RegionInfo;
+import org.apache.hadoop.hbase.procedure2.Procedure;
 import org.apache.hadoop.hbase.procedure2.ProcedureExecutor;
 import org.apache.hadoop.hbase.procedure2.ProcedureTestingUtility;
 import org.apache.hadoop.hbase.testclassification.MasterTests;
@@ -39,19 +39,23 @@ import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.Before;
 import org.junit.BeforeClass;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
-
-import static org.junit.Assert.*;
+import org.junit.rules.TestName;
+import org.junit.rules.TestRule;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Category({MasterTests.class, MediumTests.class})
 public class TestProcedureAdmin {
-  private static final Log LOG = LogFactory.getLog(TestProcedureAdmin.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestProcedureAdmin.class);
+  @Rule public final TestRule timeout = CategoryBasedTimeout.builder().withTimeout(this.getClass()).
+      withLookingForStuckThread(true).build();
+  @Rule public TestName name = new TestName();
 
   protected static final HBaseTestingUtility UTIL = new HBaseTestingUtility();
 
-  private long nonceGroup = HConstants.NO_NONCE;
-  private long nonce = HConstants.NO_NONCE;
 
   private static void setupConf(Configuration conf) {
     conf.setInt(MasterProcedureConstants.MASTER_PROCEDURE_THREADS, 1);
@@ -77,17 +81,13 @@ public class TestProcedureAdmin {
     final ProcedureExecutor<MasterProcedureEnv> procExec = getMasterProcedureExecutor();
     ProcedureTestingUtility.setKillAndToggleBeforeStoreUpdate(procExec, false);
     assertTrue("expected executor to be running", procExec.isRunning());
-
-    nonceGroup =
-        MasterProcedureTestingUtility.generateNonceGroup(UTIL.getHBaseCluster().getMaster());
-    nonce = MasterProcedureTestingUtility.generateNonce(UTIL.getHBaseCluster().getMaster());
   }
 
   @After
   public void tearDown() throws Exception {
     assertTrue("expected executor to be running", getMasterProcedureExecutor().isRunning());
     ProcedureTestingUtility.setKillAndToggleBeforeStoreUpdate(getMasterProcedureExecutor(), false);
-    for (HTableDescriptor htd: UTIL.getHBaseAdmin().listTables()) {
+    for (HTableDescriptor htd: UTIL.getAdmin().listTables()) {
       LOG.info("Tear down, remove table=" + htd.getTableName());
       UTIL.deleteTable(htd.getTableName());
     }
@@ -95,7 +95,7 @@ public class TestProcedureAdmin {
 
   @Test(timeout=60000)
   public void testAbortProcedureSuccess() throws Exception {
-    final TableName tableName = TableName.valueOf("testAbortProcedureSuccess");
+    final TableName tableName = TableName.valueOf(name.getMethodName());
     final ProcedureExecutor<MasterProcedureEnv> procExec = getMasterProcedureExecutor();
 
     MasterProcedureTestingUtility.createTable(procExec, tableName, null, "f");
@@ -103,7 +103,7 @@ public class TestProcedureAdmin {
     ProcedureTestingUtility.setKillAndToggleBeforeStoreUpdate(procExec, true);
     // Submit an abortable procedure
     long procId = procExec.submitProcedure(
-        new DisableTableProcedure(procExec.getEnvironment(), tableName, false), nonceGroup, nonce);
+        new DisableTableProcedure(procExec.getEnvironment(), tableName, false));
     // Wait for one step to complete
     ProcedureTestingUtility.waitProcedure(procExec, procId);
 
@@ -120,17 +120,17 @@ public class TestProcedureAdmin {
 
   @Test(timeout=60000)
   public void testAbortProcedureFailure() throws Exception {
-    final TableName tableName = TableName.valueOf("testAbortProcedureFailure");
+    final TableName tableName = TableName.valueOf(name.getMethodName());
     final ProcedureExecutor<MasterProcedureEnv> procExec = getMasterProcedureExecutor();
 
-    HRegionInfo[] regions =
+    RegionInfo[] regions =
         MasterProcedureTestingUtility.createTable(procExec, tableName, null, "f");
-    UTIL.getHBaseAdmin().disableTable(tableName);
+    UTIL.getAdmin().disableTable(tableName);
     ProcedureTestingUtility.waitNoProcedureRunning(procExec);
     ProcedureTestingUtility.setKillAndToggleBeforeStoreUpdate(procExec, true);
     // Submit an un-abortable procedure
     long procId = procExec.submitProcedure(
-        new DeleteTableProcedure(procExec.getEnvironment(), tableName), nonceGroup, nonce);
+        new DeleteTableProcedure(procExec.getEnvironment(), tableName));
     // Wait for a couple of steps to complete (first step "prepare" is abortable)
     ProcedureTestingUtility.waitProcedure(procExec, procId);
     for (int i = 0; i < 2; ++i) {
@@ -152,16 +152,16 @@ public class TestProcedureAdmin {
 
   @Test(timeout=60000)
   public void testAbortProcedureInterruptedNotAllowed() throws Exception {
-    final TableName tableName = TableName.valueOf("testAbortProcedureInterruptedNotAllowed");
+    final TableName tableName = TableName.valueOf(name.getMethodName());
     final ProcedureExecutor<MasterProcedureEnv> procExec = getMasterProcedureExecutor();
 
-    HRegionInfo[] regions =
+    RegionInfo[] regions =
         MasterProcedureTestingUtility.createTable(procExec, tableName, null, "f");
     ProcedureTestingUtility.waitNoProcedureRunning(procExec);
     ProcedureTestingUtility.setKillAndToggleBeforeStoreUpdate(procExec, true);
     // Submit a procedure
     long procId = procExec.submitProcedure(
-        new DisableTableProcedure(procExec.getEnvironment(), tableName, true), nonceGroup, nonce);
+        new DisableTableProcedure(procExec.getEnvironment(), tableName, true));
     // Wait for one step to complete
     ProcedureTestingUtility.waitProcedure(procExec, procId);
 
@@ -193,8 +193,8 @@ public class TestProcedureAdmin {
   }
 
   @Test(timeout=60000)
-  public void testListProcedure() throws Exception {
-    final TableName tableName = TableName.valueOf("testListProcedure");
+  public void testGetProcedure() throws Exception {
+    final TableName tableName = TableName.valueOf(name.getMethodName());
     final ProcedureExecutor<MasterProcedureEnv> procExec = getMasterProcedureExecutor();
 
     MasterProcedureTestingUtility.createTable(procExec, tableName, null, "f");
@@ -202,19 +202,19 @@ public class TestProcedureAdmin {
     ProcedureTestingUtility.setKillAndToggleBeforeStoreUpdate(procExec, true);
 
     long procId = procExec.submitProcedure(
-      new DisableTableProcedure(procExec.getEnvironment(), tableName, false), nonceGroup, nonce);
+      new DisableTableProcedure(procExec.getEnvironment(), tableName, false));
     // Wait for one step to complete
     ProcedureTestingUtility.waitProcedure(procExec, procId);
 
-    List<ProcedureInfo> listProcedures = procExec.listProcedures();
-    assertTrue(listProcedures.size() >= 1);
+    List<Procedure<?>> procedures = procExec.getProcedures();
+    assertTrue(procedures.size() >= 1);
     boolean found = false;
-    for (ProcedureInfo procInfo: listProcedures) {
-      if (procInfo.getProcId() == procId) {
-        assertTrue(procInfo.getProcState() == ProcedureState.RUNNABLE);
+    for (Procedure<?> proc: procedures) {
+      if (proc.getProcId() == procId) {
+        assertTrue(proc.isRunnable());
         found = true;
       } else {
-        assertTrue(procInfo.getProcState() == ProcedureState.FINISHED);
+        assertTrue(proc.isSuccess());
       }
     }
     assertTrue(found);
@@ -223,9 +223,9 @@ public class TestProcedureAdmin {
     ProcedureTestingUtility.restart(procExec);
     ProcedureTestingUtility.waitNoProcedureRunning(procExec);
     ProcedureTestingUtility.assertProcNotFailed(procExec, procId);
-    listProcedures = procExec.listProcedures();
-    for (ProcedureInfo procInfo: listProcedures) {
-      assertTrue(procInfo.getProcState() == ProcedureState.FINISHED);
+    procedures = procExec.getProcedures();
+    for (Procedure proc: procedures) {
+      assertTrue(proc.isSuccess());
     }
   }
 

@@ -27,10 +27,10 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.NavigableMap;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.client.ClusterConnection;
 import org.apache.hadoop.hbase.client.HConnectionTestingUtility;
+import org.apache.hadoop.hbase.client.RegionInfo;
+import org.apache.hadoop.hbase.client.RegionInfoBuilder;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.ipc.HBaseRpcController;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos;
@@ -39,7 +39,7 @@ import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos.ScanRespon
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.testclassification.MiscTests;
 import org.apache.hadoop.hbase.util.Bytes;
-import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher;
+import org.apache.hadoop.hbase.zookeeper.ZKWatcher;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -47,9 +47,10 @@ import org.junit.experimental.categories.Category;
 import org.mockito.Mockito;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
-
-import org.apache.hadoop.hbase.shaded.com.google.protobuf.RpcController;
-import org.apache.hadoop.hbase.shaded.com.google.protobuf.ServiceException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.apache.hbase.thirdparty.com.google.protobuf.RpcController;
+import org.apache.hbase.thirdparty.com.google.protobuf.ServiceException;
 
 /**
  * Test MetaTableAccessor but without spinning up a cluster.
@@ -57,7 +58,7 @@ import org.apache.hadoop.hbase.shaded.com.google.protobuf.ServiceException;
  */
 @Category({MiscTests.class, MediumTests.class})
 public class TestMetaTableAccessorNoCluster {
-  private static final Log LOG = LogFactory.getLog(TestMetaTableAccessorNoCluster.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestMetaTableAccessorNoCluster.class);
   private static final  HBaseTestingUtility UTIL = new HBaseTestingUtility();
   private static final Abortable ABORTABLE = new Abortable() {
     boolean aborted = false;
@@ -85,31 +86,30 @@ public class TestMetaTableAccessorNoCluster {
 
   @Test
   public void testGetHRegionInfo() throws IOException {
-    assertNull(MetaTableAccessor.getHRegionInfo(new Result()));
+    assertNull(MetaTableAccessor.getRegionInfo(new Result()));
 
-    List<Cell> kvs = new ArrayList<Cell>();
+    List<Cell> kvs = new ArrayList<>();
     Result r = Result.create(kvs);
-    assertNull(MetaTableAccessor.getHRegionInfo(r));
+    assertNull(MetaTableAccessor.getRegionInfo(r));
 
     byte [] f = HConstants.CATALOG_FAMILY;
     // Make a key value that doesn't have the expected qualifier.
     kvs.add(new KeyValue(HConstants.EMPTY_BYTE_ARRAY, f,
       HConstants.SERVER_QUALIFIER, f));
     r = Result.create(kvs);
-    assertNull(MetaTableAccessor.getHRegionInfo(r));
+    assertNull(MetaTableAccessor.getRegionInfo(r));
     // Make a key that does not have a regioninfo value.
     kvs.add(new KeyValue(HConstants.EMPTY_BYTE_ARRAY, f,
       HConstants.REGIONINFO_QUALIFIER, f));
-    HRegionInfo hri = MetaTableAccessor.getHRegionInfo(Result.create(kvs));
+    RegionInfo hri = MetaTableAccessor.getRegionInfo(Result.create(kvs));
     assertTrue(hri == null);
     // OK, give it what it expects
     kvs.clear();
     kvs.add(new KeyValue(HConstants.EMPTY_BYTE_ARRAY, f,
-      HConstants.REGIONINFO_QUALIFIER,
-      HRegionInfo.FIRST_META_REGIONINFO.toByteArray()));
-    hri = MetaTableAccessor.getHRegionInfo(Result.create(kvs));
+      HConstants.REGIONINFO_QUALIFIER, RegionInfo.toByteArray(RegionInfoBuilder.FIRST_META_REGIONINFO)));
+    hri = MetaTableAccessor.getRegionInfo(Result.create(kvs));
     assertNotNull(hri);
-    assertTrue(hri.equals(HRegionInfo.FIRST_META_REGIONINFO));
+    assertTrue(RegionInfo.COMPARATOR.compare(hri, RegionInfoBuilder.FIRST_META_REGIONINFO) == 0);
   }
 
   /**
@@ -123,7 +123,7 @@ public class TestMetaTableAccessorNoCluster {
   public void testRideOverServerNotRunning()
       throws IOException, InterruptedException, ServiceException {
     // Need a zk watcher.
-    ZooKeeperWatcher zkw = new ZooKeeperWatcher(UTIL.getConfiguration(),
+    ZKWatcher zkw = new ZKWatcher(UTIL.getConfiguration(),
       this.getClass().getSimpleName(), ABORTABLE, true);
     // This is a servername we use in a few places below.
     ServerName sn = ServerName.valueOf("example.com", 1234, System.currentTimeMillis());
@@ -141,18 +141,18 @@ public class TestMetaTableAccessorNoCluster {
       // show.  We will know if they happened or not because we will ask
       // mockito at the end of this test to verify that scan was indeed
       // called the wanted number of times.
-      List<Cell> kvs = new ArrayList<Cell>();
+      List<Cell> kvs = new ArrayList<>();
       final byte [] rowToVerify = Bytes.toBytes("rowToVerify");
       kvs.add(new KeyValue(rowToVerify,
         HConstants.CATALOG_FAMILY, HConstants.REGIONINFO_QUALIFIER,
-        HRegionInfo.FIRST_META_REGIONINFO.toByteArray()));
+          RegionInfo.toByteArray(RegionInfoBuilder.FIRST_META_REGIONINFO)));
       kvs.add(new KeyValue(rowToVerify,
         HConstants.CATALOG_FAMILY, HConstants.SERVER_QUALIFIER,
         Bytes.toBytes(sn.getHostAndPort())));
       kvs.add(new KeyValue(rowToVerify,
         HConstants.CATALOG_FAMILY, HConstants.STARTCODE_QUALIFIER,
         Bytes.toBytes(sn.getStartcode())));
-      final List<CellScannable> cellScannables = new ArrayList<CellScannable>(1);
+      final List<CellScannable> cellScannables = new ArrayList<>(1);
       cellScannables.add(Result.create(kvs));
       final ScanResponse.Builder builder = ScanResponse.newBuilder();
       for (CellScannable result : cellScannables) {
@@ -162,23 +162,22 @@ public class TestMetaTableAccessorNoCluster {
           .thenThrow(new ServiceException("Server not running (1 of 3)"))
           .thenThrow(new ServiceException("Server not running (2 of 3)"))
           .thenThrow(new ServiceException("Server not running (3 of 3)"))
-          .thenReturn(ScanResponse.newBuilder().setScannerId(1234567890L).build())
           .thenAnswer(new Answer<ScanResponse>() {
             public ScanResponse answer(InvocationOnMock invocation) throws Throwable {
-              ((HBaseRpcController) invocation.getArguments()[0]).setCellScanner(CellUtil
+              ((HBaseRpcController) invocation.getArgument(0)).setCellScanner(CellUtil
                   .createCellScanner(cellScannables));
-              return builder.build();
+              return builder.setScannerId(1234567890L).setMoreResults(false).build();
             }
-          }).thenReturn(ScanResponse.newBuilder().setMoreResults(false).build());
+          });
       // Associate a spied-upon Connection with UTIL.getConfiguration.  Need
       // to shove this in here first so it gets picked up all over; e.g. by
       // HTable.
       connection = HConnectionTestingUtility.getSpiedConnection(UTIL.getConfiguration());
-      
+
       // Fix the location lookup so it 'works' though no network.  First
       // make an 'any location' object.
       final HRegionLocation anyLocation =
-        new HRegionLocation(HRegionInfo.FIRST_META_REGIONINFO, sn);
+        new HRegionLocation(RegionInfoBuilder.FIRST_META_REGIONINFO, sn);
       final RegionLocations rl = new RegionLocations(anyLocation);
       // Return the RegionLocations object when locateRegion
       // The ugly format below comes of 'Important gotcha on spying real objects!' from
@@ -189,17 +188,17 @@ public class TestMetaTableAccessorNoCluster {
 
       // Now shove our HRI implementation into the spied-upon connection.
       Mockito.doReturn(implementation).
-        when(connection).getClient(Mockito.any(ServerName.class));
+        when(connection).getClient(Mockito.any());
 
       // Scan meta for user tables and verify we got back expected answer.
-      NavigableMap<HRegionInfo, Result> hris =
+      NavigableMap<RegionInfo, Result> hris =
         MetaTableAccessor.getServerUserRegions(connection, sn);
       assertEquals(1, hris.size());
-      assertTrue(hris.firstEntry().getKey().equals(HRegionInfo.FIRST_META_REGIONINFO));
+      assertTrue(RegionInfo.COMPARATOR.compare(hris.firstEntry().getKey(), RegionInfoBuilder.FIRST_META_REGIONINFO) == 0);
       assertTrue(Bytes.equals(rowToVerify, hris.firstEntry().getValue().getRow()));
       // Finally verify that scan was called four times -- three times
-      // with exception and then on 4th, 5th and 6th attempt we succeed
-      Mockito.verify(implementation, Mockito.times(6)).
+      // with exception and then on 4th attempt we succeed
+      Mockito.verify(implementation, Mockito.times(4)).
         scan((RpcController)Mockito.any(), (ScanRequest)Mockito.any());
     } finally {
       if (connection != null && !connection.isClosed()) connection.close();

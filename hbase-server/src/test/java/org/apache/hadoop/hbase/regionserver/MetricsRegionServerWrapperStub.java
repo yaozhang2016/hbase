@@ -61,7 +61,7 @@ public class MetricsRegionServerWrapperStub implements MetricsRegionServerWrappe
   }
 
   @Override
-  public long getMemstoreSize() {
+  public long getMemStoreSize() {
     return 1025;
   }
 
@@ -98,6 +98,11 @@ public class MetricsRegionServerWrapperStub implements MetricsRegionServerWrappe
   @Override
   public long getTotalRequestCount() {
     return 899;
+  }
+
+  @Override
+  public long getTotalRowActionRequestCount() {
+    return getReadRequestsCount() + getWriteRequestsCount();
   }
 
   @Override
@@ -201,6 +206,11 @@ public class MetricsRegionServerWrapperStub implements MetricsRegionServerWrappe
   }
 
   @Override
+  public long getMemStoreLimit() {
+	  return 419;
+  }
+
+  @Override
   public long getBlockCacheFreeSize() {
     return 413;
   }
@@ -258,6 +268,46 @@ public class MetricsRegionServerWrapperStub implements MetricsRegionServerWrappe
   @Override
   public long getBlockCacheFailedInsertions() {
     return 36;
+  }
+
+  @Override
+  public long getL1CacheHitCount() {
+    return 200;
+  }
+
+  @Override
+  public long getL1CacheMissCount() {
+    return 100;
+  }
+
+  @Override
+  public double getL1CacheHitRatio() {
+    return 80;
+  }
+
+  @Override
+  public double getL1CacheMissRatio() {
+    return 20;
+  }
+
+  @Override
+  public long getL2CacheHitCount() {
+    return 800;
+  }
+
+  @Override
+  public long getL2CacheMissCount() {
+    return 200;
+  }
+
+  @Override
+  public double getL2CacheHitRatio() {
+    return 90;
+  }
+
+  @Override
+  public double getL2CacheMissRatio() {
+    return 10;
   }
 
   @Override

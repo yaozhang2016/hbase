@@ -19,12 +19,16 @@
 
 package org.apache.hadoop.hbase.client.coprocessor;
 
+import static org.apache.hadoop.hbase.client.coprocessor.AggregationHelper.getParsedGenericInstance;
+import static org.apache.hadoop.hbase.client.coprocessor.AggregationHelper.validateArgAndGetPB;
+
+import com.google.protobuf.ByteString;
+import com.google.protobuf.Message;
+import com.google.protobuf.RpcCallback;
+import com.google.protobuf.RpcController;
+
 import java.io.Closeable;
 import java.io.IOException;
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
-import java.lang.reflect.ParameterizedType;
-import java.lang.reflect.Type;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
@@ -34,13 +38,13 @@ import java.util.NavigableSet;
 import java.util.TreeMap;
 import java.util.concurrent.atomic.AtomicLong;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.TableName;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.hbase.client.Connection;
 import org.apache.hadoop.hbase.client.ConnectionFactory;
 import org.apache.hadoop.hbase.client.Result;
@@ -49,16 +53,11 @@ import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.coprocessor.ColumnInterpreter;
 import org.apache.hadoop.hbase.ipc.CoprocessorRpcUtils;
-import org.apache.hadoop.hbase.ipc.ServerRpcController;
-import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.protobuf.generated.AggregateProtos.AggregateRequest;
 import org.apache.hadoop.hbase.protobuf.generated.AggregateProtos.AggregateResponse;
 import org.apache.hadoop.hbase.protobuf.generated.AggregateProtos.AggregateService;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.Pair;
-
-import com.google.protobuf.ByteString;
-import com.google.protobuf.Message;
 
 /**
  * This client class is for invoking the aggregate functions deployed on the
@@ -81,11 +80,58 @@ import com.google.protobuf.Message;
  * </ul>
  * <p>Call {@link #close()} when done.
  */
-@InterfaceAudience.Private
+@InterfaceAudience.Public
 public class AggregationClient implements Closeable {
   // TODO: This class is not used.  Move to examples?
-  private static final Log log = LogFactory.getLog(AggregationClient.class);
+  private static final Logger log = LoggerFactory.getLogger(AggregationClient.class);
   private final Connection connection;
+
+  /**
+   * An RpcController implementation for use here in this endpoint.
+   */
+  static class AggregationClientRpcController implements RpcController {
+    private String errorText;
+    private boolean cancelled = false;
+    private boolean failed = false;
+
+    @Override
+    public String errorText() {
+      return this.errorText;
+    }
+
+    @Override
+    public boolean failed() {
+      return this.failed;
+    }
+
+    @Override
+    public boolean isCanceled() {
+      return this.cancelled;
+    }
+
+    @Override
+    public void notifyOnCancel(RpcCallback<Object> arg0) {
+      throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public void reset() {
+      this.errorText = null;
+      this.cancelled = false;
+      this.failed = false;
+    }
+
+    @Override
+    public void setFailed(String errorText) {
+      this.failed = true;
+      this.errorText = errorText;
+    }
+
+    @Override
+    public void startCancel() {
+      this.cancelled = true;
+    }
+  }
 
   /**
    * Constructor with Conf object
@@ -160,13 +206,13 @@ public class AggregationClient implements Closeable {
         new Batch.Call<AggregateService, R>() {
           @Override
           public R call(AggregateService instance) throws IOException {
-            ServerRpcController controller = new ServerRpcController();
+            RpcController controller = new AggregationClientRpcController();
             CoprocessorRpcUtils.BlockingRpcCallback<AggregateResponse> rpcCallback =
-                new CoprocessorRpcUtils.BlockingRpcCallback<AggregateResponse>();
+                new CoprocessorRpcUtils.BlockingRpcCallback<>();
             instance.getMax(controller, requestArg, rpcCallback);
             AggregateResponse response = rpcCallback.get();
-            if (controller.failedOnException()) {
-              throw controller.getFailedOn();
+            if (controller.failed()) {
+              throw new IOException(controller.errorText());
             }
             if (response.getFirstPartCount() > 0) {
               ByteString b = response.getFirstPart(0);
@@ -179,23 +225,7 @@ public class AggregationClient implements Closeable {
     return aMaxCallBack.getMax();
   }
 
-  /*
-   * @param scan
-   * @param canFamilyBeAbsent whether column family can be absent in familyMap of scan
-   */
-  private void validateParameters(Scan scan, boolean canFamilyBeAbsent) throws IOException {
-    if (scan == null
-        || (Bytes.equals(scan.getStartRow(), scan.getStopRow()) && !Bytes.equals(
-          scan.getStartRow(), HConstants.EMPTY_START_ROW))
-        || ((Bytes.compareTo(scan.getStartRow(), scan.getStopRow()) > 0) && !Bytes.equals(
-          scan.getStopRow(), HConstants.EMPTY_END_ROW))) {
-      throw new IOException("Agg client Exception: Startrow should be smaller than Stoprow");
-    } else if (!canFamilyBeAbsent) {
-      if (scan.getFamilyMap().size() != 1) {
-        throw new IOException("There must be only one family.");
-      }
-    }
-  }
+
 
   /**
    * It gives the minimum value of a column for a given column family for the
@@ -248,13 +278,13 @@ public class AggregationClient implements Closeable {
 
           @Override
           public R call(AggregateService instance) throws IOException {
-            ServerRpcController controller = new ServerRpcController();
+            RpcController controller = new AggregationClientRpcController();
             CoprocessorRpcUtils.BlockingRpcCallback<AggregateResponse> rpcCallback =
-                new CoprocessorRpcUtils.BlockingRpcCallback<AggregateResponse>();
+                new CoprocessorRpcUtils.BlockingRpcCallback<>();
             instance.getMin(controller, requestArg, rpcCallback);
             AggregateResponse response = rpcCallback.get();
-            if (controller.failedOnException()) {
-              throw controller.getFailedOn();
+            if (controller.failed()) {
+              throw new IOException(controller.errorText());
             }
             if (response.getFirstPartCount() > 0) {
               ByteString b = response.getFirstPart(0);
@@ -323,13 +353,13 @@ public class AggregationClient implements Closeable {
         new Batch.Call<AggregateService, Long>() {
           @Override
           public Long call(AggregateService instance) throws IOException {
-            ServerRpcController controller = new ServerRpcController();
+            RpcController controller = new AggregationClientRpcController();
             CoprocessorRpcUtils.BlockingRpcCallback<AggregateResponse> rpcCallback =
-                new CoprocessorRpcUtils.BlockingRpcCallback<AggregateResponse>();
+                new CoprocessorRpcUtils.BlockingRpcCallback<>();
             instance.getRowNum(controller, requestArg, rpcCallback);
             AggregateResponse response = rpcCallback.get();
-            if (controller.failedOnException()) {
-              throw controller.getFailedOn();
+            if (controller.failed()) {
+              throw new IOException(controller.errorText());
             }
             byte[] bytes = getBytesFromResponse(response.getFirstPart(0));
             ByteBuffer bb = ByteBuffer.allocate(8).put(bytes);
@@ -388,14 +418,14 @@ public class AggregationClient implements Closeable {
         new Batch.Call<AggregateService, S>() {
           @Override
           public S call(AggregateService instance) throws IOException {
-            ServerRpcController controller = new ServerRpcController();
+            RpcController controller = new AggregationClientRpcController();
             // Not sure what is going on here why I have to do these casts. TODO.
             CoprocessorRpcUtils.BlockingRpcCallback<AggregateResponse> rpcCallback =
-                new CoprocessorRpcUtils.BlockingRpcCallback<AggregateResponse>();
+                new CoprocessorRpcUtils.BlockingRpcCallback<>();
             instance.getSum(controller, requestArg, rpcCallback);
             AggregateResponse response = rpcCallback.get();
-            if (controller.failedOnException()) {
-              throw controller.getFailedOn();
+            if (controller.failed()) {
+              throw new IOException(controller.errorText());
             }
             if (response.getFirstPartCount() == 0) {
               return null;
@@ -442,7 +472,7 @@ public class AggregationClient implements Closeable {
       Long rowCount = 0l;
 
       public synchronized Pair<S, Long> getAvgArgs() {
-        return new Pair<S, Long>(sum, rowCount);
+        return new Pair<>(sum, rowCount);
       }
 
       @Override
@@ -456,15 +486,15 @@ public class AggregationClient implements Closeable {
         new Batch.Call<AggregateService, Pair<S, Long>>() {
           @Override
           public Pair<S, Long> call(AggregateService instance) throws IOException {
-            ServerRpcController controller = new ServerRpcController();
+            RpcController controller = new AggregationClientRpcController();
             CoprocessorRpcUtils.BlockingRpcCallback<AggregateResponse> rpcCallback =
-                new CoprocessorRpcUtils.BlockingRpcCallback<AggregateResponse>();
+                new CoprocessorRpcUtils.BlockingRpcCallback<>();
             instance.getAvg(controller, requestArg, rpcCallback);
             AggregateResponse response = rpcCallback.get();
-            if (controller.failedOnException()) {
-              throw controller.getFailedOn();
+            if (controller.failed()) {
+              throw new IOException(controller.errorText());
             }
-            Pair<S, Long> pair = new Pair<S, Long>(null, 0L);
+            Pair<S, Long> pair = new Pair<>(null, 0L);
             if (response.getFirstPartCount() == 0) {
               return pair;
             }
@@ -539,10 +569,10 @@ public class AggregationClient implements Closeable {
       S sumVal = null, sumSqVal = null;
 
       public synchronized Pair<List<S>, Long> getStdParams() {
-        List<S> l = new ArrayList<S>();
+        List<S> l = new ArrayList<>(2);
         l.add(sumVal);
         l.add(sumSqVal);
-        Pair<List<S>, Long> p = new Pair<List<S>, Long>(l, rowCountVal);
+        Pair<List<S>, Long> p = new Pair<>(l, rowCountVal);
         return p;
       }
 
@@ -560,19 +590,19 @@ public class AggregationClient implements Closeable {
         new Batch.Call<AggregateService, Pair<List<S>, Long>>() {
           @Override
           public Pair<List<S>, Long> call(AggregateService instance) throws IOException {
-            ServerRpcController controller = new ServerRpcController();
+            RpcController controller = new AggregationClientRpcController();
             CoprocessorRpcUtils.BlockingRpcCallback<AggregateResponse> rpcCallback =
-                new CoprocessorRpcUtils.BlockingRpcCallback<AggregateResponse>();
+                new CoprocessorRpcUtils.BlockingRpcCallback<>();
             instance.getStd(controller, requestArg, rpcCallback);
             AggregateResponse response = rpcCallback.get();
-            if (controller.failedOnException()) {
-              throw controller.getFailedOn();
+            if (controller.failed()) {
+              throw new IOException(controller.errorText());
             }
-            Pair<List<S>, Long> pair = new Pair<List<S>, Long>(new ArrayList<S>(), 0L);
+            Pair<List<S>, Long> pair = new Pair<>(new ArrayList<>(), 0L);
             if (response.getFirstPartCount() == 0) {
               return pair;
             }
-            List<S> list = new ArrayList<S>();
+            List<S> list = new ArrayList<>();
             for (int i = 0; i < response.getFirstPartCount(); i++) {
               ByteString b = response.getFirstPart(i);
               T t = getParsedGenericInstance(ci.getClass(), 4, b);
@@ -650,17 +680,15 @@ public class AggregationClient implements Closeable {
   getMedianArgs(final Table table,
       final ColumnInterpreter<R, S, P, Q, T> ci, final Scan scan) throws Throwable {
     final AggregateRequest requestArg = validateArgAndGetPB(scan, ci, false);
-    final NavigableMap<byte[], List<S>> map =
-      new TreeMap<byte[], List<S>>(Bytes.BYTES_COMPARATOR);
+    final NavigableMap<byte[], List<S>> map = new TreeMap<>(Bytes.BYTES_COMPARATOR);
     class StdCallback implements Batch.Callback<List<S>> {
       S sumVal = null, sumWeights = null;
 
       public synchronized Pair<NavigableMap<byte[], List<S>>, List<S>> getMedianParams() {
-        List<S> l = new ArrayList<S>();
+        List<S> l = new ArrayList<>(2);
         l.add(sumVal);
         l.add(sumWeights);
-        Pair<NavigableMap<byte[], List<S>>, List<S>> p =
-          new Pair<NavigableMap<byte[], List<S>>, List<S>>(map, l);
+        Pair<NavigableMap<byte[], List<S>>, List<S>> p = new Pair<>(map, l);
         return p;
       }
 
@@ -676,16 +704,16 @@ public class AggregationClient implements Closeable {
         new Batch.Call<AggregateService, List<S>>() {
           @Override
           public List<S> call(AggregateService instance) throws IOException {
-            ServerRpcController controller = new ServerRpcController();
+            RpcController controller = new AggregationClientRpcController();
             CoprocessorRpcUtils.BlockingRpcCallback<AggregateResponse> rpcCallback =
-                new CoprocessorRpcUtils.BlockingRpcCallback<AggregateResponse>();
+                new CoprocessorRpcUtils.BlockingRpcCallback<>();
             instance.getMedian(controller, requestArg, rpcCallback);
             AggregateResponse response = rpcCallback.get();
-            if (controller.failedOnException()) {
-              throw controller.getFailedOn();
+            if (controller.failed()) {
+              throw new IOException(controller.errorText());
             }
 
-            List<S> list = new ArrayList<S>();
+            List<S> list = new ArrayList<>();
             for (int i = 0; i < response.getFirstPartCount(); i++) {
               ByteString b = response.getFirstPart(i);
               T t = getParsedGenericInstance(ci.getClass(), 4, b);
@@ -798,22 +826,6 @@ public class AggregationClient implements Closeable {
     return null;
   }
 
-  <R, S, P extends Message, Q extends Message, T extends Message> AggregateRequest
-  validateArgAndGetPB(Scan scan, ColumnInterpreter<R,S,P,Q,T> ci, boolean canFamilyBeAbsent)
-      throws IOException {
-    validateParameters(scan, canFamilyBeAbsent);
-    final AggregateRequest.Builder requestBuilder =
-        AggregateRequest.newBuilder();
-    requestBuilder.setInterpreterClassName(ci.getClass().getCanonicalName());
-    P columnInterpreterSpecificData = null;
-    if ((columnInterpreterSpecificData = ci.getRequestData())
-       != null) {
-      requestBuilder.setInterpreterSpecificBytes(columnInterpreterSpecificData.toByteString());
-    }
-    requestBuilder.setScan(ProtobufUtil.toScan(scan));
-    return requestBuilder.build();
-  }
-
   byte[] getBytesFromResponse(ByteString response) {
     ByteBuffer bb = response.asReadOnlyByteBuffer();
     bb.rewind();
@@ -824,41 +836,5 @@ public class AggregationClient implements Closeable {
       bytes = response.toByteArray();
     }
     return bytes;
-  }
-
-  /**
-   * Get an instance of the argument type declared in a class's signature. The
-   * argument type is assumed to be a PB Message subclass, and the instance is
-   * created using parseFrom method on the passed ByteString.
-   * @param runtimeClass the runtime type of the class
-   * @param position the position of the argument in the class declaration
-   * @param b the ByteString which should be parsed to get the instance created
-   * @return the instance
-   * @throws IOException
-   */
-  @SuppressWarnings("unchecked")
-  // Used server-side too by Aggregation Coprocesor Endpoint. Undo this interdependence. TODO.
-  public static <T extends Message>
-  T getParsedGenericInstance(Class<?> runtimeClass, int position, ByteString b)
-      throws IOException {
-    Type type = runtimeClass.getGenericSuperclass();
-    Type argType = ((ParameterizedType)type).getActualTypeArguments()[position];
-    Class<T> classType = (Class<T>)argType;
-    T inst;
-    try {
-      Method m = classType.getMethod("parseFrom", ByteString.class);
-      inst = (T)m.invoke(null, b);
-      return inst;
-    } catch (SecurityException e) {
-      throw new IOException(e);
-    } catch (NoSuchMethodException e) {
-      throw new IOException(e);
-    } catch (IllegalArgumentException e) {
-      throw new IOException(e);
-    } catch (InvocationTargetException e) {
-      throw new IOException(e);
-    } catch (IllegalAccessException e) {
-      throw new IOException(e);
-    }
   }
 }

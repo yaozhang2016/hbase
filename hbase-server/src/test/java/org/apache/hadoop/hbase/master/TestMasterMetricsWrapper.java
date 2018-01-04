@@ -19,9 +19,12 @@ package org.apache.hadoop.hbase.master;
 
 import static org.junit.Assert.*;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import java.util.AbstractMap.SimpleImmutableEntry;
+
 import org.apache.hadoop.hbase.HBaseTestingUtility;
+import org.apache.hadoop.hbase.quotas.SpaceQuotaSnapshot;
+import org.apache.hadoop.hbase.quotas.SpaceQuotaSnapshot.SpaceQuotaStatus;
+import org.apache.hadoop.hbase.quotas.SpaceViolationPolicy;
 import org.apache.hadoop.hbase.testclassification.MasterTests;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.util.Threads;
@@ -29,16 +32,19 @@ import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Category({MasterTests.class, MediumTests.class})
 public class TestMasterMetricsWrapper {
-  private static final Log LOG = LogFactory.getLog(TestMasterMetricsWrapper.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestMasterMetricsWrapper.class);
 
   private static final HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
+  private static final int NUM_RS = 4;
 
   @BeforeClass
   public static void setup() throws Exception {
-    TEST_UTIL.startMiniCluster(1, 4);
+    TEST_UTIL.startMiniCluster(1, NUM_RS);
   }
 
   @AfterClass
@@ -58,7 +64,9 @@ public class TestMasterMetricsWrapper {
     assertEquals(master.getMasterStartTime(), info.getStartTime());
     assertEquals(master.getMasterCoprocessors().length, info.getCoprocessors().length);
     assertEquals(master.getServerManager().getOnlineServersList().size(), info.getNumRegionServers());
-    assertEquals(5, info.getNumRegionServers());
+    int regionServerCount =
+      NUM_RS + (LoadBalancer.isTablesOnMaster(TEST_UTIL.getConfiguration())? 1: 0);
+    assertEquals(regionServerCount, info.getNumRegionServers());
 
     String zkServers = info.getZookeeperQuorum();
     assertEquals(zkServers.split(",").length, TEST_UTIL.getZkCluster().getZooKeeperServerNum());
@@ -69,12 +77,24 @@ public class TestMasterMetricsWrapper {
     TEST_UTIL.getMiniHBaseCluster().waitOnRegionServer(index);
     // We stopped the regionserver but could take a while for the master to notice it so hang here
     // until it does... then move forward to see if metrics wrapper notices.
-    while (TEST_UTIL.getHBaseCluster().getMaster().getServerManager().getOnlineServers().size() !=
-        4) {
+    while (TEST_UTIL.getHBaseCluster().getMaster().getServerManager().getOnlineServers().size() ==
+        regionServerCount ) {
       Threads.sleep(10);
     }
-    assertEquals(4, info.getNumRegionServers());
+    assertEquals(regionServerCount - 1, info.getNumRegionServers());
     assertEquals(1, info.getNumDeadRegionServers());
     assertEquals(1, info.getNumWALFiles());
+  }
+
+  @Test
+  public void testQuotaSnapshotConversion() {
+    MetricsMasterWrapperImpl info = new MetricsMasterWrapperImpl(
+        TEST_UTIL.getHBaseCluster().getMaster());
+    assertEquals(new SimpleImmutableEntry<Long,Long>(1024L, 2048L),
+        info.convertSnapshot(new SpaceQuotaSnapshot(
+            SpaceQuotaStatus.notInViolation(), 1024L, 2048L)));
+    assertEquals(new SimpleImmutableEntry<Long,Long>(4096L, 2048L),
+        info.convertSnapshot(new SpaceQuotaSnapshot(
+            new SpaceQuotaStatus(SpaceViolationPolicy.NO_INSERTS), 4096L, 2048L)));
   }
 }

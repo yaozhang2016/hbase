@@ -41,10 +41,10 @@ import org.junit.runner.notification.RunListener;
  * When surefire forkMode=once/always/perthread, this code is executed on the forked process.
  */
 public class ResourceCheckerJUnitListener extends RunListener {
-  private Map<String, ResourceChecker> rcs = new ConcurrentHashMap<String, ResourceChecker>();
+  private Map<String, ResourceChecker> rcs = new ConcurrentHashMap<>();
 
   static class ThreadResourceAnalyzer extends ResourceChecker.ResourceAnalyzer {
-    private static Set<String> initialThreadNames = new HashSet<String>();
+    private static Set<String> initialThreadNames = new HashSet<>();
     private static List<String> stringsToLog = null;
 
     @Override
@@ -57,7 +57,7 @@ public class ResourceCheckerJUnitListener extends RunListener {
         }
       } else if (phase == Phase.END) {
         if (stackTraces.size() > initialThreadNames.size()) {
-          stringsToLog = new ArrayList<String>();
+          stringsToLog = new ArrayList<>();
           for (Thread t : stackTraces.keySet()) {
             if (!initialThreadNames.contains(t.getName())) {
               stringsToLog.add("\nPotentially hanging thread: " + t.getName() + "\n");
@@ -87,7 +87,9 @@ public class ResourceCheckerJUnitListener extends RunListener {
   static class OpenFileDescriptorResourceAnalyzer extends ResourceChecker.ResourceAnalyzer {
     @Override
     public int getVal(Phase phase) {
-      if (!JVM.isUnix()) return 0;
+      if (!JVM.isUnix()) {
+        return 0;
+      }
       JVM jvm = new JVM();
       return (int)jvm.getOpenFileDescriptorCount();
     }
@@ -101,16 +103,20 @@ public class ResourceCheckerJUnitListener extends RunListener {
   static class MaxFileDescriptorResourceAnalyzer extends ResourceChecker.ResourceAnalyzer {
     @Override
     public int getVal(Phase phase) {
-      if (!JVM.isUnix()) return 0;
+      if (!JVM.isUnix()) {
+        return 0;
+      }
       JVM jvm = new JVM();
       return (int)jvm.getMaxFileDescriptorCount();
-     } 
-   }
+    }
+  }
 
   static class SystemLoadAverageResourceAnalyzer extends ResourceChecker.ResourceAnalyzer {
     @Override
     public int getVal(Phase phase) {
-      if (!JVM.isUnix()) return 0;
+      if (!JVM.isUnix()) {
+        return 0;
+      }
       return (int)(new JVM().getSystemLoadAverage()*100);
     }
   }
@@ -118,7 +124,9 @@ public class ResourceCheckerJUnitListener extends RunListener {
   static class ProcessCountResourceAnalyzer extends ResourceChecker.ResourceAnalyzer {
     @Override
     public int getVal(Phase phase) {
-      if (!JVM.isUnix()) return 0;
+      if (!JVM.isUnix()) {
+        return 0;
+      }
       return new JVM().getNumberOfRunningProcess();
     }
   }
@@ -126,7 +134,9 @@ public class ResourceCheckerJUnitListener extends RunListener {
   static class AvailableMemoryMBResourceAnalyzer extends ResourceChecker.ResourceAnalyzer {
     @Override
     public int getVal(Phase phase) {
-      if (!JVM.isUnix()) return 0;
+      if (!JVM.isUnix()) {
+        return 0;
+      }
       return (int) (new JVM().getFreeMemory() / (1024L * 1024L));
     }
   }

@@ -24,7 +24,7 @@ import java.util.List;
 import java.util.ArrayList;
 import java.util.Map;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ClusterStatusProtos;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.hadoop.hbase.util.Strings;
@@ -68,8 +68,7 @@ public class ReplicationLoad {
     this.replicationLoadSink = rLoadSinkBuild.build();
 
     // build the SourceLoad List
-    Map<String, ClusterStatusProtos.ReplicationLoadSource> replicationLoadSourceMap =
-        new HashMap<String, ClusterStatusProtos.ReplicationLoadSource>();
+    Map<String, ClusterStatusProtos.ReplicationLoadSource> replicationLoadSourceMap = new HashMap<>();
     for (MetricsSource sm : this.sourceMetricsList) {
       // Get the actual peer id
       String peerId = sm.getPeerID();
@@ -111,8 +110,7 @@ public class ReplicationLoad {
 
       replicationLoadSourceMap.put(peerId, rLoadSourceBuild.build());
     }
-    this.replicationLoadSourceList = new ArrayList<ClusterStatusProtos.ReplicationLoadSource>(
-        replicationLoadSourceMap.values());
+    this.replicationLoadSourceList = new ArrayList<>(replicationLoadSourceMap.values());
   }
 
   /**

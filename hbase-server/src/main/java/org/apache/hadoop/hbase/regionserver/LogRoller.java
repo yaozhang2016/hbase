@@ -25,19 +25,19 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantLock;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.Server;
+import org.apache.hadoop.hbase.regionserver.wal.AbstractFSWAL;
 import org.apache.hadoop.hbase.regionserver.wal.FailedLogCloseException;
-import org.apache.hadoop.hbase.wal.WAL;
 import org.apache.hadoop.hbase.regionserver.wal.WALActionsListener;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.HasThread;
+import org.apache.hadoop.hbase.wal.WAL;
 import org.apache.hadoop.ipc.RemoteException;
-
-import com.google.common.annotations.VisibleForTesting;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
 
 /**
  * Runs periodically to determine if the WAL should be rolled.
@@ -51,23 +51,24 @@ import com.google.common.annotations.VisibleForTesting;
 @InterfaceAudience.Private
 @VisibleForTesting
 public class LogRoller extends HasThread implements Closeable {
-  private static final Log LOG = LogFactory.getLog(LogRoller.class);
+  private static final Logger LOG = LoggerFactory.getLogger(LogRoller.class);
   private final ReentrantLock rollLock = new ReentrantLock();
   private final AtomicBoolean rollLog = new AtomicBoolean(false);
-  private final ConcurrentHashMap<WAL, Boolean> walNeedsRoll =
-      new ConcurrentHashMap<WAL, Boolean>();
+  private final ConcurrentHashMap<WAL, Boolean> walNeedsRoll = new ConcurrentHashMap<>();
   private final Server server;
   protected final RegionServerServices services;
   private volatile long lastrolltime = System.currentTimeMillis();
   // Period to roll log.
   private final long rollperiod;
   private final int threadWakeFrequency;
+  // The interval to check low replication on hlog's pipeline
+  private long checkLowReplicationInterval;
 
   private volatile boolean running = true;
 
   public void addWAL(final WAL wal) {
     if (null == walNeedsRoll.putIfAbsent(wal, Boolean.FALSE)) {
-      wal.registerWALActionsListener(new WALActionsListener.Base() {
+      wal.registerWALActionsListener(new WALActionsListener() {
         @Override
         public void logRollRequested(boolean lowReplicas) {
           walNeedsRoll.put(wal, Boolean.TRUE);
@@ -100,6 +101,8 @@ public class LogRoller extends HasThread implements Closeable {
       getLong("hbase.regionserver.logroll.period", 3600000);
     this.threadWakeFrequency = this.server.getConfiguration().
       getInt(HConstants.THREAD_WAKE_FREQUENCY, 10 * 1000);
+    this.checkLowReplicationInterval = this.server.getConfiguration().getLong(
+        "hbase.regionserver.hlog.check.lowreplication.interval", 30 * 1000);
   }
 
   @Override
@@ -111,10 +114,29 @@ public class LogRoller extends HasThread implements Closeable {
     super.interrupt();
   }
 
+  /**
+   * we need to check low replication in period, see HBASE-18132
+   */
+  void checkLowReplication(long now) {
+    try {
+      for (Entry<WAL, Boolean> entry : walNeedsRoll.entrySet()) {
+        WAL wal = entry.getKey();
+        boolean needRollAlready = entry.getValue();
+        if (needRollAlready || !(wal instanceof AbstractFSWAL)) {
+          continue;
+        }
+        ((AbstractFSWAL<?>) wal).checkLogLowReplication(checkLowReplicationInterval);
+      }
+    } catch (Throwable e) {
+      LOG.warn("Failed checking low replication", e);
+    }
+  }
+
   @Override
   public void run() {
     while (running) {
       long now = System.currentTimeMillis();
+      checkLowReplication(now);
       boolean periodic = false;
       if (!rollLog.get()) {
         periodic = (now - this.lastrolltime) > this.rollperiod;
@@ -178,13 +200,13 @@ public class LogRoller extends HasThread implements Closeable {
    */
   private void scheduleFlush(final byte [] encodedRegionName) {
     boolean scheduled = false;
-    Region r = this.services.getFromOnlineRegions(Bytes.toString(encodedRegionName));
+    HRegion r = (HRegion) this.services.getRegion(Bytes.toString(encodedRegionName));
     FlushRequester requester = null;
     if (r != null) {
       requester = this.services.getFlushRequester();
       if (requester != null) {
         // force flushing all stores to clean old logs
-        requester.requestFlush(r, true);
+        requester.requestFlush(r, true, FlushLifeCycleTracker.DUMMY);
         scheduled = true;
       }
     }

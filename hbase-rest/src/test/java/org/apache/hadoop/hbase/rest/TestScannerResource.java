@@ -37,12 +37,11 @@ import javax.xml.bind.JAXBException;
 import javax.xml.bind.Marshaller;
 import javax.xml.bind.Unmarshaller;
 
-import org.apache.http.Header;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HTableDescriptor;
-import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Admin;
 import org.apache.hadoop.hbase.client.Connection;
@@ -60,14 +59,19 @@ import org.apache.hadoop.hbase.rest.model.ScannerModel;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.testclassification.RestTests;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.http.Header;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Category({RestTests.class, MediumTests.class})
 public class TestScannerResource {
+  private static final Logger LOG = LoggerFactory.getLogger(TestScannerResource.class);
   private static final TableName TABLE = TableName.valueOf("TestScannerResource");
+  private static final TableName TABLE_TO_BE_DISABLED = TableName.valueOf("ScannerResourceDisable");
   private static final String NONEXISTENT_TABLE = "ThisTableDoesNotExist";
   private static final String CFA = "a";
   private static final String CFB = "b";
@@ -75,7 +79,7 @@ public class TestScannerResource {
   private static final String COLUMN_2 = CFB + ":2";
 
   private static final HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
-  private static final HBaseRESTTestingUtility REST_TEST_UTIL = 
+  private static final HBaseRESTTestingUtility REST_TEST_UTIL =
     new HBaseRESTTestingUtility();
   private static Client client;
   private static JAXBContext context;
@@ -89,7 +93,7 @@ public class TestScannerResource {
       throws IOException {
     Random rng = new Random();
     byte[] k = new byte[3];
-    byte [][] famAndQf = KeyValue.parseColumn(Bytes.toBytes(column));
+    byte [][] famAndQf = CellUtil.parseColumn(Bytes.toBytes(column));
     List<Put> puts = new ArrayList<>();
     for (byte b1 = 'a'; b1 < 'z'; b1++) {
       for (byte b2 = 'a'; b2 < 'z'; b2++) {
@@ -175,7 +179,7 @@ public class TestScannerResource {
       ScannerModel.class);
     marshaller = context.createMarshaller();
     unmarshaller = context.createUnmarshaller();
-    Admin admin = TEST_UTIL.getHBaseAdmin();
+    Admin admin = TEST_UTIL.getAdmin();
     if (admin.tableExists(TABLE)) {
       return;
     }
@@ -185,6 +189,11 @@ public class TestScannerResource {
     admin.createTable(htd);
     expectedRows1 = insertData(TEST_UTIL.getConfiguration(), TABLE, COLUMN_1, 1.0);
     expectedRows2 = insertData(TEST_UTIL.getConfiguration(), TABLE, COLUMN_2, 0.5);
+
+    htd = new HTableDescriptor(TABLE_TO_BE_DISABLED);
+    htd.addFamily(new HColumnDescriptor(CFA));
+    htd.addFamily(new HColumnDescriptor(CFB));
+    admin.createTable(htd);
   }
 
   @AfterClass
@@ -359,7 +368,27 @@ public class TestScannerResource {
     byte[] body = Bytes.toBytes(writer.toString());
     Response response = client.put("/" + NONEXISTENT_TABLE +
       "/scanner", Constants.MIMETYPE_XML, body);
+    String scannerURI = response.getLocation();
+    assertNotNull(scannerURI);
+    response = client.get(scannerURI, Constants.MIMETYPE_XML);
     assertEquals(response.getCode(), 404);
+  }
+
+  // performs table scan during which the underlying table is disabled
+  // assert that we get 410 (Gone)
+  @Test
+  public void testTableScanWithTableDisable() throws IOException {
+    ScannerModel model = new ScannerModel();
+    model.addColumn(Bytes.toBytes(COLUMN_1));
+    model.setCaching(1);
+    Response response = client.put("/" + TABLE_TO_BE_DISABLED + "/scanner",
+      Constants.MIMETYPE_PROTOBUF, model.createProtobufOutput());
+    assertEquals(response.getCode(), 201);
+    String scannerURI = response.getLocation();
+    assertNotNull(scannerURI);
+    TEST_UTIL.getAdmin().disableTable(TABLE_TO_BE_DISABLED);
+      response = client.get(scannerURI, Constants.MIMETYPE_PROTOBUF);
+    assertTrue("got " + response.getCode(), response.getCode() == 410);
   }
 
 }

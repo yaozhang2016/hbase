@@ -16,14 +16,13 @@
  * limitations under the License.
  */
 package org.apache.hadoop.hbase.client;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * POJO representing the compaction state
  */
 @InterfaceAudience.Public
-@InterfaceStability.Evolving
 public enum CompactionState {
-  NONE, MINOR, MAJOR, MAJOR_AND_MINOR;
+  NONE, MINOR, MAJOR, MAJOR_AND_MINOR
 }

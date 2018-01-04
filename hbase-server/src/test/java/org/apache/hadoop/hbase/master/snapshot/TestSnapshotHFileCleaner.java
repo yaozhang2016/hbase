@@ -23,8 +23,6 @@ import java.io.IOException;
 import java.util.Collection;
 import java.util.HashSet;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
@@ -42,8 +40,12 @@ import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.FSUtils;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.junit.rules.TestName;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Test that the snapshot hfile cleaner finds hfiles referenced in a snapshot
@@ -51,12 +53,15 @@ import org.junit.experimental.categories.Category;
 @Category({MasterTests.class, SmallTests.class})
 public class TestSnapshotHFileCleaner {
 
-  private static final Log LOG = LogFactory.getLog(TestSnapshotFileCache.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestSnapshotFileCache.class);
   private final static HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
   private static final String TABLE_NAME_STR = "testSnapshotManifest";
   private static final String SNAPSHOT_NAME_STR = "testSnapshotManifest-snapshot";
   private static Path rootDir;
   private static FileSystem fs;
+
+  @Rule
+  public TestName name = new TestName();
 
   /**
    * Setup the test environment
@@ -89,7 +94,7 @@ public class TestSnapshotHFileCleaner {
     // write an hfile to the snapshot directory
     String snapshotName = "snapshot";
     byte[] snapshot = Bytes.toBytes(snapshotName);
-    TableName tableName = TableName.valueOf("table");
+    final TableName tableName = TableName.valueOf(name.getMethodName());
     Path snapshotDir = SnapshotDescriptionUtils.getCompletedSnapshotDir(snapshotName, rootDir);
     HRegionInfo mockRegion = new HRegionInfo(tableName);
     Path regionSnapshotDir = new Path(snapshotDir, mockRegion.getEncodedName());
@@ -111,7 +116,7 @@ public class TestSnapshotHFileCleaner {
 
   class SnapshotFiles implements SnapshotFileCache.SnapshotFileInspector {
     public Collection<String> filesUnderSnapshot(final Path snapshotDir) throws IOException {
-      Collection<String> files =  new HashSet<String>();
+      Collection<String> files =  new HashSet<>();
       files.addAll(SnapshotReferenceUtil.getHFileNames(TEST_UTIL.getConfiguration(), fs, snapshotDir));
       return files;
     }

@@ -29,11 +29,12 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.regex.Pattern;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HTableDescriptor;
+import org.apache.hadoop.hbase.client.TableDescriptor;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.Pair;
 
@@ -52,7 +53,7 @@ public final class Constraints {
   private Constraints() {
   }
 
-  private static final Log LOG = LogFactory.getLog(Constraints.class);
+  private static final Logger LOG = LoggerFactory.getLogger(Constraints.class);
   private static final String CONSTRAINT_HTD_KEY_PREFIX = "constraint $";
   private static final Pattern CONSTRAINT_HTD_ATTR_KEY_PATTERN = Pattern
       .compile(CONSTRAINT_HTD_KEY_PREFIX, Pattern.LITERAL);
@@ -120,7 +121,7 @@ public final class Constraints {
     disable(desc);
 
     // remove all the constraint settings
-    List<Bytes> keys = new ArrayList<Bytes>();
+    List<Bytes> keys = new ArrayList<>();
     // loop through all the key, values looking for constraints
     for (Map.Entry<Bytes, Bytes> e : desc
         .getValues().entrySet()) {
@@ -165,7 +166,7 @@ public final class Constraints {
     String key = serializeConstraintClass(clazz);
     String value = desc.getValue(key);
 
-    return value == null ? null : new Pair<String, String>(key, value);
+    return value == null ? null : new Pair<>(key, value);
   }
 
   /**
@@ -555,9 +556,9 @@ public final class Constraints {
    * @throws IOException
    *           if any part of reading/arguments fails
    */
-  static List<? extends Constraint> getConstraints(HTableDescriptor desc,
+  static List<? extends Constraint> getConstraints(TableDescriptor desc,
       ClassLoader classloader) throws IOException {
-    List<Constraint> constraints = new ArrayList<Constraint>();
+    List<Constraint> constraints = new ArrayList<>();
     // loop through all the key, values looking for constraints
     for (Map.Entry<Bytes, Bytes> e : desc
         .getValues().entrySet()) {
@@ -613,8 +614,8 @@ public final class Constraints {
     @Override
     public int compare(Constraint c1, Constraint c2) {
       // compare the priorities of the constraints stored in their configuration
-      return Long.valueOf(c1.getConf().getLong(PRIORITY_KEY, DEFAULT_PRIORITY))
-          .compareTo(c2.getConf().getLong(PRIORITY_KEY, DEFAULT_PRIORITY));
+      return Long.compare(c1.getConf().getLong(PRIORITY_KEY, DEFAULT_PRIORITY),
+          c2.getConf().getLong(PRIORITY_KEY, DEFAULT_PRIORITY));
     }
   };
 

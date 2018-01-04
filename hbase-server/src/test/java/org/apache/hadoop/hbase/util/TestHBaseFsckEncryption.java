@@ -42,9 +42,10 @@ import org.apache.hadoop.hbase.io.crypto.KeyProviderForTesting;
 import org.apache.hadoop.hbase.io.crypto.aes.AES;
 import org.apache.hadoop.hbase.io.hfile.CacheConfig;
 import org.apache.hadoop.hbase.io.hfile.HFile;
+import org.apache.hadoop.hbase.regionserver.HRegion;
+import org.apache.hadoop.hbase.regionserver.HStore;
+import org.apache.hadoop.hbase.regionserver.HStoreFile;
 import org.apache.hadoop.hbase.regionserver.Region;
-import org.apache.hadoop.hbase.regionserver.Store;
-import org.apache.hadoop.hbase.regionserver.StoreFile;
 import org.apache.hadoop.hbase.security.EncryptionUtil;
 import org.apache.hadoop.hbase.security.User;
 import org.apache.hadoop.hbase.testclassification.LargeTests;
@@ -91,8 +92,8 @@ public class TestHBaseFsckEncryption {
       conf.get(HConstants.CRYPTO_MASTERKEY_NAME_CONF_KEY, User.getCurrent().getShortName()),
       cfKey));
     htd.addFamily(hcd);
-    TEST_UTIL.getHBaseAdmin().createTable(htd);
-    TEST_UTIL.waitTableAvailable(htd.getName(), 5000);
+    TEST_UTIL.getAdmin().createTable(htd);
+    TEST_UTIL.waitTableAvailable(htd.getTableName(), 5000);
   }
 
   @After
@@ -118,7 +119,7 @@ public class TestHBaseFsckEncryption {
       table.close();
     }
     // Flush it
-    TEST_UTIL.getHBaseAdmin().flush(htd.getTableName());
+    TEST_UTIL.getAdmin().flush(htd.getTableName());
 
     // Verify we have encrypted store files on disk
     final List<Path> paths = findStorefilePaths(htd.getTableName());
@@ -139,11 +140,11 @@ public class TestHBaseFsckEncryption {
   }
 
   private List<Path> findStorefilePaths(TableName tableName) throws Exception {
-    List<Path> paths = new ArrayList<Path>();
-    for (Region region:
-        TEST_UTIL.getRSForFirstRegionInTable(tableName).getOnlineRegions(htd.getTableName())) {
-      for (Store store: region.getStores()) {
-        for (StoreFile storefile: store.getStorefiles()) {
+    List<Path> paths = new ArrayList<>();
+    for (Region region : TEST_UTIL.getRSForFirstRegionInTable(tableName)
+        .getRegions(htd.getTableName())) {
+      for (HStore store : ((HRegion) region).getStores()) {
+        for (HStoreFile storefile : store.getStorefiles()) {
           paths.add(storefile.getPath());
         }
       }
@@ -153,7 +154,7 @@ public class TestHBaseFsckEncryption {
 
   private byte[] extractHFileKey(Path path) throws Exception {
     HFile.Reader reader = HFile.createReader(TEST_UTIL.getTestFileSystem(), path,
-      new CacheConfig(conf), conf);
+      new CacheConfig(conf), true, conf);
     try {
       reader.loadFileInfo();
       Encryption.Context cryptoContext = reader.getFileContext().getEncryptionContext();

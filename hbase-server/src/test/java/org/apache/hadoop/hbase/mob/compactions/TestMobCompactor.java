@@ -26,8 +26,11 @@ import java.security.Key;
 import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Calendar;
 import java.util.Collections;
 import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
 import java.util.Random;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
@@ -59,14 +62,16 @@ import org.apache.hadoop.hbase.client.ConnectionFactory;
 import org.apache.hadoop.hbase.client.Delete;
 import org.apache.hadoop.hbase.client.Durability;
 import org.apache.hadoop.hbase.client.Get;
+import org.apache.hadoop.hbase.client.MobCompactPartitionPolicy;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.ResultScanner;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.client.Table;
-import org.apache.hadoop.hbase.coprocessor.BaseRegionObserver;
 import org.apache.hadoop.hbase.coprocessor.ObserverContext;
+import org.apache.hadoop.hbase.coprocessor.RegionCoprocessor;
 import org.apache.hadoop.hbase.coprocessor.RegionCoprocessorEnvironment;
+import org.apache.hadoop.hbase.coprocessor.RegionObserver;
 import org.apache.hadoop.hbase.io.HFileLink;
 import org.apache.hadoop.hbase.io.crypto.KeyProviderForTesting;
 import org.apache.hadoop.hbase.io.crypto.aes.AES;
@@ -74,27 +79,35 @@ import org.apache.hadoop.hbase.io.hfile.CacheConfig;
 import org.apache.hadoop.hbase.io.hfile.HFile;
 import org.apache.hadoop.hbase.master.cleaner.TimeToLiveHFileCleaner;
 import org.apache.hadoop.hbase.mob.MobConstants;
+import org.apache.hadoop.hbase.mob.MobFileName;
 import org.apache.hadoop.hbase.mob.MobUtils;
 import org.apache.hadoop.hbase.regionserver.BloomType;
 import org.apache.hadoop.hbase.regionserver.HRegion;
+import org.apache.hadoop.hbase.regionserver.HStoreFile;
 import org.apache.hadoop.hbase.regionserver.Store;
 import org.apache.hadoop.hbase.regionserver.StoreFile;
 import org.apache.hadoop.hbase.regionserver.StoreFileInfo;
-import org.apache.hadoop.hbase.regionserver.compactions.CompactionRequest;
+import org.apache.hadoop.hbase.regionserver.compactions.CompactionLifeCycleTracker;
 import org.apache.hadoop.hbase.security.EncryptionUtil;
 import org.apache.hadoop.hbase.security.User;
 import org.apache.hadoop.hbase.testclassification.LargeTests;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
+import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.hbase.util.Threads;
 import org.junit.AfterClass;
 import org.junit.Assert;
 import org.junit.BeforeClass;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.junit.rules.TestName;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Category(LargeTests.class)
 public class TestMobCompactor {
+  private static final Logger LOG = LoggerFactory.getLogger(TestMobCompactor.class);
   private final static HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
   private static Configuration conf = null;
   private TableName tableName;
@@ -110,6 +123,42 @@ public class TestMobCompactor {
   private static final String family2 = "family2";
   private static final String qf1 = "qualifier1";
   private static final String qf2 = "qualifier2";
+
+  private static long tsFor20150907Monday;
+  private static long tsFor20151120Sunday;
+  private static long tsFor20151128Saturday;
+  private static long tsFor20151130Monday;
+  private static long tsFor20151201Tuesday;
+  private static long tsFor20151205Saturday;
+  private static long tsFor20151228Monday;
+  private static long tsFor20151231Thursday;
+  private static long tsFor20160101Friday;
+  private static long tsFor20160103Sunday;
+
+  private static final byte[] mobKey01 = Bytes.toBytes("r01");
+  private static final byte[] mobKey02 = Bytes.toBytes("r02");
+  private static final byte[] mobKey03 = Bytes.toBytes("r03");
+  private static final byte[] mobKey04 = Bytes.toBytes("r04");
+  private static final byte[] mobKey05 = Bytes.toBytes("r05");
+  private static final byte[] mobKey06 = Bytes.toBytes("r05");
+  private static final byte[] mobKey1 = Bytes.toBytes("r1");
+  private static final byte[] mobKey2 = Bytes.toBytes("r2");
+  private static final byte[] mobKey3 = Bytes.toBytes("r3");
+  private static final byte[] mobKey4 = Bytes.toBytes("r4");
+  private static final byte[] mobKey5 = Bytes.toBytes("r5");
+  private static final byte[] mobKey6 = Bytes.toBytes("r6");
+  private static final byte[] mobKey7 = Bytes.toBytes("r7");
+  private static final byte[] mobKey8 = Bytes.toBytes("r8");
+  private static final String mobValue0 = "mobValue00000000000000000000000000";
+  private static final String mobValue1 = "mobValue00000111111111111111111111";
+  private static final String mobValue2 = "mobValue00000222222222222222222222";
+  private static final String mobValue3 = "mobValue00000333333333333333333333";
+  private static final String mobValue4 = "mobValue00000444444444444444444444";
+  private static final String mobValue5 = "mobValue00000666666666666666666666";
+  private static final String mobValue6 = "mobValue00000777777777777777777777";
+  private static final String mobValue7 = "mobValue00000888888888888888888888";
+  private static final String mobValue8 = "mobValue00000888888888888888888899";
+
   private static byte[] KEYS = Bytes.toBytes("012");
   private static int regionNum = KEYS.length;
   private static int delRowNum = 1;
@@ -118,22 +167,57 @@ public class TestMobCompactor {
   private static int rowNumPerFile = 2;
   private static ExecutorService pool;
 
+  @Rule
+  public TestName name = new TestName();
+
   @BeforeClass
   public static void setUpBeforeClass() throws Exception {
+    TEST_UTIL.getConfiguration().setLong(MobConstants.MOB_COMPACTION_MERGEABLE_THRESHOLD, 5000);
     TEST_UTIL.getConfiguration()
-      .setLong(MobConstants.MOB_COMPACTION_MERGEABLE_THRESHOLD, 5000);
-    TEST_UTIL.getConfiguration().set(HConstants.CRYPTO_KEYPROVIDER_CONF_KEY,
-      KeyProviderForTesting.class.getName());
+        .set(HConstants.CRYPTO_KEYPROVIDER_CONF_KEY, KeyProviderForTesting.class.getName());
     TEST_UTIL.getConfiguration().set(HConstants.CRYPTO_MASTERKEY_NAME_CONF_KEY, "hbase");
     TEST_UTIL.getConfiguration().setLong(TimeToLiveHFileCleaner.TTL_CONF_KEY, 0);
     TEST_UTIL.getConfiguration().setInt("hbase.client.retries.number", 1);
     TEST_UTIL.getConfiguration().setInt("hbase.hfile.compaction.discharger.interval", 100);
+    TEST_UTIL.getConfiguration().setBoolean("hbase.online.schema.update.enable", true);
     TEST_UTIL.startMiniCluster(1);
     pool = createThreadPool(TEST_UTIL.getConfiguration());
     conn = ConnectionFactory.createConnection(TEST_UTIL.getConfiguration(), pool);
     fs = TEST_UTIL.getTestFileSystem();
     conf = TEST_UTIL.getConfiguration();
-    admin = TEST_UTIL.getHBaseAdmin();
+    admin = TEST_UTIL.getAdmin();
+
+    // Initialize timestamps for these days
+    Calendar calendar =  Calendar.getInstance();
+    calendar.set(2015, 8, 7, 10, 20);
+    tsFor20150907Monday = calendar.getTimeInMillis();
+
+    calendar.set(2015, 10, 20, 10, 20);
+    tsFor20151120Sunday = calendar.getTimeInMillis();
+
+    calendar.set(2015, 10, 28, 10, 20);
+    tsFor20151128Saturday = calendar.getTimeInMillis();
+
+    calendar.set(2015, 10, 30, 10, 20);
+    tsFor20151130Monday = calendar.getTimeInMillis();
+
+    calendar.set(2015, 11, 1, 10, 20);
+    tsFor20151201Tuesday = calendar.getTimeInMillis();
+
+    calendar.set(2015, 11, 5, 10, 20);
+    tsFor20151205Saturday = calendar.getTimeInMillis();
+
+    calendar.set(2015, 11, 28, 10, 20);
+    tsFor20151228Monday = calendar.getTimeInMillis();
+
+    calendar.set(2015, 11, 31, 10, 20);
+    tsFor20151231Thursday = calendar.getTimeInMillis();
+
+    calendar.set(2016, 0, 1, 10, 20);
+    tsFor20160101Friday = calendar.getTimeInMillis();
+
+    calendar.set(2016, 0, 3, 10, 20);
+    tsFor20160103Sunday = calendar.getTimeInMillis();
   }
 
   @AfterClass
@@ -157,6 +241,37 @@ public class TestMobCompactor {
     admin.createTable(desc, getSplitKeys());
     table = conn.getTable(tableName);
     bufMut = conn.getBufferedMutator(tableName);
+  }
+
+  // Set up for mob compaction policy testing
+  private void setUpForPolicyTest(String tableNameAsString, MobCompactPartitionPolicy type)
+      throws IOException {
+    tableName = TableName.valueOf(tableNameAsString);
+    hcd1 = new HColumnDescriptor(family1);
+    hcd1.setMobEnabled(true);
+    hcd1.setMobThreshold(10);
+    hcd1.setMobCompactPartitionPolicy(type);
+    desc = new HTableDescriptor(tableName);
+    desc.addFamily(hcd1);
+    admin.createTable(desc);
+    table = conn.getTable(tableName);
+    bufMut = conn.getBufferedMutator(tableName);
+  }
+
+  // alter mob compaction policy
+  private void alterForPolicyTest(final MobCompactPartitionPolicy type)
+      throws Exception {
+
+    hcd1.setMobCompactPartitionPolicy(type);
+    desc.modifyFamily(hcd1);
+    admin.modifyTable(tableName, desc);
+    Pair<Integer, Integer> st;
+
+    while (null != (st = admin.getAlterStatus(tableName)) && st.getFirst() > 0) {
+      LOG.debug(st.getFirst() + " regions left to update");
+      Thread.sleep(40);
+    }
+    LOG.info("alter status finished");
   }
 
   @Test(timeout = 300000)
@@ -217,6 +332,96 @@ public class TestMobCompactor {
       countFiles(tableName, false, family1));
     assertEquals("After compaction: family2 del file count", regionNum,
       countFiles(tableName, false, family2));
+  }
+
+  @Test
+  public void testMinorCompactionWithWeeklyPolicy() throws Exception {
+    resetConf();
+    int mergeSize = 5000;
+    // change the mob compaction merge size
+    conf.setLong(MobConstants.MOB_COMPACTION_MERGEABLE_THRESHOLD, mergeSize);
+
+    commonPolicyTestLogic("testMinorCompactionWithWeeklyPolicy",
+        MobCompactPartitionPolicy.WEEKLY, false, 6,
+        new String[] { "20150907", "20151120", "20151128", "20151130", "20151205", "20160103" },
+        true);
+  }
+
+  @Test
+  public void testMajorCompactionWithWeeklyPolicy() throws Exception {
+    resetConf();
+
+    commonPolicyTestLogic("testMajorCompactionWithWeeklyPolicy",
+        MobCompactPartitionPolicy.WEEKLY, true, 5,
+        new String[] { "20150907", "20151120", "20151128", "20151205", "20160103" }, true);
+  }
+
+  @Test
+  public void testMinorCompactionWithMonthlyPolicy() throws Exception {
+    resetConf();
+    int mergeSize = 5000;
+    // change the mob compaction merge size
+    conf.setLong(MobConstants.MOB_COMPACTION_MERGEABLE_THRESHOLD, mergeSize);
+
+    commonPolicyTestLogic("testMinorCompactionWithMonthlyPolicy",
+        MobCompactPartitionPolicy.MONTHLY, false, 4,
+        new String[] { "20150907", "20151130", "20151231", "20160103" }, true);
+  }
+
+  @Test
+  public void testMajorCompactionWithMonthlyPolicy() throws Exception {
+    resetConf();
+
+    commonPolicyTestLogic("testMajorCompactionWithMonthlyPolicy",
+        MobCompactPartitionPolicy.MONTHLY, true, 4,
+        new String[] {"20150907", "20151130", "20151231", "20160103"}, true);
+  }
+
+  @Test
+  public void testMajorCompactionWithWeeklyFollowedByMonthly() throws Exception {
+    resetConf();
+
+    commonPolicyTestLogic("testMajorCompactionWithWeeklyFollowedByMonthly",
+        MobCompactPartitionPolicy.WEEKLY, true, 5,
+        new String[] { "20150907", "20151120", "20151128", "20151205", "20160103" }, true);
+
+    commonPolicyTestLogic("testMajorCompactionWithWeeklyFollowedByMonthly",
+        MobCompactPartitionPolicy.MONTHLY, true, 4,
+        new String[] {"20150907", "20151128", "20151205", "20160103" }, false);
+  }
+
+  @Test
+  public void testMajorCompactionWithWeeklyFollowedByMonthlyFollowedByWeekly() throws Exception {
+    resetConf();
+
+    commonPolicyTestLogic("testMajorCompactionWithWeeklyFollowedByMonthlyFollowedByWeekly",
+        MobCompactPartitionPolicy.WEEKLY, true, 5,
+        new String[] { "20150907", "20151120", "20151128", "20151205", "20160103" }, true);
+
+    commonPolicyTestLogic("testMajorCompactionWithWeeklyFollowedByMonthlyFollowedByWeekly",
+        MobCompactPartitionPolicy.MONTHLY, true, 4,
+        new String[] { "20150907", "20151128", "20151205", "20160103" }, false);
+
+    commonPolicyTestLogic("testMajorCompactionWithWeeklyFollowedByMonthlyFollowedByWeekly",
+        MobCompactPartitionPolicy.WEEKLY, true, 4,
+        new String[] { "20150907", "20151128", "20151205", "20160103" }, false);
+  }
+
+  @Test
+  public void testMajorCompactionWithWeeklyFollowedByMonthlyFollowedByDaily() throws Exception {
+    resetConf();
+
+    commonPolicyTestLogic("testMajorCompactionWithWeeklyFollowedByMonthlyFollowedByDaily",
+        MobCompactPartitionPolicy.WEEKLY, true, 5,
+        new String[] { "20150907", "20151120", "20151128", "20151205", "20160103" }, true);
+
+    commonPolicyTestLogic("testMajorCompactionWithWeeklyFollowedByMonthlyFollowedByDaily",
+        MobCompactPartitionPolicy.MONTHLY, true, 4,
+        new String[] { "20150907", "20151128", "20151205", "20160103" }, false);
+
+    commonPolicyTestLogic("testMajorCompactionWithWeeklyFollowedByMonthlyFollowedByDaily",
+        MobCompactPartitionPolicy.DAILY, true, 4,
+        new String[] { "20150907", "20151128", "20151205", "20160103" }, false);
   }
 
   @Test(timeout = 300000)
@@ -314,7 +519,6 @@ public class TestMobCompactor {
     int mergeSize = 5000;
     // change the mob compaction merge size
     conf.setLong(MobConstants.MOB_COMPACTION_MERGEABLE_THRESHOLD, mergeSize);
-    String tableNameAsString = "testMajorCompactionFromAdmin";
     SecureRandom rng = new SecureRandom();
     byte[] keyBytes = new byte[AES.KEY_LENGTH];
     rng.nextBytes(keyBytes);
@@ -322,7 +526,7 @@ public class TestMobCompactor {
     Key cfKey = new SecretKeySpec(keyBytes, algorithm);
     byte[] encryptionKey = EncryptionUtil.wrapKey(conf,
       conf.get(HConstants.CRYPTO_MASTERKEY_NAME_CONF_KEY, User.getCurrent().getShortName()), cfKey);
-    TableName tableName = TableName.valueOf(tableNameAsString);
+    final TableName tableName = TableName.valueOf(name.getMethodName());
     HTableDescriptor desc = new HTableDescriptor(tableName);
     HColumnDescriptor hcd1 = new HColumnDescriptor(family1);
     hcd1.setMobEnabled(true);
@@ -424,7 +628,7 @@ public class TestMobCompactor {
     // the ref name is the new file
     Path mobFamilyPath =
       MobUtils.getMobFamilyPath(TEST_UTIL.getConfiguration(), tableName, hcd1.getNameAsString());
-    List<Path> paths = new ArrayList<Path>();
+    List<Path> paths = new ArrayList<>();
     if (fs.exists(mobFamilyPath)) {
       FileStatus[] files = fs.listStatus(mobFamilyPath);
       for (FileStatus file : files) {
@@ -452,7 +656,7 @@ public class TestMobCompactor {
     byte[] fam = Bytes.toBytes(famStr);
     byte[] qualifier = Bytes.toBytes("q1");
     byte[] mobVal = Bytes.toBytes("01234567890");
-    HTableDescriptor hdt = new HTableDescriptor(TableName.valueOf("testGetAfterCompaction"));
+    HTableDescriptor hdt = new HTableDescriptor(TableName.valueOf(name.getMethodName()));
     hdt.addCoprocessor(CompactTwoLatestHfilesCopro.class.getName());
     HColumnDescriptor hcd = new HColumnDescriptor(fam);
     hcd.setMobEnabled(true);
@@ -511,19 +715,27 @@ public class TestMobCompactor {
     while (fileList.length != num) {
       Thread.sleep(50);
       fileList = fs.listStatus(path);
+      for (FileStatus fileStatus: fileList) {
+        LOG.info(Objects.toString(fileStatus));
+      }
     }
   }
 
   /**
-   * This copro overwrites the default compaction policy. It always chooses two latest
-   * hfiles and compacts them into a new one.
+   * This copro overwrites the default compaction policy. It always chooses two latest hfiles and
+   * compacts them into a new one.
    */
-  public static class CompactTwoLatestHfilesCopro extends BaseRegionObserver {
-    @Override
-    public void preCompactSelection(final ObserverContext<RegionCoprocessorEnvironment> c,
-      final Store store, final List<StoreFile> candidates, final CompactionRequest request)
-      throws IOException {
+  public static class CompactTwoLatestHfilesCopro implements RegionCoprocessor, RegionObserver {
 
+    @Override
+    public Optional<RegionObserver> getRegionObserver() {
+      return Optional.of(this);
+    }
+
+    @Override
+    public void preCompactSelection(ObserverContext<RegionCoprocessorEnvironment> c, Store store,
+        List<? extends StoreFile> candidates, CompactionLifeCycleTracker tracker)
+        throws IOException {
       int count = candidates.size();
       if (count >= 2) {
         for (int i = 0; i < count - 2; i++) {
@@ -532,20 +744,6 @@ public class TestMobCompactor {
         c.bypass();
       }
     }
-  }
-
-  private void waitUntilCompactionFinished(TableName tableName) throws IOException,
-    InterruptedException {
-    long finished = EnvironmentEdgeManager.currentTime() + 60000;
-    CompactionState state = admin.getCompactionState(tableName);
-    while (EnvironmentEdgeManager.currentTime() < finished) {
-      if (state == CompactionState.NONE) {
-        break;
-      }
-      state = admin.getCompactionState(tableName);
-      Thread.sleep(10);
-    }
-    assertEquals(CompactionState.NONE, state);
   }
 
   private void waitUntilMobCompactionFinished(TableName tableName) throws IOException,
@@ -586,9 +784,7 @@ public class TestMobCompactor {
     ResultScanner results = table.getScanner(scan);
     int count = 0;
     for (Result res : results) {
-      for (Cell cell : res.listCells()) {
-        count++;
-      }
+      count += res.size();
     }
     results.close();
     return count;
@@ -630,9 +826,10 @@ public class TestMobCompactor {
       Assert.assertTrue(hasFiles);
       Path path = files[0].getPath();
       CacheConfig cacheConf = new CacheConfig(conf);
-      StoreFile sf = new StoreFile(TEST_UTIL.getTestFileSystem(), path, conf, cacheConf,
-        BloomType.NONE);
-      HFile.Reader reader = sf.createReader().getHFileReader();
+      HStoreFile sf = new HStoreFile(TEST_UTIL.getTestFileSystem(), path, conf, cacheConf,
+        BloomType.NONE, true);
+      sf.initReader();
+      HFile.Reader reader = sf.getReader().getHFileReader();
       byte[] encryptionKey = reader.getTrailer().getEncryptionKey();
       Assert.assertTrue(null != encryptionKey);
       Assert.assertTrue(reader.getFileContext().getEncryptionContext().getCipher().getName()
@@ -716,6 +913,65 @@ public class TestMobCompactor {
     admin.flush(tableName);
   }
 
+  private void loadDataForPartitionPolicy(Admin admin, BufferedMutator table, TableName tableName)
+      throws IOException {
+
+    Put[] pArray = new Put[1000];
+
+    for (int i = 0; i < 1000; i ++) {
+      Put put0 = new Put(Bytes.toBytes("r0" + i));
+      put0.addColumn(Bytes.toBytes(family1), Bytes.toBytes(qf1), tsFor20151130Monday, Bytes.toBytes(mobValue0));
+      pArray[i] = put0;
+    }
+    loadData(admin, bufMut, tableName, pArray);
+
+    Put put06 = new Put(mobKey06);
+    put06.addColumn(Bytes.toBytes(family1), Bytes.toBytes(qf1), tsFor20151128Saturday, Bytes.toBytes(mobValue0));
+
+    loadData(admin, bufMut, tableName, new Put[] { put06 });
+
+    Put put1 = new Put(mobKey1);
+    put1.addColumn(Bytes.toBytes(family1), Bytes.toBytes(qf1), tsFor20151201Tuesday,
+        Bytes.toBytes(mobValue1));
+    loadData(admin, bufMut, tableName, new Put[] { put1 });
+
+    Put put2 = new Put(mobKey2);
+    put2.addColumn(Bytes.toBytes(family1), Bytes.toBytes(qf1), tsFor20151205Saturday,
+        Bytes.toBytes(mobValue2));
+    loadData(admin, bufMut, tableName, new Put[] { put2 });
+
+    Put put3 = new Put(mobKey3);
+    put3.addColumn(Bytes.toBytes(family1), Bytes.toBytes(qf1), tsFor20151228Monday,
+        Bytes.toBytes(mobValue3));
+    loadData(admin, bufMut, tableName, new Put[] { put3 });
+
+    Put put4 = new Put(mobKey4);
+    put4.addColumn(Bytes.toBytes(family1), Bytes.toBytes(qf1), tsFor20151231Thursday,
+        Bytes.toBytes(mobValue4));
+    loadData(admin, bufMut, tableName, new Put[] { put4 });
+
+    Put put5 = new Put(mobKey5);
+    put5.addColumn(Bytes.toBytes(family1), Bytes.toBytes(qf1), tsFor20160101Friday,
+        Bytes.toBytes(mobValue5));
+    loadData(admin, bufMut, tableName, new Put[] { put5 });
+
+    Put put6 = new Put(mobKey6);
+    put6.addColumn(Bytes.toBytes(family1), Bytes.toBytes(qf1), tsFor20160103Sunday,
+        Bytes.toBytes(mobValue6));
+    loadData(admin, bufMut, tableName, new Put[] { put6 });
+
+    Put put7 = new Put(mobKey7);
+    put7.addColumn(Bytes.toBytes(family1), Bytes.toBytes(qf1), tsFor20150907Monday,
+        Bytes.toBytes(mobValue7));
+    loadData(admin, bufMut, tableName, new Put[] { put7 });
+
+    Put put8 = new Put(mobKey8);
+    put8.addColumn(Bytes.toBytes(family1), Bytes.toBytes(qf1), tsFor20151120Sunday,
+        Bytes.toBytes(mobValue8));
+    loadData(admin, bufMut, tableName, new Put[] { put8 });
+  }
+
+
   /**
    * delete the row, family and cell to create the del file
    */
@@ -770,7 +1026,7 @@ public class TestMobCompactor {
   private static ExecutorService createThreadPool(Configuration conf) {
     int maxThreads = 10;
     long keepAliveTime = 60;
-    final SynchronousQueue<Runnable> queue = new SynchronousQueue<Runnable>();
+    final SynchronousQueue<Runnable> queue = new SynchronousQueue<>();
     ThreadPoolExecutor pool = new ThreadPoolExecutor(1, maxThreads,
         keepAliveTime, TimeUnit.SECONDS, queue,
         Threads.newDaemonThreadFactory("MobFileCompactionChore"),
@@ -785,7 +1041,7 @@ public class TestMobCompactor {
             }
           }
         });
-    ((ThreadPoolExecutor) pool).allowCoreThreadTimeOut(true);
+    pool.allowCoreThreadTimeOut(true);
     return pool;
   }
 
@@ -833,4 +1089,127 @@ public class TestMobCompactor {
     conf.setInt(MobConstants.MOB_COMPACTION_BATCH_SIZE,
       MobConstants.DEFAULT_MOB_COMPACTION_BATCH_SIZE);
   }
-}
+
+  /**
+   * Verify mob partition policy compaction values.
+   */
+  private void verifyPolicyValues() throws Exception {
+    Get get = new Get(mobKey01);
+    Result result = table.get(get);
+    assertTrue(Arrays.equals(result.getValue(Bytes.toBytes(family1), Bytes.toBytes(qf1)),
+        Bytes.toBytes(mobValue0)));
+
+    get = new Get(mobKey02);
+    result = table.get(get);
+    assertTrue(Arrays.equals(result.getValue(Bytes.toBytes(family1), Bytes.toBytes(qf1)),
+        Bytes.toBytes(mobValue0)));
+
+    get = new Get(mobKey03);
+    result = table.get(get);
+    assertTrue(Arrays.equals(result.getValue(Bytes.toBytes(family1), Bytes.toBytes(qf1)),
+        Bytes.toBytes(mobValue0)));
+
+    get = new Get(mobKey04);
+    result = table.get(get);
+    assertTrue(Arrays.equals(result.getValue(Bytes.toBytes(family1), Bytes.toBytes(qf1)),
+        Bytes.toBytes(mobValue0)));
+
+    get = new Get(mobKey05);
+    result = table.get(get);
+    assertTrue(Arrays.equals(result.getValue(Bytes.toBytes(family1), Bytes.toBytes(qf1)),
+        Bytes.toBytes(mobValue0)));
+
+    get = new Get(mobKey06);
+    result = table.get(get);
+    assertTrue(Arrays.equals(result.getValue(Bytes.toBytes(family1), Bytes.toBytes(qf1)),
+        Bytes.toBytes(mobValue0)));
+
+    get = new Get(mobKey1);
+    result = table.get(get);
+    assertTrue(Arrays.equals(result.getValue(Bytes.toBytes(family1), Bytes.toBytes(qf1)),
+        Bytes.toBytes(mobValue1)));
+
+    get = new Get(mobKey2);
+    result = table.get(get);
+    assertTrue(Arrays.equals(result.getValue(Bytes.toBytes(family1), Bytes.toBytes(qf1)),
+        Bytes.toBytes(mobValue2)));
+
+    get = new Get(mobKey3);
+    result = table.get(get);
+    assertTrue(Arrays.equals(result.getValue(Bytes.toBytes(family1), Bytes.toBytes(qf1)),
+        Bytes.toBytes(mobValue3)));
+
+    get = new Get(mobKey4);
+    result = table.get(get);
+    assertTrue(Arrays.equals(result.getValue(Bytes.toBytes(family1), Bytes.toBytes(qf1)),
+        Bytes.toBytes(mobValue4)));
+
+    get = new Get(mobKey5);
+    result = table.get(get);
+    assertTrue(Arrays.equals(result.getValue(Bytes.toBytes(family1), Bytes.toBytes(qf1)),
+        Bytes.toBytes(mobValue5)));
+
+    get = new Get(mobKey6);
+    result = table.get(get);
+    assertTrue(Arrays.equals(result.getValue(Bytes.toBytes(family1), Bytes.toBytes(qf1)),
+        Bytes.toBytes(mobValue6)));
+
+    get = new Get(mobKey7);
+    result = table.get(get);
+    assertTrue(Arrays.equals(result.getValue(Bytes.toBytes(family1), Bytes.toBytes(qf1)),
+        Bytes.toBytes(mobValue7)));
+
+    get = new Get(mobKey8);
+    result = table.get(get);
+    assertTrue(Arrays.equals(result.getValue(Bytes.toBytes(family1), Bytes.toBytes(qf1)),
+        Bytes.toBytes(mobValue8)));
+  }
+
+  private void commonPolicyTestLogic (final String tableNameAsString,
+      final MobCompactPartitionPolicy pType, final boolean majorCompact,
+      final int expectedFileNumbers, final String[] expectedFileNames,
+      final boolean setupAndLoadData
+      ) throws Exception {
+    if (setupAndLoadData) {
+      setUpForPolicyTest(tableNameAsString, pType);
+
+      loadDataForPartitionPolicy(admin, bufMut, tableName);
+    } else {
+      alterForPolicyTest(pType);
+    }
+
+    if (majorCompact) {
+      admin.majorCompact(tableName, hcd1.getName(), CompactType.MOB);
+    } else {
+      admin.compact(tableName, hcd1.getName(), CompactType.MOB);
+    }
+
+    waitUntilMobCompactionFinished(tableName);
+
+    // Run cleaner to make sure that files in archive directory are cleaned up
+    TEST_UTIL.getMiniHBaseCluster().getMaster().getHFileCleaner().choreForTesting();
+
+    //check the number of files
+    Path mobDirPath = MobUtils.getMobFamilyPath(conf, tableName, family1);
+    FileStatus[] fileList = fs.listStatus(mobDirPath);
+
+    assertTrue(fileList.length == expectedFileNumbers);
+
+    // the file names are expected
+    ArrayList<String> fileNames = new ArrayList<>(expectedFileNumbers);
+    for (FileStatus file : fileList) {
+      fileNames.add(MobFileName.getDateFromName(file.getPath().getName()));
+    }
+    int index = 0;
+    for (String fileName : expectedFileNames) {
+      index = fileNames.indexOf(fileName);
+      assertTrue(index >= 0);
+      fileNames.remove(index);
+    }
+
+    // Check daily mob files are removed from the mobdir, and only weekly mob files are there.
+    // Also check that there is no data loss.
+
+    verifyPolicyValues();
+  }
+ }

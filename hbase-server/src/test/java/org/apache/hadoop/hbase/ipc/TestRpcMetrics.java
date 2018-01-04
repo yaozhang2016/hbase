@@ -46,7 +46,6 @@ public class TestRpcMetrics {
     MetricsHBaseServer rsMetrics = new MetricsHBaseServer("HRegionServer", new MetricsHBaseServerWrapperStub());
     MetricsHBaseServerSource rsSource = rsMetrics.getMetricsSource();
 
-
     assertEquals("master", masterSource.getMetricsContext());
     assertEquals("regionserver", rsSource.getMetricsContext());
 
@@ -71,6 +70,12 @@ public class TestRpcMetrics {
     HELPER.assertGauge("numCallsInPriorityQueue", 104, serverSource);
     HELPER.assertGauge("numOpenConnections", 105, serverSource);
     HELPER.assertGauge("numActiveHandler", 106, serverSource);
+    HELPER.assertGauge("numActiveWriteHandler", 50, serverSource);
+    HELPER.assertGauge("numActiveReadHandler", 50, serverSource);
+    HELPER.assertGauge("numActiveScanHandler", 6, serverSource);
+    HELPER.assertGauge("numCallsInWriteQueue", 50, serverSource);
+    HELPER.assertGauge("numCallsInReadQueue", 50, serverSource);
+    HELPER.assertGauge("numCallsInScanQueue", 2, serverSource);
   }
 
   /**
@@ -128,7 +133,7 @@ public class TestRpcMetrics {
     HELPER.assertCounter("exceptions", 1, serverSource);
 
     mrpc.exception(new RegionMovedException(ServerName.parseServerName("localhost:60020"), 100));
-    mrpc.exception(new RegionTooBusyException());
+    mrpc.exception(new RegionTooBusyException("Some region"));
     mrpc.exception(new OutOfOrderScannerNextException());
     mrpc.exception(new NotServingRegionException());
     HELPER.assertCounter("exceptions.RegionMovedException", 1, serverSource);

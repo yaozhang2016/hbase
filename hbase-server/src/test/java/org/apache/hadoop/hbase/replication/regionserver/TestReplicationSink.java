@@ -33,8 +33,6 @@ import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FileUtil;
@@ -57,11 +55,10 @@ import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.WALEntry;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos.UUID;
-import org.apache.hadoop.hbase.shaded.com.google.protobuf.UnsafeByteOperations;
+import org.apache.hbase.thirdparty.com.google.protobuf.UnsafeByteOperations;
 import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.WALProtos;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.WALProtos.WALKey;
-import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.testclassification.ReplicationTests;
 import org.apache.hadoop.hbase.util.Bytes;
@@ -72,10 +69,12 @@ import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Category({ReplicationTests.class, MediumTests.class})
 public class TestReplicationSink {
-  private static final Log LOG = LogFactory.getLog(TestReplicationSink.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestReplicationSink.class);
   private static final int BATCH_SIZE = 10;
 
   protected final static HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
@@ -153,8 +152,8 @@ public class TestReplicationSink {
    */
   @Test
   public void testBatchSink() throws Exception {
-    List<WALEntry> entries = new ArrayList<WALEntry>(BATCH_SIZE);
-    List<Cell> cells = new ArrayList<Cell>();
+    List<WALEntry> entries = new ArrayList<>(BATCH_SIZE);
+    List<Cell> cells = new ArrayList<>();
     for(int i = 0; i < BATCH_SIZE; i++) {
       entries.add(createEntry(TABLE_NAME1, i, KeyValue.Type.Put, cells));
     }
@@ -171,16 +170,16 @@ public class TestReplicationSink {
    */
   @Test
   public void testMixedPutDelete() throws Exception {
-    List<WALEntry> entries = new ArrayList<WALEntry>(BATCH_SIZE/2);
-    List<Cell> cells = new ArrayList<Cell>();
+    List<WALEntry> entries = new ArrayList<>(BATCH_SIZE/2);
+    List<Cell> cells = new ArrayList<>();
     for(int i = 0; i < BATCH_SIZE/2; i++) {
       entries.add(createEntry(TABLE_NAME1, i, KeyValue.Type.Put, cells));
     }
     SINK.replicateEntries(entries, CellUtil.createCellScanner(cells), replicationClusterId,
       baseNamespaceDir, hfileArchiveDir);
 
-    entries = new ArrayList<WALEntry>(BATCH_SIZE);
-    cells = new ArrayList<Cell>();
+    entries = new ArrayList<>(BATCH_SIZE);
+    cells = new ArrayList<>();
     for(int i = 0; i < BATCH_SIZE; i++) {
       entries.add(createEntry(TABLE_NAME1, i,
           i % 2 != 0 ? KeyValue.Type.Put: KeyValue.Type.DeleteColumn, cells));
@@ -199,8 +198,8 @@ public class TestReplicationSink {
    */
   @Test
   public void testMixedPutTables() throws Exception {
-    List<WALEntry> entries = new ArrayList<WALEntry>(BATCH_SIZE/2);
-    List<Cell> cells = new ArrayList<Cell>();
+    List<WALEntry> entries = new ArrayList<>(BATCH_SIZE/2);
+    List<Cell> cells = new ArrayList<>();
     for(int i = 0; i < BATCH_SIZE; i++) {
       entries.add(createEntry( i % 2 == 0 ? TABLE_NAME2 : TABLE_NAME1,
               i, KeyValue.Type.Put, cells));
@@ -221,15 +220,15 @@ public class TestReplicationSink {
    */
   @Test
   public void testMixedDeletes() throws Exception {
-    List<WALEntry> entries = new ArrayList<WALEntry>(3);
-    List<Cell> cells = new ArrayList<Cell>();
+    List<WALEntry> entries = new ArrayList<>(3);
+    List<Cell> cells = new ArrayList<>();
     for(int i = 0; i < 3; i++) {
       entries.add(createEntry(TABLE_NAME1, i, KeyValue.Type.Put, cells));
     }
     SINK.replicateEntries(entries, CellUtil.createCellScanner(cells.iterator()),
       replicationClusterId, baseNamespaceDir, hfileArchiveDir);
-    entries = new ArrayList<WALEntry>(3);
-    cells = new ArrayList<Cell>();
+    entries = new ArrayList<>(3);
+    cells = new ArrayList<>();
     entries.add(createEntry(TABLE_NAME1, 0, KeyValue.Type.DeleteColumn, cells));
     entries.add(createEntry(TABLE_NAME1, 1, KeyValue.Type.DeleteFamily, cells));
     entries.add(createEntry(TABLE_NAME1, 2, KeyValue.Type.DeleteColumn, cells));
@@ -249,8 +248,8 @@ public class TestReplicationSink {
    */
   @Test
   public void testApplyDeleteBeforePut() throws Exception {
-    List<WALEntry> entries = new ArrayList<WALEntry>(5);
-    List<Cell> cells = new ArrayList<Cell>();
+    List<WALEntry> entries = new ArrayList<>(5);
+    List<Cell> cells = new ArrayList<>();
     for(int i = 0; i < 2; i++) {
       entries.add(createEntry(TABLE_NAME1, i, KeyValue.Type.Put, cells));
     }
@@ -284,7 +283,7 @@ public class TestReplicationSink {
     }
     List<Integer> numberList = new ArrayList<>(numbers);
     Collections.sort(numberList);
-    Map<String, Long> storeFilesSize = new HashMap<String, Long>(1);
+    Map<String, Long> storeFilesSize = new HashMap<>(1);
 
     // 2. Create 25 hfiles
     Configuration conf = TEST_UTIL.getConfiguration();
@@ -301,7 +300,7 @@ public class TestReplicationSink {
     // 3. Create a BulkLoadDescriptor and a WALEdit
     Map<byte[], List<Path>> storeFiles = new HashMap<>(1);
     storeFiles.put(FAM_NAME1, p);
-    WALEdit edit = null;
+    org.apache.hadoop.hbase.wal.WALEdit edit = null;
     WALProtos.BulkLoadDescriptor loadDescriptor = null;
 
     try (Connection c = ConnectionFactory.createConnection(conf);
@@ -311,9 +310,10 @@ public class TestReplicationSink {
           ProtobufUtil.toBulkLoadDescriptor(TABLE_NAME1,
               UnsafeByteOperations.unsafeWrap(regionInfo.getEncodedNameAsBytes()),
               storeFiles, storeFilesSize, 1);
-      edit = WALEdit.createBulkLoadEvent(regionInfo, loadDescriptor);
+      edit = org.apache.hadoop.hbase.wal.WALEdit.createBulkLoadEvent(regionInfo,
+        loadDescriptor);
     }
-    List<WALEntry> entries = new ArrayList<WALEntry>(1);
+    List<WALEntry> entries = new ArrayList<>(1);
 
     // 4. Create a WALEntryBuilder
     WALEntry.Builder builder = createWALEntryBuilder(TABLE_NAME1);
@@ -332,22 +332,16 @@ public class TestReplicationSink {
     }
 
     entries.add(builder.build());
-    ResultScanner scanRes = null;
-    try {
-      Scan scan = new Scan();
-      scanRes = table1.getScanner(scan);
+    try (ResultScanner scanner = table1.getScanner(new Scan())) {
       // 6. Assert no existing data in table
-      assertEquals(0, scanRes.next(numRows).length);
-      // 7. Replicate the bulk loaded entry
-      SINK.replicateEntries(entries, CellUtil.createCellScanner(edit.getCells().iterator()),
-        replicationClusterId, baseNamespaceDir, hfileArchiveDir);
-      scanRes = table1.getScanner(scan);
+      assertEquals(0, scanner.next(numRows).length);
+    }
+    // 7. Replicate the bulk loaded entry
+    SINK.replicateEntries(entries, CellUtil.createCellScanner(edit.getCells().iterator()),
+      replicationClusterId, baseNamespaceDir, hfileArchiveDir);
+    try (ResultScanner scanner = table1.getScanner(new Scan())) {
       // 8. Assert data is replicated
-      assertEquals(numRows, scanRes.next(numRows).length);
-    } finally {
-      if (scanRes != null) {
-        scanRes.close();
-      }
+      assertEquals(numRows, scanner.next(numRows).length);
     }
   }
 

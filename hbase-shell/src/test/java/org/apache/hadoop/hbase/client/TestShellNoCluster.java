@@ -18,6 +18,10 @@
  */
 package org.apache.hadoop.hbase.client;
 
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+
 import org.apache.hadoop.hbase.testclassification.ClientTests;
 import org.apache.hadoop.hbase.testclassification.LargeTests;
 import org.jruby.embed.PathType;
@@ -26,20 +30,16 @@ import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 
-import java.io.IOException;
-import java.util.ArrayList;
-import java.util.List;
-
 @Category({ ClientTests.class, LargeTests.class })
 public class TestShellNoCluster extends AbstractTestShell {
 
   @BeforeClass
   public static void setUpBeforeClass() throws Exception {
     // no cluster
-    List<String> loadPaths = new ArrayList();
+    List<String> loadPaths = new ArrayList<>(2);
     loadPaths.add("src/main/ruby");
     loadPaths.add("src/test/ruby");
-    jruby.getProvider().setLoadPaths(loadPaths);
+    jruby.setLoadPaths(loadPaths);
     jruby.put("$TEST_CLUSTER", TEST_UTIL);
     System.setProperty("jruby.jit.logging.verbose", "true");
     System.setProperty("jruby.jit.logging", "true");
@@ -56,5 +56,4 @@ public class TestShellNoCluster extends AbstractTestShell {
     // Start ruby tests without cluster
     jruby.runScriptlet(PathType.ABSOLUTE, "src/test/ruby/no_cluster_tests_runner.rb");
   }
-
 }

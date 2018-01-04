@@ -20,25 +20,26 @@ package org.apache.hadoop.hbase.wal;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.Cell;
-import org.apache.hadoop.hbase.CellUtil;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.HRegionInfo;
-
-// imports for things that haven't moved from regionserver.wal yet.
+import org.apache.hadoop.hbase.PrivateCellUtil;
+import org.apache.hadoop.hbase.client.RegionInfo;
 import org.apache.hadoop.hbase.regionserver.wal.WALActionsListener;
 import org.apache.hadoop.hbase.regionserver.wal.WALCoprocessorHost;
-import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
 import org.apache.hadoop.hbase.util.FSUtils;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+// imports for things that haven't moved from regionserver.wal yet.
 
 /**
  * No-op implementation of {@link WALProvider} used when the WAL is disabled.
@@ -49,7 +50,7 @@ import org.apache.hadoop.hbase.util.FSUtils;
 @InterfaceAudience.Private
 class DisabledWALProvider implements WALProvider {
 
-  private static final Log LOG = LogFactory.getLog(DisabledWALProvider.class);
+  private static final Logger LOG = LoggerFactory.getLogger(DisabledWALProvider.class);
 
   WAL disabled;
 
@@ -62,12 +63,12 @@ class DisabledWALProvider implements WALProvider {
     if (null == providerId) {
       providerId = "defaultDisabled";
     }
-    disabled = new DisabledWAL(new Path(FSUtils.getRootDir(conf), providerId), conf, null);
+    disabled = new DisabledWAL(new Path(FSUtils.getWALRootDir(conf), providerId), conf, null);
   }
 
   @Override
-  public List<WAL> getWALs() throws IOException {
-    List<WAL> wals = new ArrayList<WAL>();
+  public List<WAL> getWALs() {
+    List<WAL> wals = new ArrayList<>(1);
     wals.add(disabled);
     return wals;
   }
@@ -88,8 +89,7 @@ class DisabledWALProvider implements WALProvider {
   }
 
   private static class DisabledWAL implements WAL {
-    protected final List<WALActionsListener> listeners =
-        new CopyOnWriteArrayList<WALActionsListener>();
+    protected final List<WALActionsListener> listeners = new CopyOnWriteArrayList<>();
     protected final Path path;
     protected final WALCoprocessorHost coprocessorHost;
     protected final AtomicBoolean closed = new AtomicBoolean(false);
@@ -109,7 +109,7 @@ class DisabledWALProvider implements WALProvider {
     public void registerWALActionsListener(final WALActionsListener listener) {
       listeners.add(listener);
     }
-    
+
     @Override
     public boolean unregisterWALActionsListener(final WALActionsListener listener) {
       return listeners.remove(listener);
@@ -161,13 +161,13 @@ class DisabledWALProvider implements WALProvider {
     }
 
     @Override
-    public long append(HRegionInfo info, WALKey key, WALEdit edits, boolean inMemstore)
+    public long append(RegionInfo info, WALKeyImpl key, WALEdit edits, boolean inMemstore)
         throws IOException {
       if (!this.listeners.isEmpty()) {
         final long start = System.nanoTime();
         long len = 0;
         for (Cell cell : edits.getCells()) {
-          len += CellUtil.estimatedSerializedSizeOf(cell);
+          len += PrivateCellUtil.estimatedSerializedSizeOf(cell);
         }
         final long elapsed = (System.nanoTime() - start) / 1000000L;
         for (WALActionsListener listener : this.listeners) {
@@ -195,6 +195,11 @@ class DisabledWALProvider implements WALProvider {
       sync();
     }
 
+    public Long startCacheFlush(final byte[] encodedRegionName, Map<byte[], Long>
+        flushedFamilyNamesToSeq) {
+      return startCacheFlush(encodedRegionName, flushedFamilyNamesToSeq.keySet());
+    }
+
     @Override
     public Long startCacheFlush(final byte[] encodedRegionName, Set<byte[]> flushedFamilyNames) {
       if (closed.get()) return null;
@@ -215,18 +220,23 @@ class DisabledWALProvider implements WALProvider {
     }
 
     @Override
-    public long getEarliestMemstoreSeqNum(byte[] encodedRegionName) {
+    public long getEarliestMemStoreSeqNum(byte[] encodedRegionName) {
       return HConstants.NO_SEQNUM;
     }
 
     @Override
-    public long getEarliestMemstoreSeqNum(byte[] encodedRegionName, byte[] familyName) {
+    public long getEarliestMemStoreSeqNum(byte[] encodedRegionName, byte[] familyName) {
       return HConstants.NO_SEQNUM;
     }
 
     @Override
     public String toString() {
       return "WAL disabled.";
+    }
+
+    @Override
+    public OptionalLong getLogFileSizeIfBeingWritten(Path path) {
+      return OptionalLong.empty();
     }
   }
 

@@ -21,9 +21,9 @@ import java.io.IOException;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.HRegionInfo;
+import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.client.RegionInfo;
 import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.HStore;
 
@@ -61,8 +61,22 @@ public class HFileArchiveUtil {
    *         not be archived
    */
   public static Path getStoreArchivePath(Configuration conf,
-                                         HRegionInfo region,
+                                         RegionInfo region,
                                          Path tabledir,
+      byte[] family) throws IOException {
+    return getStoreArchivePath(conf, region, family);
+  }
+
+  /**
+   * Gets the directory to archive a store directory.
+   * @param conf {@link Configuration} to read for the archive directory name.
+   * @param region parent region information under which the store currently lives
+   * @param family name of the family in the store
+   * @return {@link Path} to the directory to archive the given store or <tt>null</tt> if it should
+   *         not be archived
+   */
+  public static Path getStoreArchivePath(Configuration conf,
+                                         RegionInfo region,
       byte[] family) throws IOException {
     Path rootDir = FSUtils.getRootDir(conf);
     Path tableArchiveDir = getTableArchivePath(rootDir, region.getTable());
@@ -132,7 +146,7 @@ public class HFileArchiveUtil {
   }
 
   /**
-   * Get the full path to the archive directory on the configured 
+   * Get the full path to the archive directory on the configured
    * {@link org.apache.hadoop.hbase.master.MasterFileSystem}
    * @param conf to look for archive directory name and root directory. Cannot be null. Notes for
    *          testing: requires a FileSystem root directory to be specified.
@@ -144,7 +158,7 @@ public class HFileArchiveUtil {
   }
 
   /**
-   * Get the full path to the archive directory on the configured 
+   * Get the full path to the archive directory on the configured
    * {@link org.apache.hadoop.hbase.master.MasterFileSystem}
    * @param rootdir {@link Path} to the root directory where hbase files are stored (for building
    *          the archive path)
@@ -152,5 +166,21 @@ public class HFileArchiveUtil {
    */
   private static Path getArchivePath(final Path rootdir) {
     return new Path(rootdir, HConstants.HFILE_ARCHIVE_DIRECTORY);
+  }
+
+  /*
+   * @return table name given archive file path
+   */
+  public static TableName getTableName(Path archivePath) {
+    Path p = archivePath;
+    String tbl = null;
+    // namespace is the 4th parent of file
+    for (int i = 0; i < 5; i++) {
+      if (p == null) return null;
+      if (i == 3) tbl = p.getName();
+      p = p.getParent();
+    }
+    if (p == null) return null;
+    return TableName.valueOf(p.getName(), tbl);
   }
 }

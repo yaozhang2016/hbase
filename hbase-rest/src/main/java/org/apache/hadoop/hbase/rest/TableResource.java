@@ -21,21 +21,16 @@ package org.apache.hadoop.hbase.rest;
 
 import java.io.IOException;
 import java.util.List;
-
 import javax.ws.rs.DefaultValue;
 import javax.ws.rs.Encoded;
-import javax.ws.rs.HeaderParam;
 import javax.ws.rs.Path;
 import javax.ws.rs.PathParam;
 import javax.ws.rs.QueryParam;
-import javax.ws.rs.core.Context;
-import javax.ws.rs.core.UriInfo;
-
-import org.apache.commons.lang.StringUtils;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.hadoop.hbase.TableName;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.filter.Filter;
@@ -48,7 +43,7 @@ import org.apache.hadoop.hbase.util.Bytes;
 public class TableResource extends ResourceBase {
 
   String table;
-  private static final Log LOG = LogFactory.getLog(TableResource.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TableResource.class);
 
   /**
    * Constructor
@@ -105,8 +100,9 @@ public class TableResource extends ResourceBase {
       // the RowSpec constructor has a chance to parse
       final @PathParam("rowspec") @Encoded String rowspec,
       final @QueryParam("v") String versions,
-      final @QueryParam("check") String check) throws IOException {
-    return new RowResource(this, rowspec, versions, check);
+      final @QueryParam("check") String check,
+      final @QueryParam("rr") String returnResult) throws IOException {
+    return new RowResource(this, rowspec, versions, check, returnResult);
   }
 
   @Path("{suffixglobbingspec: .*\\*/.+}")
@@ -115,15 +111,14 @@ public class TableResource extends ResourceBase {
       // the RowSpec constructor has a chance to parse
       final @PathParam("suffixglobbingspec") @Encoded String suffixglobbingspec,
       final @QueryParam("v") String versions,
-      final @QueryParam("check") String check) throws IOException {
-    return new RowResource(this, suffixglobbingspec, versions, check);
+      final @QueryParam("check") String check,
+      final @QueryParam("rr") String returnResult) throws IOException {
+    return new RowResource(this, suffixglobbingspec, versions, check, returnResult);
   }
 
   @Path("{scanspec: .*[*]$}")
   public TableScanResource  getScanResource(
-      final @Context UriInfo uriInfo,
       final @PathParam("scanspec") String scanSpec,
-      final @HeaderParam("Accept") String contentType,
       @DefaultValue(Integer.MAX_VALUE + "")
       @QueryParam(Constants.SCAN_LIMIT) int userRequestedLimit,
       @DefaultValue("") @QueryParam(Constants.SCAN_START_ROW) String startRow,
@@ -133,16 +128,16 @@ public class TableResource extends ResourceBase {
       @DefaultValue("-1") @QueryParam(Constants.SCAN_BATCH_SIZE) int batchSize,
       @DefaultValue("0") @QueryParam(Constants.SCAN_START_TIME) long startTime,
       @DefaultValue(Long.MAX_VALUE + "") @QueryParam(Constants.SCAN_END_TIME) long endTime,
-      @DefaultValue("true") @QueryParam(Constants.SCAN_BATCH_SIZE) boolean cacheBlocks,
+      @DefaultValue("true") @QueryParam(Constants.SCAN_CACHE_BLOCKS) boolean cacheBlocks,
       @DefaultValue("false") @QueryParam(Constants.SCAN_REVERSED) boolean reversed,
-      @DefaultValue("") @QueryParam(Constants.SCAN_FILTER) String filters) {
+      @DefaultValue("") @QueryParam(Constants.SCAN_FILTER) String paramFilter) {
     try {
-      Filter filter = null;
+      Filter prefixFilter = null;
       Scan tableScan = new Scan();
       if (scanSpec.indexOf('*') > 0) {
         String prefix = scanSpec.substring(0, scanSpec.indexOf('*'));
         byte[] prefixBytes = Bytes.toBytes(prefix);
-        filter = new PrefixFilter(Bytes.toBytes(prefix));
+        prefixFilter = new PrefixFilter(Bytes.toBytes(prefix));
         if (startRow.isEmpty()) {
           tableScan.setStartRow(prefixBytes);
         }
@@ -183,30 +178,30 @@ public class TableResource extends ResourceBase {
           tableScan.addFamily(Bytes.toBytes(familysplit[0]));
         }
       }
-      FilterList filterList = null;
-      if (StringUtils.isNotEmpty(filters)) {
-          ParseFilter pf = new ParseFilter();
-          Filter filterParam = pf.parseFilterString(filters);
-          if (filter != null) {
-            filterList = new FilterList(filter, filterParam);
-          }
-          else {
-            filter = filterParam;
-          }
+      FilterList filterList = new FilterList();
+      if (StringUtils.isNotEmpty(paramFilter)) {
+        ParseFilter pf = new ParseFilter();
+        Filter parsedParamFilter = pf.parseFilterString(paramFilter);
+        if (parsedParamFilter != null) {
+          filterList.addFilter(parsedParamFilter);
+        }
+        if (prefixFilter != null) {
+          filterList.addFilter(prefixFilter);
+        }
       }
-      if (filterList != null) {
+      if (filterList.size() > 0) {
         tableScan.setFilter(filterList);
-      } else if (filter != null) {
-        tableScan.setFilter(filter);
       }
+
       int fetchSize = this.servlet.getConfiguration().getInt(Constants.SCAN_FETCH_SIZE, 10);
       tableScan.setCaching(fetchSize);
       tableScan.setReversed(reversed);
+      tableScan.setCacheBlocks(cacheBlocks);
       return new TableScanResource(hTable.getScanner(tableScan), userRequestedLimit);
     } catch (IOException exp) {
       servlet.getMetrics().incrementFailedScanRequests(1);
       processException(exp);
-      LOG.warn(exp);
+      LOG.warn(exp.toString(), exp);
       return null;
     }
   }

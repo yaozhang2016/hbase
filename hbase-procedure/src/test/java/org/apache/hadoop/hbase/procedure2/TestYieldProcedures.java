@@ -19,15 +19,11 @@
 package org.apache.hadoop.hbase.procedure2;
 
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.TimeUnit;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.HBaseCommonTestingUtility;
@@ -39,13 +35,15 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
 @Category({MasterTests.class, SmallTests.class})
 public class TestYieldProcedures {
-  private static final Log LOG = LogFactory.getLog(TestYieldProcedures.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestYieldProcedures.class);
 
   private static final int PROCEDURE_EXECUTOR_SLOTS = 1;
   private static final Procedure NULL_PROC = null;
@@ -67,7 +65,7 @@ public class TestYieldProcedures {
     assertTrue(testDir.depth() > 1);
 
     logDir = new Path(testDir, "proc-logs");
-    procStore = ProcedureTestingUtility.createWalStore(htu.getConfiguration(), fs, logDir);
+    procStore = ProcedureTestingUtility.createWalStore(htu.getConfiguration(), logDir);
     procRunnables = new TestScheduler();
     procExecutor = new ProcedureExecutor(htu.getConfiguration(), new TestProcEnv(),
         procStore, procRunnables);
@@ -204,7 +202,7 @@ public class TestYieldProcedures {
       public boolean isRollback() { return rollback; }
     }
 
-    private final ArrayList<ExecutionInfo> executionInfo = new ArrayList<ExecutionInfo>();
+    private final ArrayList<ExecutionInfo> executionInfo = new ArrayList<>();
     private final AtomicBoolean aborted = new AtomicBoolean(false);
     private final boolean throwInterruptOnceOnEachStep;
     private final boolean abortOnFinalStep;
@@ -336,11 +334,13 @@ public class TestYieldProcedures {
     }
 
     @Override
-    protected void serializeStateData(final OutputStream stream) throws IOException {
+    protected void serializeStateData(ProcedureStateSerializer serializer)
+        throws IOException {
     }
 
     @Override
-    protected void deserializeStateData(final InputStream stream) throws IOException {
+    protected void deserializeStateData(ProcedureStateSerializer serializer)
+        throws IOException {
     }
   }
 
@@ -353,6 +353,7 @@ public class TestYieldProcedures {
 
     public TestScheduler() {}
 
+    @Override
     public void addFront(final Procedure proc) {
       addFrontCalls++;
       super.addFront(proc);

@@ -26,12 +26,9 @@ import static org.junit.Assert.fail;
 import java.io.IOException;
 import java.util.List;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.MetaTableAccessor;
 import org.apache.hadoop.hbase.MiniHBaseCluster;
@@ -40,8 +37,11 @@ import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.UnknownRegionException;
 import org.apache.hadoop.hbase.client.Admin;
+import org.apache.hadoop.hbase.client.RegionInfo;
+import org.apache.hadoop.hbase.client.RegionInfoBuilder;
 import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.client.TableState;
+import org.apache.hadoop.hbase.master.assignment.RegionStates;
 import org.apache.hadoop.hbase.testclassification.MasterTests;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.util.Bytes;
@@ -49,19 +49,25 @@ import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.util.StringUtils;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
-
-import com.google.common.base.Joiner;
+import org.junit.rules.TestName;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.apache.hbase.thirdparty.com.google.common.base.Joiner;
 
 @Category({MasterTests.class, MediumTests.class})
 public class TestMaster {
   private static final HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
-  private static final Log LOG = LogFactory.getLog(TestMaster.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestMaster.class);
   private static final TableName TABLENAME =
       TableName.valueOf("TestMaster");
   private static final byte[] FAMILYNAME = Bytes.toBytes("fam");
   private static Admin admin;
+
+  @Rule
+  public TestName name = new TestName();
 
   @BeforeClass
   public static void beforeAllTests() throws Exception {
@@ -69,7 +75,7 @@ public class TestMaster {
     TEST_UTIL.getConfiguration().setInt(HConstants.HBASE_CLIENT_RETRIES_NUMBER, 3);
     // Start a cluster of two regionservers.
     TEST_UTIL.startMiniCluster(2);
-    admin = TEST_UTIL.getHBaseAdmin();
+    admin = TEST_UTIL.getAdmin();
   }
 
   @AfterClass
@@ -88,7 +94,7 @@ public class TestMaster {
       TEST_UTIL.loadTable(ht, FAMILYNAME, false);
     }
 
-    List<Pair<HRegionInfo, ServerName>> tableRegions = MetaTableAccessor.getTableRegionsAndLocations(
+    List<Pair<RegionInfo, ServerName>> tableRegions = MetaTableAccessor.getTableRegionsAndLocations(
         m.getConnection(), TABLENAME);
     LOG.info("Regions after load: " + Joiner.on(',').join(tableRegions));
     assertEquals(1, tableRegions.size());
@@ -99,27 +105,25 @@ public class TestMaster {
 
     // Now trigger a split and stop when the split is in progress
     LOG.info("Splitting table");
-    TEST_UTIL.getHBaseAdmin().split(TABLENAME);
-    LOG.info("Waiting for split result to be about to open");
-    RegionStates regionStates = m.getAssignmentManager().getRegionStates();
-    while (regionStates.getRegionsOfTable(TABLENAME).size() <= 1) {
+    TEST_UTIL.getAdmin().split(TABLENAME);
+
+    LOG.info("Making sure we can call getTableRegions while opening");
+    while (tableRegions.size() < 3) {
+      tableRegions = MetaTableAccessor.getTableRegionsAndLocations(m.getConnection(),
+          TABLENAME, false);
       Thread.sleep(100);
     }
-    LOG.info("Making sure we can call getTableRegions while opening");
-    tableRegions = MetaTableAccessor.getTableRegionsAndLocations(m.getConnection(),
-      TABLENAME, false);
-
     LOG.info("Regions: " + Joiner.on(',').join(tableRegions));
     // We have three regions because one is split-in-progress
     assertEquals(3, tableRegions.size());
     LOG.info("Making sure we can call getTableRegionClosest while opening");
-    Pair<HRegionInfo, ServerName> pair =
+    Pair<RegionInfo, ServerName> pair =
         m.getTableRegionForRow(TABLENAME, Bytes.toBytes("cde"));
     LOG.info("Result is: " + pair);
-    Pair<HRegionInfo, ServerName> tableRegionFromName =
+    Pair<RegionInfo, ServerName> tableRegionFromName =
         MetaTableAccessor.getRegion(m.getConnection(),
           pair.getFirst().getRegionName());
-    assertEquals(tableRegionFromName.getFirst(), pair.getFirst());
+    assertTrue(RegionInfo.COMPARATOR.compare(tableRegionFromName.getFirst(), pair.getFirst()) == 0);
   }
 
   @Test
@@ -128,7 +132,7 @@ public class TestMaster {
     HMaster m = cluster.getMaster();
     try {
       m.setInitialized(false); // fake it, set back later
-      HRegionInfo meta = HRegionInfo.FIRST_META_REGIONINFO;
+      RegionInfo meta = RegionInfoBuilder.FIRST_META_REGIONINFO;
       m.move(meta.getEncodedNameAsBytes(), null);
       fail("Region should not be moved since master is not initialized");
     } catch (IOException ioe) {
@@ -140,16 +144,17 @@ public class TestMaster {
 
   @Test
   public void testMoveThrowsUnknownRegionException() throws IOException {
-    TableName tableName =
-        TableName.valueOf("testMoveThrowsUnknownRegionException");
+    final TableName tableName = TableName.valueOf(name.getMethodName());
     HTableDescriptor htd = new HTableDescriptor(tableName);
     HColumnDescriptor hcd = new HColumnDescriptor("value");
     htd.addFamily(hcd);
 
     admin.createTable(htd, null);
     try {
-      HRegionInfo hri = new HRegionInfo(
-        tableName, Bytes.toBytes("A"), Bytes.toBytes("Z"));
+      RegionInfo hri = RegionInfoBuilder.newBuilder(tableName)
+          .setStartKey(Bytes.toBytes("A"))
+          .setEndKey(Bytes.toBytes("Z"))
+          .build();
       admin.move(hri.getEncodedNameAsBytes(), null);
       fail("Region should not be moved since it is fake");
     } catch (IOException ioe) {
@@ -161,7 +166,7 @@ public class TestMaster {
 
   @Test
   public void testMoveThrowsPleaseHoldException() throws IOException {
-    TableName tableName = TableName.valueOf("testMoveThrowsPleaseHoldException");
+    final TableName tableName = TableName.valueOf(name.getMethodName());
     HMaster master = TEST_UTIL.getMiniHBaseCluster().getMaster();
     HTableDescriptor htd = new HTableDescriptor(tableName);
     HColumnDescriptor hcd = new HColumnDescriptor("value");
@@ -169,7 +174,7 @@ public class TestMaster {
 
     admin.createTable(htd, null);
     try {
-      List<HRegionInfo> tableRegions = admin.getTableRegions(tableName);
+      List<RegionInfo> tableRegions = admin.getRegions(tableName);
 
       master.setInitialized(false); // fake it, set back later
       admin.move(tableRegions.get(0).getEncodedNameAsBytes(), null);

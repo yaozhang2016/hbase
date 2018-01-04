@@ -18,13 +18,13 @@
 
 package org.apache.hadoop.hbase.thrift;
 
-import org.apache.hadoop.hbase.metrics.BaseSource;
+import org.apache.hadoop.hbase.metrics.ExceptionTrackingSource;
 import org.apache.hadoop.hbase.metrics.JvmPauseMonitorSource;
 
 /**
  * Interface of a class that will export metrics about Thrift to hadoop's metrics2.
  */
-public interface MetricsThriftServerSource extends BaseSource, JvmPauseMonitorSource {
+public interface MetricsThriftServerSource extends ExceptionTrackingSource, JvmPauseMonitorSource {
 
   String BATCH_GET_KEY = "batchGet";
   String BATCH_MUTATE_KEY = "batchMutate";
@@ -32,10 +32,11 @@ public interface MetricsThriftServerSource extends BaseSource, JvmPauseMonitorSo
   String THRIFT_CALL_KEY = "thriftCall";
   String SLOW_THRIFT_CALL_KEY = "slowThriftCall";
   String CALL_QUEUE_LEN_KEY = "callQueueLen";
+  String ACTIVE_WORKER_COUNT_KEY = "numActiveWorkers";
 
   /**
    * Add how long an operation was in the queue.
-   * @param time
+   * @param time the time to add
    */
   void incTimeInQueue(long time);
 
@@ -76,4 +77,13 @@ public interface MetricsThriftServerSource extends BaseSource, JvmPauseMonitorSo
    */
   void incSlowCall(long time);
 
+  /**
+   * Increment number of active thrift workers.
+   */
+  void incActiveWorkerCount();
+
+  /**
+   * Decrement number of active thrift workers.
+   */
+  void decActiveWorkerCount();
 }

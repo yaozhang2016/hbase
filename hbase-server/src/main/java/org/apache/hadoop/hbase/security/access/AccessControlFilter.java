@@ -21,9 +21,10 @@ package org.apache.hadoop.hbase.security.access;
 import java.io.IOException;
 import java.util.Map;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellUtil;
+import org.apache.hadoop.hbase.PrivateCellUtil;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.exceptions.DeserializationException;
 import org.apache.hadoop.hbase.filter.FilterBase;
@@ -92,12 +93,12 @@ class AccessControlFilter extends FilterBase {
   }
 
   @Override
-  public ReturnCode filterKeyValue(Cell cell) {
+  public ReturnCode filterCell(final Cell cell) {
     if (isSystemTable) {
       return ReturnCode.INCLUDE;
     }
     if (prevFam.getBytes() == null
-        || !(CellUtil.matchingFamily(cell, prevFam.getBytes(), prevFam.getOffset(),
+        || !(PrivateCellUtil.matchingFamily(cell, prevFam.getBytes(), prevFam.getOffset(),
             prevFam.getLength()))) {
       prevFam.set(cell.getFamilyArray(), cell.getFamilyOffset(), cell.getFamilyLength());
       // Similar to VisibilityLabelFilter
@@ -106,7 +107,7 @@ class AccessControlFilter extends FilterBase {
       prevQual.unset();
     }
     if (prevQual.getBytes() == null
-        || !(CellUtil.matchingQualifier(cell, prevQual.getBytes(), prevQual.getOffset(),
+        || !(PrivateCellUtil.matchingQualifier(cell, prevQual.getBytes(), prevQual.getOffset(),
             prevQual.getLength()))) {
       prevQual.set(cell.getQualifierArray(), cell.getQualifierOffset(),
           cell.getQualifierLength());

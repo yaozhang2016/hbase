@@ -19,8 +19,8 @@
  */
 package org.apache.hadoop.hbase;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * This class is an extension to KeyValue where rowLen and keyLen are cached.
@@ -61,10 +61,5 @@ public class SizeCachedKeyValue extends KeyValue {
   @Override
   public long heapSize() {
     return super.heapSize() + FIXED_OVERHEAD;
-  }
-
-  @Override
-  public long heapOverhead() {
-    return super.heapOverhead() + FIXED_OVERHEAD;
   }
 }

@@ -35,13 +35,14 @@ import java.io.ObjectOutputStream;
 import java.io.OutputStream;
 import java.io.Serializable;
 import java.io.UnsupportedEncodingException;
+import java.nio.charset.StandardCharsets;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.hadoop.hbase.log.HBaseMarkers;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Encodes and decodes to and from Base64 notation.
@@ -118,7 +119,6 @@ import org.apache.hadoop.hbase.classification.InterfaceStability;
  * version: 2.2.1
  */
 @InterfaceAudience.Public
-@InterfaceStability.Stable
 public class Base64 {
 
   /* ******** P U B L I C   F I E L D S ******** */
@@ -159,7 +159,7 @@ public class Base64 {
 
   /* ******** P R I V A T E   F I E L D S ******** */
 
-  private static final Log LOG = LogFactory.getLog(Base64.class);
+  private static final Logger LOG = LoggerFactory.getLogger(Base64.class);
 
   /** Maximum line length (76) of Base64 output. */
   private final static int MAX_LINE_LENGTH = 76;
@@ -571,7 +571,7 @@ public class Base64 {
       return new String(baos.toByteArray(), PREFERRED_ENCODING);
 
     } catch (UnsupportedEncodingException uue) {
-      return new String(baos.toByteArray());
+      return new String(baos.toByteArray(), StandardCharsets.UTF_8);
 
     } catch (IOException e) {
       LOG.error("error encoding object", e);
@@ -696,7 +696,7 @@ public class Base64 {
         return new String(baos.toByteArray(), PREFERRED_ENCODING);
 
       } catch (UnsupportedEncodingException uue) {
-        return new String(baos.toByteArray());
+        return new String(baos.toByteArray(), StandardCharsets.UTF_8);
 
       } catch (IOException e) {
         LOG.error("error encoding byte array", e);
@@ -753,7 +753,7 @@ public class Base64 {
       return new String(outBuff, 0, e, PREFERRED_ENCODING);
 
     } catch (UnsupportedEncodingException uue) {
-      return new String(outBuff, 0, e);
+      return new String(outBuff, 0, e, StandardCharsets.UTF_8);
     }
   } // end encodeBytes
 
@@ -928,7 +928,7 @@ public class Base64 {
       bytes = s.getBytes(PREFERRED_ENCODING);
 
     } catch (UnsupportedEncodingException uee) {
-      bytes = s.getBytes();
+      bytes = Bytes.toBytes(s);
     } // end catch
 
     // Decode
@@ -1101,7 +1101,7 @@ public class Base64 {
 
       // Check the size of file
       if (file.length() > Integer.MAX_VALUE) {
-        LOG.fatal("File is too big for this convenience method (" +
+        LOG.error(HBaseMarkers.FATAL, "File is too big for this convenience method (" +
             file.length() + " bytes).");
         return null;
       } // end if: file too big for int index
@@ -1290,7 +1290,6 @@ public class Base64 {
    * @since 1.3
    */
   @InterfaceAudience.Public
-  @InterfaceStability.Stable
   public static class Base64InputStream extends FilterInputStream {
     private boolean encode;                     // Encoding or decoding
     private int position;                       // Current position in the buffer
@@ -1492,7 +1491,6 @@ public class Base64 {
    * @since 1.3
    */
   @InterfaceAudience.Public
-  @InterfaceStability.Stable
   public static class Base64OutputStream extends FilterOutputStream {
     private boolean encode;
     private int position;
@@ -1538,7 +1536,6 @@ public class Base64 {
      * @since 1.3
      */
     @InterfaceAudience.Public
-    @InterfaceStability.Stable
     public Base64OutputStream(OutputStream out, int options) {
       super(out);
       this.breakLines = (options & DONT_BREAK_LINES) != DONT_BREAK_LINES;

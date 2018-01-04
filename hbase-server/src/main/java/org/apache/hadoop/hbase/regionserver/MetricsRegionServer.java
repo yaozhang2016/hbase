@@ -17,10 +17,16 @@
  */
 package org.apache.hadoop.hbase.regionserver;
 
-import com.google.common.annotations.VisibleForTesting;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
 import org.apache.hadoop.hbase.CompatibilitySingletonFactory;
+import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.metrics.MetricRegistries;
+import org.apache.hadoop.hbase.metrics.MetricRegistry;
+import org.apache.hadoop.hbase.metrics.Timer;
+import org.apache.hadoop.conf.Configuration;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceStability;
+
+import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
 
 /**
  * <p>
@@ -33,20 +39,47 @@ import org.apache.hadoop.hbase.CompatibilitySingletonFactory;
 @InterfaceStability.Evolving
 @InterfaceAudience.Private
 public class MetricsRegionServer {
+  public static final String RS_ENABLE_TABLE_METRICS_KEY =
+      "hbase.regionserver.enable.table.latencies";
+  public static final boolean RS_ENABLE_TABLE_METRICS_DEFAULT = true;
+
   private MetricsRegionServerSource serverSource;
   private MetricsRegionServerWrapper regionServerWrapper;
+  private RegionServerTableMetrics tableMetrics;
 
-  public MetricsRegionServer(MetricsRegionServerWrapper regionServerWrapper) {
+  private MetricRegistry metricRegistry;
+  private Timer bulkLoadTimer;
+
+  public MetricsRegionServer(MetricsRegionServerWrapper regionServerWrapper, Configuration conf) {
     this(regionServerWrapper,
         CompatibilitySingletonFactory.getInstance(MetricsRegionServerSourceFactory.class)
-            .createServer(regionServerWrapper));
+            .createServer(regionServerWrapper),
+        createTableMetrics(conf));
 
+    // Create hbase-metrics module based metrics. The registry should already be registered by the
+    // MetricsRegionServerSource
+    metricRegistry = MetricRegistries.global().get(serverSource.getMetricRegistryInfo()).get();
+
+    // create and use metrics from the new hbase-metrics based registry.
+    bulkLoadTimer = metricRegistry.timer("Bulkload");
   }
 
   MetricsRegionServer(MetricsRegionServerWrapper regionServerWrapper,
-                      MetricsRegionServerSource serverSource) {
+                      MetricsRegionServerSource serverSource,
+                      RegionServerTableMetrics tableMetrics) {
     this.regionServerWrapper = regionServerWrapper;
     this.serverSource = serverSource;
+    this.tableMetrics = tableMetrics;
+  }
+
+  /**
+   * Creates an instance of {@link RegionServerTableMetrics} only if the feature is enabled.
+   */
+  static RegionServerTableMetrics createTableMetrics(Configuration conf) {
+    if (conf.getBoolean(RS_ENABLE_TABLE_METRICS_KEY, RS_ENABLE_TABLE_METRICS_DEFAULT)) {
+      return new RegionServerTableMetrics();
+    }
+    return null;
   }
 
   @VisibleForTesting
@@ -58,35 +91,72 @@ public class MetricsRegionServer {
     return regionServerWrapper;
   }
 
-  public void updatePut(long t) {
+  public void updatePutBatch(TableName tn, long t) {
+    if (tableMetrics != null && tn != null) {
+      tableMetrics.updatePut(tn, t);
+    }
     if (t > 1000) {
       serverSource.incrSlowPut();
+    }
+    serverSource.updatePutBatch(t);
+  }
+
+  public void updatePut(TableName tn, long t) {
+    if (tableMetrics != null && tn != null) {
+      tableMetrics.updatePut(tn, t);
     }
     serverSource.updatePut(t);
   }
 
-  public void updateDelete(long t) {
-    if (t > 1000) {
-      serverSource.incrSlowDelete();
+  public void updateDelete(TableName tn, long t) {
+    if (tableMetrics != null && tn != null) {
+      tableMetrics.updateDelete(tn, t);
     }
     serverSource.updateDelete(t);
   }
 
-  public void updateGet(long t) {
+  public void updateDeleteBatch(TableName tn, long t) {
+    if (tableMetrics != null && tn != null) {
+      tableMetrics.updateDelete(tn, t);
+    }
+    if (t > 1000) {
+      serverSource.incrSlowDelete();
+    }
+    serverSource.updateDeleteBatch(t);
+  }
+
+  public void updateCheckAndDelete(long t) {
+    serverSource.updateCheckAndDelete(t);
+  }
+
+  public void updateCheckAndPut(long t) {
+    serverSource.updateCheckAndPut(t);
+  }
+
+  public void updateGet(TableName tn, long t) {
+    if (tableMetrics != null && tn != null) {
+      tableMetrics.updateGet(tn, t);
+    }
     if (t > 1000) {
       serverSource.incrSlowGet();
     }
     serverSource.updateGet(t);
   }
 
-  public void updateIncrement(long t) {
+  public void updateIncrement(TableName tn, long t) {
+    if (tableMetrics != null && tn != null) {
+      tableMetrics.updateIncrement(tn, t);
+    }
     if (t > 1000) {
       serverSource.incrSlowIncrement();
     }
     serverSource.updateIncrement(t);
   }
 
-  public void updateAppend(long t) {
+  public void updateAppend(TableName tn, long t) {
+    if (tableMetrics != null && tn != null) {
+      tableMetrics.updateAppend(tn, t);
+    }
     if (t > 1000) {
       serverSource.incrSlowAppend();
     }
@@ -97,11 +167,17 @@ public class MetricsRegionServer {
     serverSource.updateReplay(t);
   }
 
-  public void updateScanSize(long scanSize){
+  public void updateScanSize(TableName tn, long scanSize){
+    if (tableMetrics != null && tn != null) {
+      tableMetrics.updateScanSize(tn, scanSize);
+    }
     serverSource.updateScanSize(scanSize);
   }
 
-  public void updateScanTime(long t) {
+  public void updateScanTime(TableName tn, long t) {
+    if (tableMetrics != null && tn != null) {
+      tableMetrics.updateScanTime(tn, t);
+    }
     serverSource.updateScanTime(t);
   }
 
@@ -119,7 +195,7 @@ public class MetricsRegionServer {
 
   public void updateFlush(long t, long memstoreSize, long fileSize) {
     serverSource.updateFlushTime(t);
-    serverSource.updateFlushMemstoreSize(memstoreSize);
+    serverSource.updateFlushMemStoreSize(memstoreSize);
     serverSource.updateFlushOutputSize(fileSize);
   }
 
@@ -130,5 +206,9 @@ public class MetricsRegionServer {
     serverSource.updateCompactionOutputFileCount(isMajor, outputFileCount);
     serverSource.updateCompactionInputSize(isMajor, inputBytes);
     serverSource.updateCompactionOutputSize(isMajor, outputBytes);
+  }
+
+  public void updateBulkLoad(long millis) {
+    this.bulkLoadTimer.updateMillis(millis);
   }
 }

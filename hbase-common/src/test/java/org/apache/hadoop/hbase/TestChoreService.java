@@ -33,9 +33,13 @@ import org.apache.hadoop.hbase.TestChoreService.ScheduledChoreSamples.SlowChore;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Category(SmallTests.class)
 public class TestChoreService {
+  public static final Logger log = LoggerFactory.getLogger(TestChoreService.class);
+
   /**
    * A few ScheduledChore samples that are useful for testing with ChoreService
    */
@@ -75,7 +79,7 @@ public class TestChoreService {
         try {
           Thread.sleep(getPeriod() * 2);
         } catch (InterruptedException e) {
-          e.printStackTrace();
+          log.warn("", e);
         }
         return true;
       }
@@ -85,7 +89,7 @@ public class TestChoreService {
         try {
           Thread.sleep(getPeriod() * 2);
         } catch (InterruptedException e) {
-          //e.printStackTrace();
+          log.warn("", e);
         }
       }
     }
@@ -126,7 +130,7 @@ public class TestChoreService {
         try {
           Thread.sleep(sleepTime);
         } catch (InterruptedException e) {
-          e.printStackTrace();
+          log.warn("", e);
         }
         return true;
       }
@@ -136,7 +140,7 @@ public class TestChoreService {
         try {
           Thread.sleep(sleepTime);
         } catch (Exception e) {
-          System.err.println(e.getStackTrace());
+          log.warn("", e);
         }
       }
     }
@@ -163,18 +167,22 @@ public class TestChoreService {
       @Override
       protected boolean initialChore() {
         countOfChoreCalls++;
-        if (outputOnTicks) outputTickCount();
+        if (outputOnTicks) {
+          outputTickCount();
+        }
         return true;
       }
 
       @Override
       protected void chore() {
         countOfChoreCalls++;
-        if (outputOnTicks) outputTickCount();
+        if (outputOnTicks) {
+          outputTickCount();
+        }
       }
 
       private void outputTickCount() {
-        System.out.println("Chore: " + getName() + ". Count of chore calls: " + countOfChoreCalls);
+        log.info("Chore: " + getName() + ". Count of chore calls: " + countOfChoreCalls);
       }
 
       public int getCountOfChoreCalls() {
@@ -245,16 +253,16 @@ public class TestChoreService {
       int loopCount = 0;
       boolean brokeOutOfLoop = false;
 
-     while (!chore.isInitialChoreComplete() && chore.isScheduled()) {
-       Thread.sleep(failureThreshold * period);
-       loopCount++;
-       if (loopCount > 3) {
-         brokeOutOfLoop = true;
-         break;
-       }
-    }
+      while (!chore.isInitialChoreComplete() && chore.isScheduled()) {
+        Thread.sleep(failureThreshold * period);
+        loopCount++;
+        if (loopCount > 3) {
+          brokeOutOfLoop = true;
+          break;
+        }
+      }
 
-    assertFalse(brokeOutOfLoop);
+      assertFalse(brokeOutOfLoop);
     } finally {
       shutdownService(service);
     }
@@ -293,10 +301,10 @@ public class TestChoreService {
       }
     };
 
-    assertEquals("Name construction failed", chore1.getName(), NAME);
-    assertEquals("Period construction failed", chore1.getPeriod(), PERIOD);
-    assertEquals("Initial Delay construction failed", chore1.getInitialDelay(), VALID_DELAY);
-    assertEquals("TimeUnit construction failed", chore1.getTimeUnit(), UNIT);
+    assertEquals("Name construction failed", NAME, chore1.getName());
+    assertEquals("Period construction failed", PERIOD, chore1.getPeriod());
+    assertEquals("Initial Delay construction failed", VALID_DELAY, chore1.getInitialDelay());
+    assertEquals("TimeUnit construction failed", UNIT, chore1.getTimeUnit());
 
     ScheduledChore invalidDelayChore =
         new ScheduledChore(NAME, new SampleStopper(), PERIOD, INVALID_DELAY, UNIT) {
@@ -315,7 +323,8 @@ public class TestChoreService {
     final int corePoolSize = 10;
     final int defaultCorePoolSize = ChoreService.MIN_CORE_POOL_SIZE;
 
-    ChoreService customInit = new ChoreService("testChoreServiceConstruction_custom", corePoolSize, false);
+    ChoreService customInit =
+        new ChoreService("testChoreServiceConstruction_custom", corePoolSize, false);
     try {
       assertEquals(corePoolSize, customInit.getCorePoolSize());
     } finally {
@@ -367,7 +376,7 @@ public class TestChoreService {
   @Test (timeout=20000)
   public void testForceTrigger() throws InterruptedException {
     final int period = 100;
-    final int delta = 5;
+    final int delta = 10;
     ChoreService service = new ChoreService("testForceTrigger");
     final CountingChore chore = new CountingChore("countingChore", period);
     try {
@@ -471,7 +480,7 @@ public class TestChoreService {
       Thread.sleep(chorePeriod * 10);
       assertEquals("Chores are missing their start time. Should expand core pool size",
         service.getNumberOfScheduledChores(), service.getCorePoolSize());
-      assertEquals(service.getNumberOfChoresMissingStartTime(), 5);
+      assertEquals(5, service.getNumberOfChoresMissingStartTime());
 
       // Now we begin to cancel the chores that caused an increase in the core thread pool of the
       // ChoreService. These cancellations should cause a decrease in the core thread pool.
@@ -479,31 +488,31 @@ public class TestChoreService {
       Thread.sleep(chorePeriod * 10);
       assertEquals(Math.max(ChoreService.MIN_CORE_POOL_SIZE, service.getNumberOfScheduledChores()),
         service.getCorePoolSize());
-      assertEquals(service.getNumberOfChoresMissingStartTime(), 4);
+      assertEquals(4, service.getNumberOfChoresMissingStartTime());
 
       slowChore4.cancel();
       Thread.sleep(chorePeriod * 10);
       assertEquals(Math.max(ChoreService.MIN_CORE_POOL_SIZE, service.getNumberOfScheduledChores()),
         service.getCorePoolSize());
-      assertEquals(service.getNumberOfChoresMissingStartTime(), 3);
+      assertEquals(3, service.getNumberOfChoresMissingStartTime());
 
       slowChore3.cancel();
       Thread.sleep(chorePeriod * 10);
       assertEquals(Math.max(ChoreService.MIN_CORE_POOL_SIZE, service.getNumberOfScheduledChores()),
         service.getCorePoolSize());
-      assertEquals(service.getNumberOfChoresMissingStartTime(), 2);
+      assertEquals(2, service.getNumberOfChoresMissingStartTime());
 
       slowChore2.cancel();
       Thread.sleep(chorePeriod * 10);
       assertEquals(Math.max(ChoreService.MIN_CORE_POOL_SIZE, service.getNumberOfScheduledChores()),
         service.getCorePoolSize());
-      assertEquals(service.getNumberOfChoresMissingStartTime(), 1);
+      assertEquals(1, service.getNumberOfChoresMissingStartTime());
 
       slowChore1.cancel();
       Thread.sleep(chorePeriod * 10);
       assertEquals(Math.max(ChoreService.MIN_CORE_POOL_SIZE, service.getNumberOfScheduledChores()),
         service.getCorePoolSize());
-      assertEquals(service.getNumberOfChoresMissingStartTime(), 0);
+      assertEquals(0, service.getNumberOfChoresMissingStartTime());
     } finally {
       shutdownService(service);
     }
@@ -681,35 +690,6 @@ public class TestChoreService {
     } finally {
       shutdownService(service1);
       shutdownService(service2);
-    }
-  }
-
-  @Test (timeout=20000)
-  public void testTriggerNowFailsWhenNotScheduled() throws InterruptedException {
-    final int period = 100;
-    // Small sleep time buffer to allow CountingChore to complete
-    final int sleep = 5;
-    ChoreService service = new ChoreService("testTriggerNowFailsWhenNotScheduled");
-    CountingChore chore = new CountingChore("dn", period);
-
-    try {
-      assertFalse(chore.triggerNow());
-      assertTrue(chore.getCountOfChoreCalls() == 0);
-
-      service.scheduleChore(chore);
-      Thread.sleep(sleep);
-      assertEquals(1, chore.getCountOfChoreCalls());
-      Thread.sleep(period);
-      assertEquals(2, chore.getCountOfChoreCalls());
-      assertTrue(chore.triggerNow());
-      Thread.sleep(sleep);
-      assertTrue(chore.triggerNow());
-      Thread.sleep(sleep);
-      assertTrue(chore.triggerNow());
-      Thread.sleep(sleep);
-      assertEquals(5, chore.getCountOfChoreCalls());
-    } finally {
-      shutdownService(service);
     }
   }
 

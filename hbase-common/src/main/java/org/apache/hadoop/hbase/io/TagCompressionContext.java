@@ -26,13 +26,13 @@ import java.lang.reflect.InvocationTargetException;
 import java.nio.ByteBuffer;
 
 import org.apache.hadoop.hbase.Tag;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.io.util.Dictionary;
 import org.apache.hadoop.hbase.io.util.StreamUtils;
 import org.apache.hadoop.hbase.nio.ByteBuff;
 import org.apache.hadoop.hbase.util.ByteBufferUtils;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.io.IOUtils;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * Context that holds the dictionary for Tag compression and doing the compress/uncompress. This
@@ -70,7 +70,7 @@ public class TagCompressionContext {
     while (pos < endOffset) {
       int tagLen = Bytes.readAsInt(in, pos, Tag.TAG_LENGTH_SIZE);
       pos += Tag.TAG_LENGTH_SIZE;
-      write(in, pos, tagLen, out);
+      Dictionary.write(out, in, pos, tagLen, tagDict);
       pos += tagLen;
     }
   }
@@ -94,7 +94,7 @@ public class TagCompressionContext {
       while (pos < endOffset) {
         int tagLen = ByteBufferUtils.readAsInt(in, pos, Tag.TAG_LENGTH_SIZE);
         pos += Tag.TAG_LENGTH_SIZE;
-        write(in, pos, tagLen, out);
+        Dictionary.write(out, in, pos, tagLen, tagDict);
         pos += tagLen;
       }
     }
@@ -183,34 +183,6 @@ public class TagCompressionContext {
       byte[] tagBuf = new byte[length];
       uncompressTags(src, tagBuf, 0, length);
       dest.put(tagBuf);
-    }
-  }
-
-  private void write(byte[] data, int offset, int length, OutputStream out) throws IOException {
-    short dictIdx = Dictionary.NOT_IN_DICTIONARY;
-    if (tagDict != null) {
-      dictIdx = tagDict.findEntry(data, offset, length);
-    }
-    if (dictIdx == Dictionary.NOT_IN_DICTIONARY) {
-      out.write(Dictionary.NOT_IN_DICTIONARY);
-      StreamUtils.writeRawVInt32(out, length);
-      out.write(data, offset, length);
-    } else {
-      StreamUtils.writeShort(out, dictIdx);
-    }
-  }
-
-  private void write(ByteBuffer data, int offset, int length, OutputStream out) throws IOException {
-    short dictIdx = Dictionary.NOT_IN_DICTIONARY;
-    if (tagDict != null) {
-      dictIdx = tagDict.findEntry(data, offset, length);
-    }
-    if (dictIdx == Dictionary.NOT_IN_DICTIONARY) {
-      out.write(Dictionary.NOT_IN_DICTIONARY);
-      StreamUtils.writeRawVInt32(out, length);
-      ByteBufferUtils.copyBufferToStream(out, data, offset, length);
-    } else {
-      StreamUtils.writeShort(out, dictIdx);
     }
   }
 }

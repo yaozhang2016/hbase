@@ -31,18 +31,18 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.testclassification.MiscTests;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Category({MiscTests.class, MediumTests.class})
 // Medium as it creates 100 threads; seems better to run it isolated
 public class TestIdLock {
 
-  private static final Log LOG = LogFactory.getLog(TestIdLock.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestIdLock.class);
 
   private static final int NUM_IDS = 16;
   private static final int NUM_THREADS = 128;
@@ -50,7 +50,7 @@ public class TestIdLock {
 
   private IdLock idLock = new IdLock();
 
-  private Map<Long, String> idOwner = new ConcurrentHashMap<Long, String>();
+  private Map<Long, String> idOwner = new ConcurrentHashMap<>();
 
   private class IdLockTestThread implements Callable<Boolean> {
 
@@ -95,8 +95,7 @@ public class TestIdLock {
   public void testMultipleClients() throws Exception {
     ExecutorService exec = Executors.newFixedThreadPool(NUM_THREADS);
     try {
-      ExecutorCompletionService<Boolean> ecs =
-          new ExecutorCompletionService<Boolean>(exec);
+      ExecutorCompletionService<Boolean> ecs = new ExecutorCompletionService<>(exec);
       for (int i = 0; i < NUM_THREADS; ++i)
         ecs.submit(new IdLockTestThread("client_" + i));
       for (int i = 0; i < NUM_THREADS; ++i) {

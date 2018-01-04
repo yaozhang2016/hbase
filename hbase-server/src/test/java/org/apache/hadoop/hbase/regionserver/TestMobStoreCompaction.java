@@ -20,6 +20,8 @@ package org.apache.hadoop.hbase.regionserver;
 
 import static org.apache.hadoop.hbase.HBaseTestingUtility.START_KEY;
 import static org.apache.hadoop.hbase.HBaseTestingUtility.fam1;
+import static org.apache.hadoop.hbase.regionserver.HStoreFile.BULKLOAD_TIME_KEY;
+import static org.apache.hadoop.hbase.regionserver.HStoreFile.MOB_CELLS_COUNT;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
@@ -31,18 +33,27 @@ import java.util.Map;
 import java.util.Random;
 import java.util.Set;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.hbase.*;
+import org.apache.hadoop.hbase.Cell;
+import org.apache.hadoop.hbase.CellComparatorImpl;
+import org.apache.hadoop.hbase.CellUtil;
+import org.apache.hadoop.hbase.HBaseTestingUtility;
+import org.apache.hadoop.hbase.HColumnDescriptor;
+import org.apache.hadoop.hbase.HConstants;
+import org.apache.hadoop.hbase.HTableDescriptor;
+import org.apache.hadoop.hbase.KeyValue;
+import org.apache.hadoop.hbase.client.ColumnFamilyDescriptor;
+import org.apache.hadoop.hbase.client.ColumnFamilyDescriptorBuilder;
 import org.apache.hadoop.hbase.client.Delete;
 import org.apache.hadoop.hbase.client.Durability;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.client.Table;
+import org.apache.hadoop.hbase.client.TableDescriptor;
+import org.apache.hadoop.hbase.client.TableDescriptorBuilder;
 import org.apache.hadoop.hbase.io.hfile.CacheConfig;
 import org.apache.hadoop.hbase.io.hfile.HFile;
 import org.apache.hadoop.hbase.io.hfile.HFileContext;
@@ -60,6 +71,8 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.junit.rules.TestName;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Test mob store compaction
@@ -68,7 +81,7 @@ import org.junit.rules.TestName;
 public class TestMobStoreCompaction {
   @Rule
   public TestName name = new TestName();
-  static final Log LOG = LogFactory.getLog(TestMobStoreCompaction.class.getName());
+  static final Logger LOG = LoggerFactory.getLogger(TestMobStoreCompaction.class.getName());
   private final static HBaseTestingUtility UTIL = new HBaseTestingUtility();
   private Configuration conf = null;
 
@@ -164,7 +177,7 @@ public class TestMobStoreCompaction {
     assertEquals("Before compaction: number of mob cells", compactionThreshold,
         countMobCellsInMetadata());
     // Change the threshold larger than the data size
-    region.getTableDesc().getFamily(COLUMN_FAMILY).setMobThreshold(500);
+    setMobThreshold(region, COLUMN_FAMILY, 500);
     region.initialize();
     region.compactStores();
 
@@ -173,6 +186,20 @@ public class TestMobStoreCompaction {
     assertEquals("After compaction: referenced mob file count", 0, countReferencedMobFiles());
     assertEquals("After compaction: rows", compactionThreshold, UTIL.countRows(region));
     assertEquals("After compaction: mob rows", 0, countMobRows());
+  }
+
+  private static HRegion setMobThreshold(HRegion region, byte[] cfName, long modThreshold) {
+    ColumnFamilyDescriptor cfd = ColumnFamilyDescriptorBuilder
+            .newBuilder(region.getTableDescriptor().getColumnFamily(cfName))
+            .setMobThreshold(modThreshold)
+            .build();
+    TableDescriptor td = TableDescriptorBuilder
+            .newBuilder(region.getTableDescriptor())
+            .removeColumnFamily(cfName)
+            .addColumnFamily(cfd)
+            .build();
+    region.setTableDescriptor(td);
+    return region;
   }
 
   /**
@@ -196,8 +223,8 @@ public class TestMobStoreCompaction {
 
     // The following will bulk load the above generated store files and compact, with 600(fileSize)
     // > 300(threshold)
-    boolean result = region.bulkLoadHFiles(hfiles, true, null);
-    assertTrue("Bulkload result:", result);
+    Map<byte[], List<Path>> map = region.bulkLoadHFiles(hfiles, true, null);
+    assertTrue("Bulkload result:", !map.isEmpty());
     assertEquals("Before compaction: store files", compactionThreshold, countStoreFiles());
     assertEquals("Before compaction: mob file count", 0, countMobFiles());
     assertEquals("Before compaction: rows", compactionThreshold, UTIL.countRows(region));
@@ -263,15 +290,15 @@ public class TestMobStoreCompaction {
       results.clear();
       scanner.next(results);
     }
-    // assert the delete mark is not retained after the major compaction
-    assertEquals(0, deleteCount);
+    // assert the delete mark is retained after the major compaction
+    assertEquals(1, deleteCount);
     scanner.close();
     // assert the deleted cell is not counted
     assertEquals("The cells in mob files", numHfiles - 1, countMobCellsInMobFiles(1));
   }
 
   private int countStoreFiles() throws IOException {
-    Store store = region.getStore(COLUMN_FAMILY);
+    HStore store = region.getStore(COLUMN_FAMILY);
     return store.getStorefilesCount();
   }
 
@@ -293,9 +320,10 @@ public class TestMobStoreCompaction {
     if (fs.exists(mobDirPath)) {
       FileStatus[] files = UTIL.getTestFileSystem().listStatus(mobDirPath);
       for (FileStatus file : files) {
-        StoreFile sf = new StoreFile(fs, file.getPath(), conf, cacheConfig, BloomType.NONE);
-        Map<byte[], byte[]> fileInfo = sf.createReader().loadFileInfo();
-        byte[] count = fileInfo.get(StoreFile.MOB_CELLS_COUNT);
+        HStoreFile sf = new HStoreFile(fs, file.getPath(), conf, cacheConfig, BloomType.NONE, true);
+        sf.initReader();
+        Map<byte[], byte[]> fileInfo = sf.getReader().loadFileInfo();
+        byte[] count = fileInfo.get(MOB_CELLS_COUNT);
         assertTrue(count != null);
         mobCellsCount += Bytes.toLong(count);
       }
@@ -323,7 +351,7 @@ public class TestMobStoreCompaction {
           Bytes.toBytes("colX"), now, dummyData);
       writer.append(kv);
     } finally {
-      writer.appendFileInfo(StoreFile.BULKLOAD_TIME_KEY, Bytes.toBytes(System.currentTimeMillis()));
+      writer.appendFileInfo(BULKLOAD_TIME_KEY, Bytes.toBytes(System.currentTimeMillis()));
       writer.close();
     }
   }
@@ -402,28 +430,25 @@ public class TestMobStoreCompaction {
     copyOfConf.setFloat(HConstants.HFILE_BLOCK_CACHE_SIZE_KEY, 0f);
     CacheConfig cacheConfig = new CacheConfig(copyOfConf);
     Path mobDirPath = MobUtils.getMobFamilyPath(conf, htd.getTableName(), hcd.getNameAsString());
-    List<StoreFile> sfs = new ArrayList<>();
+    List<HStoreFile> sfs = new ArrayList<>();
     int numDelfiles = 0;
     int size = 0;
     if (fs.exists(mobDirPath)) {
       for (FileStatus f : fs.listStatus(mobDirPath)) {
-        StoreFile sf = new StoreFile(fs, f.getPath(), conf, cacheConfig, BloomType.NONE);
+        HStoreFile sf = new HStoreFile(fs, f.getPath(), conf, cacheConfig, BloomType.NONE, true);
         sfs.add(sf);
         if (StoreFileInfo.isDelFile(sf.getPath())) {
           numDelfiles++;
         }
       }
 
-      List scanners = StoreFileScanner.getScannersForStoreFiles(sfs, false, true, false, false,
-          HConstants.LATEST_TIMESTAMP);
-      Scan scan = new Scan();
-      scan.setMaxVersions(hcd.getMaxVersions());
+      List<StoreFileScanner> scanners = StoreFileScanner.getScannersForStoreFiles(sfs, false, true,
+        false, false, HConstants.LATEST_TIMESTAMP);
       long timeToPurgeDeletes = Math.max(conf.getLong("hbase.hstore.time.to.purge.deletes", 0), 0);
       long ttl = HStore.determineTTLFromFamily(hcd);
       ScanInfo scanInfo = new ScanInfo(copyOfConf, hcd, ttl, timeToPurgeDeletes,
-        CellComparator.COMPARATOR);
-      StoreScanner scanner = new StoreScanner(scan, scanInfo, ScanType.COMPACT_DROP_DELETES, null,
-          scanners, 0L, HConstants.LATEST_TIMESTAMP);
+        CellComparatorImpl.COMPARATOR);
+      StoreScanner scanner = new StoreScanner(scanInfo, ScanType.COMPACT_DROP_DELETES, scanners);
       try {
         size += UTIL.countRows(scanner);
       } finally {

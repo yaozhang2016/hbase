@@ -26,8 +26,6 @@ import static org.junit.Assert.assertFalse;
 import java.io.IOException;
 import java.net.ConnectException;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.client.ClusterConnection;
 import org.apache.hadoop.hbase.client.HConnectionTestingUtility;
@@ -44,7 +42,7 @@ import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.testclassification.MiscTests;
 import org.apache.hadoop.hbase.util.Threads;
 import org.apache.hadoop.hbase.zookeeper.MetaTableLocator;
-import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher;
+import org.apache.hadoop.hbase.zookeeper.ZKWatcher;
 import org.apache.zookeeper.KeeperException;
 import org.junit.After;
 import org.junit.AfterClass;
@@ -53,20 +51,21 @@ import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.mockito.Mockito;
-
-import org.apache.hadoop.hbase.shaded.com.google.protobuf.RpcController;
-import org.apache.hadoop.hbase.shaded.com.google.protobuf.ServiceException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.apache.hbase.thirdparty.com.google.protobuf.RpcController;
+import org.apache.hbase.thirdparty.com.google.protobuf.ServiceException;
 
 /**
  * Test {@link org.apache.hadoop.hbase.zookeeper.MetaTableLocator}
  */
 @Category({MiscTests.class, MediumTests.class})
 public class TestMetaTableLocator {
-  private static final Log LOG = LogFactory.getLog(TestMetaTableLocator.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestMetaTableLocator.class);
   private static final HBaseTestingUtility UTIL = new HBaseTestingUtility();
   private static final ServerName SN =
       ServerName.valueOf("example.org", 1234, System.currentTimeMillis());
-  private ZooKeeperWatcher watcher;
+  private ZKWatcher watcher;
   private Abortable abortable;
 
   @BeforeClass public static void beforeClass() throws Exception {
@@ -91,7 +90,7 @@ public class TestMetaTableLocator {
         return false;
       }
     };
-    this.watcher = new ZooKeeperWatcher(UTIL.getConfiguration(),
+    this.watcher = new ZKWatcher(UTIL.getConfiguration(),
       this.getClass().getSimpleName(), this.abortable, true);
   }
 
@@ -250,7 +249,7 @@ public class TestMetaTableLocator {
       Mockito.mock(AdminProtos.AdminService.BlockingInterface.class);
     Mockito.when(implementation.getRegionInfo((RpcController)Mockito.any(),
       (GetRegionInfoRequest)Mockito.any())).thenThrow(connectException);
-    Mockito.when(connection.getAdmin(Mockito.any(ServerName.class))).
+    Mockito.when(connection.getAdmin(Mockito.any())).
       thenReturn(implementation);
         RpcControllerFactory controllerFactory = Mockito.mock(RpcControllerFactory.class);
         Mockito.when(controllerFactory.newController()).thenReturn(
@@ -301,12 +300,12 @@ public class TestMetaTableLocator {
    * want to pass a mocked HRS; can be null.
    * @param client A mocked ClientProtocol instance, can be null
    * @return Mock up a connection that returns a {@link Configuration} when
-   * {@link HConnection#getConfiguration()} is called, a 'location' when
-   * {@link HConnection#getRegionLocation(byte[], byte[], boolean)} is called,
+   * {@link org.apache.hadoop.hbase.client.ClusterConnection#getConfiguration()} is called, a 'location' when
+   * {@link org.apache.hadoop.hbase.client.RegionLocator#getRegionLocation(byte[], boolean)} is called,
    * and that returns the passed {@link AdminProtos.AdminService.BlockingInterface} instance when
-   * {@link HConnection#getAdmin(ServerName)} is called, returns the passed
+   * {@link org.apache.hadoop.hbase.client.ClusterConnection#getAdmin(ServerName)} is called, returns the passed
    * {@link ClientProtos.ClientService.BlockingInterface} instance when
-   * {@link HConnection#getClient(ServerName)} is called.
+   * {@link org.apache.hadoop.hbase.client.ClusterConnection#getClient(ServerName)} is called.
    * @throws IOException
    */
   private ClusterConnection mockConnection(final AdminProtos.AdminService.BlockingInterface admin,
@@ -325,12 +324,12 @@ public class TestMetaTableLocator {
       thenReturn(anyLocation);
     if (admin != null) {
       // If a call to getHRegionConnection, return this implementation.
-      Mockito.when(connection.getAdmin(Mockito.any(ServerName.class))).
+      Mockito.when(connection.getAdmin(Mockito.any())).
         thenReturn(admin);
     }
     if (client != null) {
       // If a call to getClient, return this implementation.
-      Mockito.when(connection.getClient(Mockito.any(ServerName.class))).
+      Mockito.when(connection.getClient(Mockito.any())).
         thenReturn(client);
     }
     return connection;

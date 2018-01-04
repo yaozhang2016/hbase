@@ -24,19 +24,15 @@ import static org.junit.Assert.assertTrue;
 
 import java.io.IOException;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
-import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.NamespaceDescriptor;
 import org.apache.hadoop.hbase.NamespaceExistException;
 import org.apache.hadoop.hbase.NamespaceNotFoundException;
-import org.apache.hadoop.hbase.ProcedureInfo;
 import org.apache.hadoop.hbase.constraint.ConstraintException;
+import org.apache.hadoop.hbase.procedure2.Procedure;
 import org.apache.hadoop.hbase.procedure2.ProcedureExecutor;
 import org.apache.hadoop.hbase.procedure2.ProcedureTestingUtility;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProcedureProtos.CreateNamespaceState;
 import org.apache.hadoop.hbase.testclassification.MasterTests;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.junit.After;
@@ -45,15 +41,14 @@ import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Category({MasterTests.class, MediumTests.class})
 public class TestCreateNamespaceProcedure {
-  private static final Log LOG = LogFactory.getLog(TestCreateNamespaceProcedure.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestCreateNamespaceProcedure.class);
 
   protected static final HBaseTestingUtility UTIL = new HBaseTestingUtility();
-
-  private static long nonceGroup = HConstants.NO_NONCE;
-  private static long nonce = HConstants.NO_NONCE;
 
   private static void setupConf(Configuration conf) {
     conf.setInt(MasterProcedureConstants.MASTER_PROCEDURE_THREADS, 1);
@@ -77,9 +72,6 @@ public class TestCreateNamespaceProcedure {
   @Before
   public void setup() throws Exception {
     ProcedureTestingUtility.setKillAndToggleBeforeStoreUpdate(getMasterProcedureExecutor(), false);
-    nonceGroup =
-        MasterProcedureTestingUtility.generateNonceGroup(UTIL.getHBaseCluster().getMaster());
-    nonce = MasterProcedureTestingUtility.generateNonce(UTIL.getHBaseCluster().getMaster());
   }
 
   @After
@@ -93,9 +85,7 @@ public class TestCreateNamespaceProcedure {
     final ProcedureExecutor<MasterProcedureEnv> procExec = getMasterProcedureExecutor();
 
     long procId = procExec.submitProcedure(
-      new CreateNamespaceProcedure(procExec.getEnvironment(), nsd),
-      nonceGroup,
-      nonce);
+      new CreateNamespaceProcedure(procExec.getEnvironment(), nsd));
     // Wait the completion
     ProcedureTestingUtility.waitProcedure(procExec, procId);
     ProcedureTestingUtility.assertProcNotFailed(procExec, procId);
@@ -110,25 +100,21 @@ public class TestCreateNamespaceProcedure {
     final ProcedureExecutor<MasterProcedureEnv> procExec = getMasterProcedureExecutor();
 
     long procId1 = procExec.submitProcedure(
-      new CreateNamespaceProcedure(procExec.getEnvironment(), nsd),
-      nonceGroup,
-      nonce);
+      new CreateNamespaceProcedure(procExec.getEnvironment(), nsd));
     // Wait the completion
     ProcedureTestingUtility.waitProcedure(procExec, procId1);
     ProcedureTestingUtility.assertProcNotFailed(procExec, procId1);
 
     // Create the namespace that exists
     long procId2 = procExec.submitProcedure(
-      new CreateNamespaceProcedure(procExec.getEnvironment(), nsd),
-      nonceGroup + 1,
-      nonce + 1);
+      new CreateNamespaceProcedure(procExec.getEnvironment(), nsd));
     // Wait the completion
     ProcedureTestingUtility.waitProcedure(procExec, procId2);
 
     // Second create should fail with NamespaceExistException
-    ProcedureInfo result = procExec.getResult(procId2);
+    Procedure<?> result = procExec.getResult(procId2);
     assertTrue(result.isFailed());
-    LOG.debug("Create namespace failed with exception: " + result.getExceptionFullMessage());
+    LOG.debug("Create namespace failed with exception: " + result.getException());
     assertTrue(
       ProcedureTestingUtility.getExceptionCause(result) instanceof NamespaceExistException);
   }
@@ -136,18 +122,16 @@ public class TestCreateNamespaceProcedure {
   @Test(timeout=60000)
   public void testCreateSystemNamespace() throws Exception {
     final NamespaceDescriptor nsd =
-        UTIL.getHBaseAdmin().getNamespaceDescriptor(NamespaceDescriptor.SYSTEM_NAMESPACE.getName());
+        UTIL.getAdmin().getNamespaceDescriptor(NamespaceDescriptor.SYSTEM_NAMESPACE.getName());
     final ProcedureExecutor<MasterProcedureEnv> procExec = getMasterProcedureExecutor();
 
     long procId = procExec.submitProcedure(
-      new CreateNamespaceProcedure(procExec.getEnvironment(), nsd),
-      nonceGroup,
-      nonce);
+      new CreateNamespaceProcedure(procExec.getEnvironment(), nsd));
     // Wait the completion
     ProcedureTestingUtility.waitProcedure(procExec, procId);
-    ProcedureInfo result = procExec.getResult(procId);
+    Procedure<?> result = procExec.getResult(procId);
     assertTrue(result.isFailed());
-    LOG.debug("Create namespace failed with exception: " + result.getExceptionFullMessage());
+    LOG.debug("Create namespace failed with exception: " + result.getException());
     assertTrue(
       ProcedureTestingUtility.getExceptionCause(result) instanceof NamespaceExistException);
   }
@@ -163,14 +147,12 @@ public class TestCreateNamespaceProcedure {
     nsd.setConfiguration(nsKey, nsValue);
 
     long procId = procExec.submitProcedure(
-      new CreateNamespaceProcedure(procExec.getEnvironment(), nsd),
-      nonceGroup,
-      nonce);
+      new CreateNamespaceProcedure(procExec.getEnvironment(), nsd));
     // Wait the completion
     ProcedureTestingUtility.waitProcedure(procExec, procId);
-    ProcedureInfo result = procExec.getResult(procId);
+    Procedure<?> result = procExec.getResult(procId);
     assertTrue(result.isFailed());
-    LOG.debug("Create namespace failed with exception: " + result.getExceptionFullMessage());
+    LOG.debug("Create namespace failed with exception: " + result.getException());
     assertTrue(ProcedureTestingUtility.getExceptionCause(result) instanceof ConstraintException);
   }
 
@@ -185,41 +167,13 @@ public class TestCreateNamespaceProcedure {
     nsd.setConfiguration(nsKey, nsValue);
 
     long procId = procExec.submitProcedure(
-      new CreateNamespaceProcedure(procExec.getEnvironment(), nsd),
-      nonceGroup,
-      nonce);
+      new CreateNamespaceProcedure(procExec.getEnvironment(), nsd));
     // Wait the completion
     ProcedureTestingUtility.waitProcedure(procExec, procId);
-    ProcedureInfo result = procExec.getResult(procId);
+    Procedure<?> result = procExec.getResult(procId);
     assertTrue(result.isFailed());
-    LOG.debug("Create namespace failed with exception: " + result.getExceptionFullMessage());
+    LOG.debug("Create namespace failed with exception: " + result.getException());
     assertTrue(ProcedureTestingUtility.getExceptionCause(result) instanceof ConstraintException);
-  }
-
-  @Test(timeout=60000)
-  public void testCreateSameNamespaceTwiceWithSameNonce() throws Exception {
-    final NamespaceDescriptor nsd =
-        NamespaceDescriptor.create("testCreateSameNamespaceTwiceWithSameNonce").build();
-    final ProcedureExecutor<MasterProcedureEnv> procExec = getMasterProcedureExecutor();
-
-    long procId1 = procExec.submitProcedure(
-      new CreateNamespaceProcedure(procExec.getEnvironment(), nsd),
-      nonceGroup,
-      nonce);
-    long procId2 = procExec.submitProcedure(
-      new CreateNamespaceProcedure(procExec.getEnvironment(), nsd),
-      nonceGroup,
-      nonce);
-    // Wait the completion
-    ProcedureTestingUtility.waitProcedure(procExec, procId1);
-    ProcedureTestingUtility.assertProcNotFailed(procExec, procId1);
-
-    validateNamespaceCreated(nsd);
-
-    // Wait the completion and expect not fail - because it is the same proc
-    ProcedureTestingUtility.waitProcedure(procExec, procId2);
-    ProcedureTestingUtility.assertProcNotFailed(procExec, procId2);
-    assertTrue(procId1 == procId2);
   }
 
   @Test(timeout = 60000)
@@ -233,13 +187,10 @@ public class TestCreateNamespaceProcedure {
 
     // Start the CreateNamespace procedure && kill the executor
     long procId = procExec.submitProcedure(
-      new CreateNamespaceProcedure(procExec.getEnvironment(), nsd),
-      nonceGroup,
-      nonce);
+      new CreateNamespaceProcedure(procExec.getEnvironment(), nsd));
 
     // Restart the executor and execute the step twice
-    int numberOfSteps = CreateNamespaceState.values().length;
-    MasterProcedureTestingUtility.testRecoveryAndDoubleExecution(procExec, procId, numberOfSteps);
+    MasterProcedureTestingUtility.testRecoveryAndDoubleExecution(procExec, procId);
 
     // Validate the creation of namespace
     ProcedureTestingUtility.assertProcNotFailed(procExec, procId);
@@ -257,16 +208,14 @@ public class TestCreateNamespaceProcedure {
 
     // Start the CreateNamespace procedure && kill the executor
     long procId = procExec.submitProcedure(
-      new CreateNamespaceProcedure(procExec.getEnvironment(), nsd),
-      nonceGroup,
-      nonce);
+      new CreateNamespaceProcedure(procExec.getEnvironment(), nsd));
 
     int numberOfSteps = 0; // failing at pre operation
     MasterProcedureTestingUtility.testRollbackAndDoubleExecution(procExec, procId, numberOfSteps);
 
     // Validate the non-existence of namespace
     try {
-      NamespaceDescriptor nsDescriptor = UTIL.getHBaseAdmin().getNamespaceDescriptor(nsd.getName());
+      NamespaceDescriptor nsDescriptor = UTIL.getAdmin().getNamespaceDescriptor(nsd.getName());
       assertNull(nsDescriptor);
     } catch (NamespaceNotFoundException nsnfe) {
       // Expected
@@ -280,7 +229,7 @@ public class TestCreateNamespaceProcedure {
 
   private void validateNamespaceCreated(NamespaceDescriptor nsd) throws IOException {
     NamespaceDescriptor createdNsDescriptor =
-        UTIL.getHBaseAdmin().getNamespaceDescriptor(nsd.getName());
+        UTIL.getAdmin().getNamespaceDescriptor(nsd.getName());
     assertNotNull(createdNsDescriptor);
   }
 }

@@ -10,7 +10,7 @@
  */
 package org.apache.hadoop.hbase.replication.regionserver;
 
-import com.google.common.util.concurrent.ThreadFactoryBuilder;
+import org.apache.hbase.thirdparty.com.google.common.util.concurrent.ThreadFactoryBuilder;
 
 import java.io.FileNotFoundException;
 import java.io.IOException;
@@ -31,8 +31,6 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FileUtil;
@@ -41,12 +39,14 @@ import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.TableName;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.hbase.client.Connection;
 import org.apache.hadoop.hbase.client.RegionLocator;
 import org.apache.hadoop.hbase.client.Table;
-import org.apache.hadoop.hbase.mapreduce.LoadIncrementalHFiles;
-import org.apache.hadoop.hbase.mapreduce.LoadIncrementalHFiles.LoadQueueItem;
+import org.apache.hadoop.hbase.tool.LoadIncrementalHFiles;
+import org.apache.hadoop.hbase.tool.LoadIncrementalHFiles.LoadQueueItem;
 import org.apache.hadoop.hbase.security.User;
 import org.apache.hadoop.hbase.security.UserProvider;
 import org.apache.hadoop.hbase.security.token.FsDelegationToken;
@@ -70,8 +70,8 @@ public class HFileReplicator {
       "hbase.replication.bulkload.copy.hfiles.perthread";
   public static final int REPLICATION_BULKLOAD_COPY_HFILES_PERTHREAD_DEFAULT = 10;
 
-  private static final Log LOG = LogFactory.getLog(HFileReplicator.class);
-  private final String UNDERSCORE = "_";
+  private static final Logger LOG = LoggerFactory.getLogger(HFileReplicator.class);
+  private static final String UNDERSCORE = "_";
   private final static FsPermission PERM_ALL_ACCESS = FsPermission.valueOf("-rwxrwxrwx");
 
   private Configuration sourceClusterConf;
@@ -109,7 +109,7 @@ public class HFileReplicator {
     builder.setNameFormat("HFileReplicationCallable-%1$d");
     this.exec =
         new ThreadPoolExecutor(maxCopyThreads, maxCopyThreads, 60, TimeUnit.SECONDS,
-            new LinkedBlockingQueue<Runnable>(), builder.build());
+            new LinkedBlockingQueue<>(), builder.build());
     this.exec.allowCoreThreadTimeOut(true);
     this.copiesPerThread =
         conf.getInt(REPLICATION_BULKLOAD_COPY_HFILES_PERTHREAD_KEY,
@@ -144,7 +144,7 @@ public class HFileReplicator {
       Table table = this.connection.getTable(tableName);
 
       // Prepare collection of queue of hfiles to be loaded(replicated)
-      Deque<LoadQueueItem> queue = new LinkedList<LoadQueueItem>();
+      Deque<LoadQueueItem> queue = new LinkedList<>();
       loadHFiles.prepareHFileQueue(stagingDir, table, queue, false);
 
       if (queue.isEmpty()) {
@@ -177,7 +177,7 @@ public class HFileReplicator {
       // need to reload split keys each iteration.
       startEndKeys = locator.getStartEndKeys();
       if (count != 0) {
-        LOG.warn("Error occured while replicating HFiles, retry attempt " + count + " with "
+        LOG.warn("Error occurred while replicating HFiles, retry attempt " + count + " with "
             + queue.size() + " files still remaining to replicate.");
       }
 
@@ -221,7 +221,7 @@ public class HFileReplicator {
   }
 
   private Map<String, Path> copyHFilesToStagingDir() throws IOException {
-    Map<String, Path> mapOfCopiedHFiles = new HashMap<String, Path>();
+    Map<String, Path> mapOfCopiedHFiles = new HashMap<>();
     Pair<byte[], List<String>> familyHFilePathsPair;
     List<String> hfilePaths;
     byte[] family;
@@ -270,7 +270,7 @@ public class HFileReplicator {
           totalNoOfHFiles = hfilePaths.size();
 
           // For each list of hfile paths for the family
-          List<Future<Void>> futures = new ArrayList<Future<Void>>();
+          List<Future<Void>> futures = new ArrayList<>();
           Callable<Void> c;
           Future<Void> future;
           int currentCopied = 0;
@@ -380,7 +380,7 @@ public class HFileReplicator {
           } catch (FileNotFoundException e1) {
             // This will mean that the hfile does not exists any where in source cluster FS. So we
             // cannot do anything here just log and continue.
-            LOG.error("Failed to copy hfile from " + sourceHFilePath + " to " + localHFilePath
+            LOG.debug("Failed to copy hfile from " + sourceHFilePath + " to " + localHFilePath
                 + ". Hence ignoring this hfile from replication..",
               e1);
             continue;

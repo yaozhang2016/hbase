@@ -21,9 +21,9 @@ package org.apache.hadoop.hbase.replication.regionserver;
 import java.util.HashMap;
 import java.util.Map;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.hbase.CompatibilitySingletonFactory;
 import org.apache.hadoop.hbase.HBaseInterfaceAudience;
 import org.apache.hadoop.hbase.metrics.BaseSource;
@@ -36,11 +36,10 @@ import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 @InterfaceAudience.LimitedPrivate(HBaseInterfaceAudience.REPLICATION)
 public class MetricsSource implements BaseSource {
 
-  private static final Log LOG = LogFactory.getLog(MetricsSource.class);
+  private static final Logger LOG = LoggerFactory.getLogger(MetricsSource.class);
 
   // tracks last shipped timestamp for each wal group
-  private Map<String, Long> lastTimeStamps = new HashMap<String, Long>();
-  private int lastQueueSize = 0;
+  private Map<String, Long> lastTimeStamps = new HashMap<>();
   private long lastHFileRefsQueueSize = 0;
   private String id;
 
@@ -82,7 +81,7 @@ public class MetricsSource implements BaseSource {
   public void setAgeOfLastShippedOp(long timestamp, String walGroup) {
     long age = EnvironmentEdgeManager.currentTime() - timestamp;
     singleSourceSource.setLastShippedAge(age);
-    globalSourceSource.setLastShippedAge(Math.max(age, globalSourceSource.getLastShippedAge()));
+    globalSourceSource.setLastShippedAge(age);
     this.lastTimeStamps.put(walGroup, timestamp);
   }
 
@@ -181,11 +180,12 @@ public class MetricsSource implements BaseSource {
 
   /** Removes all metrics about this Source. */
   public void clear() {
-    singleSourceSource.clear();
+    int lastQueueSize = singleSourceSource.getSizeOfLogQueue();
     globalSourceSource.decrSizeOfLogQueue(lastQueueSize);
+    singleSourceSource.decrSizeOfLogQueue(lastQueueSize);
+    singleSourceSource.clear();
     globalSourceSource.decrSizeOfHFileRefsQueue(lastHFileRefsQueueSize);
     lastTimeStamps.clear();
-    lastQueueSize = 0;
     lastHFileRefsQueueSize = 0;
   }
 

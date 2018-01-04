@@ -22,16 +22,16 @@ import java.nio.BufferOverflowException;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.util.ByteBufferUtils;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * Our own implementation of ByteArrayOutputStream where all methods are NOT synchronized and
  * supports writing ByteBuffer directly to it.
  */
 @InterfaceAudience.Private
-public class ByteArrayOutputStream extends OutputStream implements ByteBufferSupportOutputStream {
+public class ByteArrayOutputStream extends OutputStream implements ByteBufferWriter {
 
   // Borrowed from openJDK:
   // http://grepcode.com/file/repository.grepcode.com/java/root/jdk/openjdk/8-b132/java/util/ArrayList.java#221

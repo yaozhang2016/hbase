@@ -27,9 +27,8 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.Cell;
+import org.apache.hadoop.hbase.CompareOperator;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Result;
@@ -42,14 +41,16 @@ import org.apache.hadoop.hbase.util.Bytes;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Test if Filter is incompatible with scan-limits
  */
 @Category({FilterTests.class, MediumTests.class})
 public class TestFilterWithScanLimits extends FilterTestingCluster {
-  private static final Log LOG = LogFactory
-      .getLog(TestFilterWithScanLimits.class);
+  private static final Logger LOG = LoggerFactory
+      .getLogger(TestFilterWithScanLimits.class);
 
   private static final TableName tableName = TableName.valueOf("scanWithLimit");
   private static final String columnFamily = "f1";
@@ -63,7 +64,7 @@ public class TestFilterWithScanLimits extends FilterTestingCluster {
       scan.setBatch(2);
       SingleColumnValueFilter filter = new SingleColumnValueFilter(
           Bytes.toBytes(columnFamily), Bytes.toBytes("c5"),
-          CompareFilter.CompareOp.EQUAL, new SubstringComparator("2_c5"));
+      CompareOperator .EQUAL, new SubstringComparator("2_c5"));
 
       // add filter after batch defined
       scan.setFilter(filter);
@@ -96,7 +97,7 @@ public class TestFilterWithScanLimits extends FilterTestingCluster {
     try {
       createTable(tableName, columnFamily);
       Table table = openTable(tableName);
-      List<Put> puts = new ArrayList<Put>();
+      List<Put> puts = new ArrayList<>();
 
       // row1 => <f1:c1, 1_c1>, <f1:c2, 1_c2>, <f1:c3, 1_c3>, <f1:c4,1_c4>,
       // <f1:c5, 1_c5>

@@ -22,7 +22,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * This class is used to manage the identifiers for
@@ -30,8 +30,7 @@ import org.apache.hadoop.hbase.classification.InterfaceAudience;
  */
 @InterfaceAudience.Private
 public class CacheableDeserializerIdManager {
-  private static final Map<Integer, CacheableDeserializer<Cacheable>> registeredDeserializers =
-    new HashMap<Integer, CacheableDeserializer<Cacheable>>();
+  private static final Map<Integer, CacheableDeserializer<Cacheable>> registeredDeserializers = new HashMap<>();
   private static final AtomicInteger identifier = new AtomicInteger(0);
 
   /**

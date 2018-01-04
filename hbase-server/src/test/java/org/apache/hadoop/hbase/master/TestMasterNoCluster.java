@@ -26,21 +26,17 @@ import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Set;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.Abortable;
 import org.apache.hadoop.hbase.CategoryBasedTimeout;
 import org.apache.hadoop.hbase.CoordinatedStateException;
-import org.apache.hadoop.hbase.CoordinatedStateManager;
-import org.apache.hadoop.hbase.CoordinatedStateManagerFactory;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.MetaMockingUtil;
 import org.apache.hadoop.hbase.ServerLoad;
+import org.apache.hadoop.hbase.ServerMetricsBuilder;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.ZooKeeperConnectionException;
@@ -56,7 +52,7 @@ import org.apache.hadoop.hbase.util.FSUtils;
 import org.apache.hadoop.hbase.util.Threads;
 import org.apache.hadoop.hbase.zookeeper.MetaTableLocator;
 import org.apache.hadoop.hbase.zookeeper.ZKUtil;
-import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher;
+import org.apache.hadoop.hbase.zookeeper.ZKWatcher;
 import org.apache.hadoop.metrics2.lib.DefaultMetricsSystem;
 import org.apache.zookeeper.KeeperException;
 import org.junit.After;
@@ -64,9 +60,13 @@ import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Rule;
 import org.junit.Test;
+import org.junit.Ignore;
 import org.junit.experimental.categories.Category;
+import org.junit.rules.TestName;
 import org.junit.rules.TestRule;
 import org.mockito.Mockito;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Standup the master and fake it to test various aspects of master function.
@@ -78,10 +78,14 @@ import org.mockito.Mockito;
  */
 @Category({MasterTests.class, MediumTests.class})
 public class TestMasterNoCluster {
-  private static final Log LOG = LogFactory.getLog(TestMasterNoCluster.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestMasterNoCluster.class);
   private static final HBaseTestingUtility TESTUTIL = new HBaseTestingUtility();
+
   @Rule public final TestRule timeout = CategoryBasedTimeout.builder().
       withTimeout(this.getClass()).withLookingForStuckThread(true).build();
+
+  @Rule
+  public TestName name = new TestName();
 
   @BeforeClass
   public static void setUpBeforeClass() throws Exception {
@@ -102,7 +106,7 @@ public class TestMasterNoCluster {
   public void tearDown()
   throws KeeperException, ZooKeeperConnectionException, IOException {
     // Make sure zk is clean before we run the next test.
-    ZooKeeperWatcher zkw = new ZooKeeperWatcher(TESTUTIL.getConfiguration(),
+    ZKWatcher zkw = new ZKWatcher(TESTUTIL.getConfiguration(),
         "@Before", new Abortable() {
       @Override
       public void abort(String why, Throwable e) {
@@ -127,9 +131,7 @@ public class TestMasterNoCluster {
   @Test
   public void testStopDuringStart()
   throws IOException, KeeperException, InterruptedException {
-    CoordinatedStateManager cp = CoordinatedStateManagerFactory.getCoordinatedStateManager(
-      TESTUTIL.getConfiguration());
-    HMaster master = new HMaster(TESTUTIL.getConfiguration(), cp);
+    HMaster master = new HMaster(TESTUTIL.getConfiguration());
     master.start();
     // Immediately have it stop.  We used hang in assigning meta.
     master.stopMaster();
@@ -142,9 +144,9 @@ public class TestMasterNoCluster {
    * @throws IOException
    * @throws KeeperException
    * @throws InterruptedException
-   * @throws org.apache.hadoop.hbase.shaded.com.google.protobuf.ServiceException 
+   * @throws org.apache.hbase.thirdparty.com.google.protobuf.ServiceException
    */
-  @Test
+  @Ignore @Test // Disabled since HBASE-18511. Reenable when master can carry regions.
   public void testFailover() throws Exception {
     final long now = System.currentTimeMillis();
     // Names for our three servers.  Make the port numbers match hostname.
@@ -162,7 +164,7 @@ public class TestMasterNoCluster {
     // Put data into sn2 so it looks like it has a few regions for a table named 't'.
     MetaTableLocator.setMetaLocation(rs0.getZooKeeper(),
       rs0.getServerName(), RegionState.State.OPEN);
-    final TableName tableName = TableName.valueOf("t");
+    final TableName tableName = TableName.valueOf(name.getMethodName());
     Result [] results = new Result [] {
       MetaMockingUtil.getMetaTableRowResult(
         new HRegionInfo(tableName, HConstants.EMPTY_START_ROW, HBaseTestingUtility.KEYS[1]),
@@ -180,15 +182,13 @@ public class TestMasterNoCluster {
     // and get notification on transitions.  We need to fake out any rpcs the
     // master does opening/closing regions.  Also need to fake out the address
     // of the 'remote' mocked up regionservers.
-    CoordinatedStateManager cp = CoordinatedStateManagerFactory.getCoordinatedStateManager(
-      TESTUTIL.getConfiguration());
     // Insert a mock for the connection, use TESTUTIL.getConfiguration rather than
     // the conf from the master; the conf will already have an ClusterConnection
     // associate so the below mocking of a connection will fail.
     final ClusterConnection mockedConnection = HConnectionTestingUtility.getMockedConnectionAndDecorate(
         TESTUTIL.getConfiguration(), rs0, rs0, rs0.getServerName(),
         HRegionInfo.FIRST_META_REGIONINFO);
-    HMaster master = new HMaster(conf, cp) {
+    HMaster master = new HMaster(conf) {
       InetAddress getRemoteInetAddress(final int port, final long serverStartCode)
       throws UnknownHostException {
         // Return different address dependent on port passed.
@@ -208,10 +208,6 @@ public class TestMasterNoCluster {
         ServerManager sm = super.createServerManager(master);
         // Spy on the created servermanager
         ServerManager spy = Mockito.spy(sm);
-        // Fake a successful close.
-        Mockito.doReturn(true).when(spy).
-          sendRegionClose((ServerName)Mockito.any(), (HRegionInfo)Mockito.any(),
-            (ServerName)Mockito.any());
         return spy;
       }
 
@@ -235,7 +231,7 @@ public class TestMasterNoCluster {
         RegionServerReportRequest.Builder request = RegionServerReportRequest.newBuilder();;
         ServerName sn = ServerName.parseVersionedServerName(sns[i].getVersionedBytes());
         request.setServer(ProtobufUtil.toServerName(sn));
-        request.setLoad(ServerLoad.EMPTY_SERVERLOAD.obtainServerLoadPB());
+        request.setLoad(ServerMetricsBuilder.toServerLoad(ServerMetricsBuilder.of(sn)));
         master.getMasterRpcServices().regionServerReport(null, request.build());
       }
        // Master should now come up.
@@ -252,7 +248,7 @@ public class TestMasterNoCluster {
     }
   }
 
-  @Test
+  @Ignore @Test // Disabled since HBASE-18511. Reenable when master can carry regions.
   public void testNotPullingDeadRegionServerFromZK()
       throws IOException, KeeperException, InterruptedException {
     final Configuration conf = TESTUTIL.getConfiguration();
@@ -260,14 +256,12 @@ public class TestMasterNoCluster {
     final ServerName deadServer = ServerName.valueOf("test.sample", 1, 100);
     final MockRegionServer rs0 = new MockRegionServer(conf, newServer);
 
-    CoordinatedStateManager cp = CoordinatedStateManagerFactory.getCoordinatedStateManager(
-      TESTUTIL.getConfiguration());
-    HMaster master = new HMaster(conf, cp) {
+    HMaster master = new HMaster(conf) {
       @Override
       MasterMetaBootstrap createMetaBootstrap(final HMaster master, final MonitoredTask status) {
         return new MasterMetaBootstrap(this, status) {
           @Override
-          protected void assignMeta(Set<ServerName> previouslyFailedMeatRSs, int replicaId) { }
+          protected void assignMeta(int replicaId) { }
         };
       }
 
@@ -275,13 +269,14 @@ public class TestMasterNoCluster {
       void initClusterSchemaService() throws IOException, InterruptedException {}
 
       @Override
-      void initializeZKBasedSystemTrackers() throws IOException,
-      InterruptedException, KeeperException, CoordinatedStateException {
+      void initializeZKBasedSystemTrackers() throws IOException, InterruptedException,
+          KeeperException, CoordinatedStateException {
         super.initializeZKBasedSystemTrackers();
         // Record a newer server in server manager at first
-        getServerManager().recordNewServerWithLock(newServer, ServerLoad.EMPTY_SERVERLOAD);
+        getServerManager().recordNewServerWithLock(newServer,
+          new ServerLoad(ServerMetricsBuilder.of(newServer)));
 
-        List<ServerName> onlineServers = new ArrayList<ServerName>();
+        List<ServerName> onlineServers = new ArrayList<>();
         onlineServers.add(deadServer);
         onlineServers.add(newServer);
         // Mock the region server tracker to pull the dead server from zk

@@ -19,8 +19,7 @@ package org.apache.hadoop.hbase.ipc;
 
 import java.io.IOException;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * Exception indicating that the remote host making this IPC lost its
@@ -28,7 +27,6 @@ import org.apache.hadoop.hbase.classification.InterfaceStability;
  * but is only used for logging on the server side, etc.
  */
 @InterfaceAudience.Public
-@InterfaceStability.Evolving
 public class CallerDisconnectedException extends IOException {
   private static final long serialVersionUID = 1L;
   public CallerDisconnectedException(String msg) {

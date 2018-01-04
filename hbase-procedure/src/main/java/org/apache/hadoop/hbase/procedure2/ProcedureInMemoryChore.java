@@ -18,15 +18,13 @@
 
 package org.apache.hadoop.hbase.procedure2;
 
-import java.io.InputStream;
-import java.io.OutputStream;
-
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import java.io.IOException;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceStability;
 
 /**
  * Special procedure used as a chore.
- * instead of bringing the Chore class in (dependencies reason),
+ * Instead of bringing the Chore class in (dependencies reason),
  * we reuse the executor timeout thread for this special case.
  *
  * The assumption is that procedure is used as hook to dispatch other procedures
@@ -43,7 +41,7 @@ public abstract class ProcedureInMemoryChore<TEnvironment> extends Procedure<TEn
   protected abstract void periodicExecute(final TEnvironment env);
 
   @Override
-  protected Procedure[] execute(final TEnvironment env) {
+  protected Procedure<TEnvironment>[] execute(final TEnvironment env) {
     throw new UnsupportedOperationException();
   }
 
@@ -58,12 +56,12 @@ public abstract class ProcedureInMemoryChore<TEnvironment> extends Procedure<TEn
   }
 
   @Override
-  public void serializeStateData(final OutputStream stream) {
-    throw new UnsupportedOperationException();
+  protected void serializeStateData(ProcedureStateSerializer serializer)
+      throws IOException {
   }
 
   @Override
-  public void deserializeStateData(final InputStream stream) {
-    throw new UnsupportedOperationException();
+  protected void deserializeStateData(ProcedureStateSerializer serializer)
+      throws IOException {
   }
 }

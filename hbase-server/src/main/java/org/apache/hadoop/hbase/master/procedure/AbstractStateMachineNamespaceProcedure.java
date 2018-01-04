@@ -19,7 +19,7 @@
 package org.apache.hadoop.hbase.master.procedure;
 
 import org.apache.hadoop.hbase.TableName;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.hbase.procedure2.StateMachineProcedure;
 
 /**
@@ -36,7 +36,7 @@ public abstract class AbstractStateMachineNamespaceProcedure<TState>
   }
 
   protected AbstractStateMachineNamespaceProcedure(final MasterProcedureEnv env) {
-    this.setOwner(env.getRequestUser().getShortName());
+    this.setOwner(env.getRequestUser());
   }
 
   protected abstract String getNamespaceName();
@@ -52,19 +52,21 @@ public abstract class AbstractStateMachineNamespaceProcedure<TState>
   @Override
   public void toStringClassDetails(final StringBuilder sb) {
     sb.append(getClass().getSimpleName());
-    sb.append(" (namespace=");
+    sb.append(", namespace=");
     sb.append(getNamespaceName());
-    sb.append(")");
   }
 
   @Override
-  protected boolean acquireLock(final MasterProcedureEnv env) {
-    if (env.waitInitialized(this)) return false;
-    return env.getProcedureQueue().tryAcquireNamespaceExclusiveLock(this, getNamespaceName());
+  protected LockState acquireLock(final MasterProcedureEnv env) {
+    if (env.waitInitialized(this)) return LockState.LOCK_EVENT_WAIT;
+    if (env.getProcedureScheduler().waitNamespaceExclusiveLock(this, getNamespaceName())) {
+      return LockState.LOCK_EVENT_WAIT;
+    }
+    return LockState.LOCK_ACQUIRED;
   }
 
   @Override
   protected void releaseLock(final MasterProcedureEnv env) {
-    env.getProcedureQueue().releaseNamespaceExclusiveLock(this, getNamespaceName());
+    env.getProcedureScheduler().wakeNamespaceExclusiveLock(this, getNamespaceName());
   }
 }

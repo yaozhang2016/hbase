@@ -17,14 +17,12 @@
  */
 package org.apache.hadoop.hbase.util;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  *  A read only version of the {@link ByteRange}.
  */
 @InterfaceAudience.Public
-@InterfaceStability.Evolving
 public class SimpleByteRange extends AbstractByteRange {
   public SimpleByteRange() {
   }

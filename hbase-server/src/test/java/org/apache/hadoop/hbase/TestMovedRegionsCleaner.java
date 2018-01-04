@@ -19,8 +19,6 @@
 package org.apache.hadoop.hbase;
 
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.testclassification.MiscTests;
@@ -28,6 +26,8 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 
@@ -37,16 +37,15 @@ import java.io.IOException;
  */
 @Category({ MiscTests.class, MediumTests.class }) public class TestMovedRegionsCleaner {
 
-  private static final Log LOG = LogFactory.getLog(TestRegionRebalancing.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestRegionRebalancing.class);
   private final HBaseTestingUtility UTIL = new HBaseTestingUtility();
 
   public static int numCalls = 0;
 
   private static class TestMockRegionServer extends MiniHBaseCluster.MiniHBaseClusterRegionServer {
 
-    public TestMockRegionServer(Configuration conf, CoordinatedStateManager cp)
-        throws IOException, InterruptedException {
-      super(conf, cp);
+    public TestMockRegionServer(Configuration conf) throws IOException, InterruptedException {
+      super(conf);
     }
 
     protected int movedRegionCleanerPeriod() {

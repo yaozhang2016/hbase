@@ -19,16 +19,19 @@ package org.apache.hadoop.hbase.spark;
 import java.io.File;
 import java.io.IOException;
 import java.io.Serializable;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
 
-import java.util.*;
-
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
+import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.client.Admin;
 import org.apache.hadoop.hbase.client.Connection;
 import org.apache.hadoop.hbase.client.ConnectionFactory;
 import org.apache.hadoop.hbase.client.Delete;
@@ -41,36 +44,48 @@ import org.apache.hadoop.hbase.io.ImmutableBytesWritable;
 import org.apache.hadoop.hbase.spark.example.hbasecontext.JavaHBaseBulkDeleteExample;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.testclassification.MiscTests;
+import org.apache.hadoop.hbase.tool.LoadIncrementalHFiles;
 import org.apache.hadoop.hbase.util.Bytes;
-import org.apache.spark.api.java.*;
+import org.apache.hadoop.hbase.util.Pair;
+import org.apache.spark.api.java.JavaRDD;
+import org.apache.spark.api.java.JavaSparkContext;
 import org.apache.spark.api.java.function.Function;
-import org.junit.*;
+
+import org.junit.After;
+import org.junit.Assert;
+import org.junit.Before;
+import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import scala.Tuple2;
 
-import com.google.common.io.Files;
+import org.apache.hbase.thirdparty.com.google.common.io.Files;
 
 @Category({MiscTests.class, MediumTests.class})
 public class TestJavaHBaseContext implements Serializable {
   private transient JavaSparkContext jsc;
   HBaseTestingUtility htu;
-  protected static final Log LOG = LogFactory.getLog(TestJavaHBaseContext.class);
+  protected static final Logger LOG = LoggerFactory.getLogger(TestJavaHBaseContext.class);
+
 
 
   byte[] tableName = Bytes.toBytes("t1");
   byte[] columnFamily = Bytes.toBytes("c");
+  byte[] columnFamily1 = Bytes.toBytes("d");
   String columnFamilyStr = Bytes.toString(columnFamily);
+  String columnFamilyStr1 = Bytes.toString(columnFamily1);
+
 
   @Before
   public void setUp() {
     jsc = new JavaSparkContext("local", "JavaHBaseContextSuite");
-    jsc.addJar("spark.jar");
 
     File tempDir = Files.createTempDir();
     tempDir.deleteOnExit();
 
-    htu = HBaseTestingUtility.createLocalHTU();
+    htu = new HBaseTestingUtility();
     try {
       LOG.info("cleaning up test dir");
 
@@ -91,7 +106,7 @@ public class TestJavaHBaseContext implements Serializable {
 
       LOG.info(" - creating table " + Bytes.toString(tableName));
       htu.createTable(TableName.valueOf(tableName),
-              columnFamily);
+          new byte[][]{columnFamily, columnFamily1});
       LOG.info(" - created table");
     } catch (Exception e1) {
       throw new RuntimeException(e1);
@@ -117,7 +132,7 @@ public class TestJavaHBaseContext implements Serializable {
   @Test
   public void testBulkPut() throws IOException {
 
-    List<String> list = new ArrayList<>();
+    List<String> list = new ArrayList<>(5);
     list.add("1," + columnFamilyStr + ",a,1");
     list.add("2," + columnFamilyStr + ",a,2");
     list.add("3," + columnFamilyStr + ",a,3");
@@ -134,7 +149,7 @@ public class TestJavaHBaseContext implements Serializable {
     Table table = conn.getTable(TableName.valueOf(tableName));
 
     try {
-      List<Delete> deletes = new ArrayList<>();
+      List<Delete> deletes = new ArrayList<>(5);
       for (int i = 1; i < 6; i++) {
         deletes.add(new Delete(Bytes.toBytes(Integer.toString(i))));
       }
@@ -174,6 +189,7 @@ public class TestJavaHBaseContext implements Serializable {
 
     private static final long serialVersionUID = 1L;
 
+    @Override
     public Put call(String v) throws Exception {
       String[] cells = v.split(",");
       Put put = new Put(Bytes.toBytes(cells[0]));
@@ -186,7 +202,7 @@ public class TestJavaHBaseContext implements Serializable {
 
   @Test
   public void testBulkDelete() throws IOException {
-    List<byte[]> list = new ArrayList<>();
+    List<byte[]> list = new ArrayList<>(3);
     list.add(Bytes.toBytes("1"));
     list.add(Bytes.toBytes("2"));
     list.add(Bytes.toBytes("3"));
@@ -255,7 +271,7 @@ public class TestJavaHBaseContext implements Serializable {
 
   @Test
   public void testBulkGet() throws IOException {
-    List<byte[]> list = new ArrayList<>();
+    List<byte[]> list = new ArrayList<>(5);
     list.add(Bytes.toBytes("1"));
     list.add(Bytes.toBytes("2"));
     list.add(Bytes.toBytes("3"));
@@ -278,10 +294,188 @@ public class TestJavaHBaseContext implements Serializable {
     Assert.assertEquals(stringJavaRDD.count(), 5);
   }
 
+  @Test
+  public void testBulkLoad() throws Exception {
+
+    Path output = htu.getDataTestDir("testBulkLoad");
+    // Add cell as String: "row,falmily,qualifier,value"
+    List<String> list= new ArrayList<String>();
+    // row1
+    list.add("1," + columnFamilyStr + ",b,1");
+    // row3
+    list.add("3," + columnFamilyStr + ",a,2");
+    list.add("3," + columnFamilyStr + ",b,1");
+    list.add("3," + columnFamilyStr1 + ",a,1");
+    //row2
+    list.add("2," + columnFamilyStr + ",a,3");
+    list.add("2," + columnFamilyStr + ",b,3");
+
+    JavaRDD<String> rdd = jsc.parallelize(list);
+
+    Configuration conf = htu.getConfiguration();
+    JavaHBaseContext hbaseContext = new JavaHBaseContext(jsc, conf);
+
+
+
+    hbaseContext.bulkLoad(rdd, TableName.valueOf(tableName), new BulkLoadFunction(),
+            output.toUri().getPath(), new HashMap<byte[], FamilyHFileWriteOptions>(), false,
+            HConstants.DEFAULT_MAX_FILE_SIZE);
+
+    try (Connection conn = ConnectionFactory.createConnection(conf);
+         Admin admin = conn.getAdmin()) {
+      Table table = conn.getTable(TableName.valueOf(tableName));
+      // Do bulk load
+      LoadIncrementalHFiles load = new LoadIncrementalHFiles(conf);
+      load.doBulkLoad(output, admin, table, conn.getRegionLocator(TableName.valueOf(tableName)));
+
+
+
+      // Check row1
+      List<Cell> cell1 = table.get(new Get(Bytes.toBytes("1"))).listCells();
+      Assert.assertEquals(cell1.size(), 1);
+      Assert.assertEquals(Bytes.toString(CellUtil.cloneFamily(cell1.get(0))), columnFamilyStr);
+      Assert.assertEquals(Bytes.toString(CellUtil.cloneQualifier(cell1.get(0))), "b");
+      Assert.assertEquals(Bytes.toString(CellUtil.cloneValue(cell1.get(0))), "1");
+
+      // Check row3
+      List<Cell> cell3 = table.get(new Get(Bytes.toBytes("3"))).listCells();
+      Assert.assertEquals(cell3.size(), 3);
+      Assert.assertEquals(Bytes.toString(CellUtil.cloneFamily(cell3.get(0))), columnFamilyStr);
+      Assert.assertEquals(Bytes.toString(CellUtil.cloneQualifier(cell3.get(0))), "a");
+      Assert.assertEquals(Bytes.toString(CellUtil.cloneValue(cell3.get(0))), "2");
+      Assert.assertEquals(Bytes.toString(CellUtil.cloneFamily(cell3.get(1))), columnFamilyStr);
+      Assert.assertEquals(Bytes.toString(CellUtil.cloneQualifier(cell3.get(1))), "b");
+      Assert.assertEquals(Bytes.toString(CellUtil.cloneValue(cell3.get(1))), "1");
+      Assert.assertEquals(Bytes.toString(CellUtil.cloneFamily(cell3.get(2))), columnFamilyStr1);
+      Assert.assertEquals(Bytes.toString(CellUtil.cloneQualifier(cell3.get(2))), "a");
+      Assert.assertEquals(Bytes.toString(CellUtil.cloneValue(cell3.get(2))), "1");
+
+      // Check row2
+      List<Cell> cell2 = table.get(new Get(Bytes.toBytes("2"))).listCells();
+      Assert.assertEquals(cell2.size(), 2);
+      Assert.assertEquals(Bytes.toString(CellUtil.cloneFamily(cell2.get(0))), columnFamilyStr);
+      Assert.assertEquals(Bytes.toString(CellUtil.cloneQualifier(cell2.get(0))), "a");
+      Assert.assertEquals(Bytes.toString(CellUtil.cloneValue(cell2.get(0))), "3");
+      Assert.assertEquals(Bytes.toString(CellUtil.cloneFamily(cell2.get(1))), columnFamilyStr);
+      Assert.assertEquals(Bytes.toString(CellUtil.cloneQualifier(cell2.get(1))), "b");
+      Assert.assertEquals(Bytes.toString(CellUtil.cloneValue(cell2.get(1))), "3");
+    }
+  }
+
+  @Test
+  public void testBulkLoadThinRows() throws Exception {
+    Path output = htu.getDataTestDir("testBulkLoadThinRows");
+    // because of the limitation of scala bulkLoadThinRows API
+    // we need to provide data as <row, all cells in that row>
+    List<List<String>> list= new ArrayList<List<String>>();
+    // row1
+    List<String> list1 = new ArrayList<String>();
+    list1.add("1," + columnFamilyStr + ",b,1");
+    list.add(list1);
+    // row3
+    List<String> list3 = new ArrayList<String>();
+    list3.add("3," + columnFamilyStr + ",a,2");
+    list3.add("3," + columnFamilyStr + ",b,1");
+    list3.add("3," + columnFamilyStr1 + ",a,1");
+    list.add(list3);
+    //row2
+    List<String> list2 = new ArrayList<String>();
+    list2.add("2," + columnFamilyStr + ",a,3");
+    list2.add("2," + columnFamilyStr + ",b,3");
+    list.add(list2);
+
+    JavaRDD<List<String>> rdd = jsc.parallelize(list);
+
+    Configuration conf = htu.getConfiguration();
+    JavaHBaseContext hbaseContext = new JavaHBaseContext(jsc, conf);
+
+    hbaseContext.bulkLoadThinRows(rdd, TableName.valueOf(tableName), new BulkLoadThinRowsFunction(),
+            output.toString(), new HashMap<byte[], FamilyHFileWriteOptions>(), false,
+            HConstants.DEFAULT_MAX_FILE_SIZE);
+
+
+    try (Connection conn = ConnectionFactory.createConnection(conf);
+         Admin admin = conn.getAdmin()) {
+      Table table = conn.getTable(TableName.valueOf(tableName));
+      // Do bulk load
+      LoadIncrementalHFiles load = new LoadIncrementalHFiles(conf);
+      load.doBulkLoad(output, admin, table, conn.getRegionLocator(TableName.valueOf(tableName)));
+
+      // Check row1
+      List<Cell> cell1 = table.get(new Get(Bytes.toBytes("1"))).listCells();
+      Assert.assertEquals(cell1.size(), 1);
+      Assert.assertEquals(Bytes.toString(CellUtil.cloneFamily(cell1.get(0))), columnFamilyStr);
+      Assert.assertEquals(Bytes.toString(CellUtil.cloneQualifier(cell1.get(0))), "b");
+      Assert.assertEquals(Bytes.toString(CellUtil.cloneValue(cell1.get(0))), "1");
+
+      // Check row3
+      List<Cell> cell3 = table.get(new Get(Bytes.toBytes("3"))).listCells();
+      Assert.assertEquals(cell3.size(), 3);
+      Assert.assertEquals(Bytes.toString(CellUtil.cloneFamily(cell3.get(0))), columnFamilyStr);
+      Assert.assertEquals(Bytes.toString(CellUtil.cloneQualifier(cell3.get(0))), "a");
+      Assert.assertEquals(Bytes.toString(CellUtil.cloneValue(cell3.get(0))), "2");
+      Assert.assertEquals(Bytes.toString(CellUtil.cloneFamily(cell3.get(1))), columnFamilyStr);
+      Assert.assertEquals(Bytes.toString(CellUtil.cloneQualifier(cell3.get(1))), "b");
+      Assert.assertEquals(Bytes.toString(CellUtil.cloneValue(cell3.get(1))), "1");
+      Assert.assertEquals(Bytes.toString(CellUtil.cloneFamily(cell3.get(2))), columnFamilyStr1);
+      Assert.assertEquals(Bytes.toString(CellUtil.cloneQualifier(cell3.get(2))), "a");
+      Assert.assertEquals(Bytes.toString(CellUtil.cloneValue(cell3.get(2))), "1");
+
+      // Check row2
+      List<Cell> cell2 = table.get(new Get(Bytes.toBytes("2"))).listCells();
+      Assert.assertEquals(cell2.size(), 2);
+      Assert.assertEquals(Bytes.toString(CellUtil.cloneFamily(cell2.get(0))), columnFamilyStr);
+      Assert.assertEquals(Bytes.toString(CellUtil.cloneQualifier(cell2.get(0))), "a");
+      Assert.assertEquals(Bytes.toString(CellUtil.cloneValue(cell2.get(0))), "3");
+      Assert.assertEquals(Bytes.toString(CellUtil.cloneFamily(cell2.get(1))), columnFamilyStr);
+      Assert.assertEquals(Bytes.toString(CellUtil.cloneQualifier(cell2.get(1))), "b");
+      Assert.assertEquals(Bytes.toString(CellUtil.cloneValue(cell2.get(1))), "3");
+    }
+
+  }
+  public static class BulkLoadFunction
+          implements Function<String, Pair<KeyFamilyQualifier, byte[]>> {
+    @Override public Pair<KeyFamilyQualifier, byte[]> call(String v1) throws Exception {
+      if (v1 == null) {
+        return null;
+      }
+
+      String[] strs = v1.split(",");
+      if(strs.length != 4) {
+        return null;
+      }
+
+      KeyFamilyQualifier kfq = new KeyFamilyQualifier(Bytes.toBytes(strs[0]),
+              Bytes.toBytes(strs[1]), Bytes.toBytes(strs[2]));
+      return new Pair(kfq, Bytes.toBytes(strs[3]));
+    }
+  }
+
+  public static class BulkLoadThinRowsFunction
+          implements Function<List<String>, Pair<ByteArrayWrapper, FamiliesQualifiersValues>> {
+    @Override public Pair<ByteArrayWrapper, FamiliesQualifiersValues> call(List<String> list) {
+      if (list == null) {
+        return null;
+      }
+
+      ByteArrayWrapper rowKey = null;
+      FamiliesQualifiersValues fqv = new FamiliesQualifiersValues();
+      for (String cell : list) {
+        String[] strs = cell.split(",");
+        if (rowKey == null) {
+          rowKey = new ByteArrayWrapper(Bytes.toBytes(strs[0]));
+        }
+        fqv.add(Bytes.toBytes(strs[1]), Bytes.toBytes(strs[2]), Bytes.toBytes(strs[3]));
+      }
+      return new Pair(rowKey, fqv);
+    }
+  }
+
   public static class GetFunction implements Function<byte[], Get> {
 
     private static final long serialVersionUID = 1L;
 
+    @Override
     public Get call(byte[] v) throws Exception {
       return new Get(v);
     }
@@ -291,6 +485,7 @@ public class TestJavaHBaseContext implements Serializable {
 
     private static final long serialVersionUID = 1L;
 
+    @Override
     public String call(Result result) throws Exception {
       Iterator<Cell> it = result.listCells().iterator();
       StringBuilder b = new StringBuilder();
@@ -324,7 +519,7 @@ public class TestJavaHBaseContext implements Serializable {
       Connection conn = ConnectionFactory.createConnection(conf);
       Table table = conn.getTable(tableName)) {
 
-      List<Put> puts = new ArrayList<>();
+      List<Put> puts = new ArrayList<>(5);
 
       for (int i = 1; i < 6; i++) {
         Put put = new Put(Bytes.toBytes(Integer.toString(i)));

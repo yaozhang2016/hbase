@@ -25,17 +25,14 @@ import java.util.Set;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.locks.ReentrantLock;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.hbase.TableName;
-import org.apache.hadoop.hbase.HRegionInfo;
-import org.apache.hadoop.hbase.HTableDescriptor;
-import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.MetaTableAccessor;
+import org.apache.hadoop.hbase.ServerName;
+import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.client.RegionInfo;
+import org.apache.hadoop.hbase.client.TableDescriptor;
 import org.apache.hadoop.hbase.errorhandling.ForeignException;
 import org.apache.hadoop.hbase.errorhandling.ForeignExceptionDispatcher;
 import org.apache.hadoop.hbase.errorhandling.ForeignExceptionSnare;
@@ -44,11 +41,10 @@ import org.apache.hadoop.hbase.executor.EventType;
 import org.apache.hadoop.hbase.master.MasterServices;
 import org.apache.hadoop.hbase.master.MetricsSnapshot;
 import org.apache.hadoop.hbase.master.SnapshotSentinel;
-import org.apache.hadoop.hbase.master.TableLockManager;
-import org.apache.hadoop.hbase.master.TableLockManager.TableLock;
+import org.apache.hadoop.hbase.master.locking.LockManager;
 import org.apache.hadoop.hbase.monitoring.MonitoredTask;
 import org.apache.hadoop.hbase.monitoring.TaskMonitor;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos.SnapshotDescription;
+import org.apache.hadoop.hbase.procedure2.LockType;
 import org.apache.hadoop.hbase.snapshot.ClientSnapshotDescriptionUtils;
 import org.apache.hadoop.hbase.snapshot.SnapshotCreationException;
 import org.apache.hadoop.hbase.snapshot.SnapshotDescriptionUtils;
@@ -56,7 +52,11 @@ import org.apache.hadoop.hbase.snapshot.SnapshotManifest;
 import org.apache.hadoop.hbase.util.FSUtils;
 import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.hbase.zookeeper.MetaTableLocator;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.zookeeper.KeeperException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.SnapshotProtos.SnapshotDescription;
 
 /**
  * A handler for taking snapshots from the master.
@@ -68,7 +68,7 @@ import org.apache.zookeeper.KeeperException;
 @InterfaceAudience.Private
 public abstract class TakeSnapshotHandler extends EventHandler implements SnapshotSentinel,
     ForeignExceptionSnare {
-  private static final Log LOG = LogFactory.getLog(TakeSnapshotHandler.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TakeSnapshotHandler.class);
 
   private volatile boolean finished;
 
@@ -83,14 +83,13 @@ public abstract class TakeSnapshotHandler extends EventHandler implements Snapsh
   protected final Path workingDir;
   private final MasterSnapshotVerifier verifier;
   protected final ForeignExceptionDispatcher monitor;
-  protected final TableLockManager tableLockManager;
-  protected final TableLock tableLock;
+  protected final LockManager.MasterLock tableLock;
   protected final MonitoredTask status;
   protected final TableName snapshotTable;
   protected final SnapshotManifest snapshotManifest;
   protected final SnapshotManager snapshotManager;
 
-  protected HTableDescriptor htd;
+  protected TableDescriptor htd;
 
   /**
    * @param snapshot descriptor of the snapshot to take
@@ -114,10 +113,9 @@ public abstract class TakeSnapshotHandler extends EventHandler implements Snapsh
     this.monitor = new ForeignExceptionDispatcher(snapshot.getName());
     this.snapshotManifest = SnapshotManifest.create(conf, fs, workingDir, snapshot, monitor);
 
-    this.tableLockManager = master.getTableLockManager();
-    this.tableLock = this.tableLockManager.writeLock(
-        snapshotTable,
-        EventType.C_M_SNAPSHOT_TABLE.toString());
+    this.tableLock = master.getLockManager().createMasterLock(
+        snapshotTable, LockType.EXCLUSIVE,
+        this.getClass().getName() + ": take snapshot " + snapshot.getName());
 
     // prepare the verify
     this.verifier = new MasterSnapshotVerifier(masterServices, snapshot, rootDir);
@@ -126,30 +124,27 @@ public abstract class TakeSnapshotHandler extends EventHandler implements Snapsh
       "Taking " + snapshot.getType() + " snapshot on table: " + snapshotTable);
   }
 
-  private HTableDescriptor loadTableDescriptor()
+  private TableDescriptor loadTableDescriptor()
       throws FileNotFoundException, IOException {
-    HTableDescriptor htd =
+    TableDescriptor htd =
       this.master.getTableDescriptors().get(snapshotTable);
     if (htd == null) {
-      throw new IOException("HTableDescriptor missing for " + snapshotTable);
+      throw new IOException("TableDescriptor missing for " + snapshotTable);
     }
     return htd;
   }
 
+  @Override
   public TakeSnapshotHandler prepare() throws Exception {
     super.prepare();
-    this.tableLock.acquire(); // after this, you should ensure to release this lock in
-                              // case of exceptions
-    boolean success = false;
+    // after this, you should ensure to release this lock in case of exceptions
+    this.tableLock.acquire();
     try {
       this.htd = loadTableDescriptor(); // check that .tableinfo is present
-      success = true;
-    } finally {
-      if (!success) {
-        releaseTableLock();
-      }
+    } catch (Exception e) {
+      this.tableLock.release();
+      throw e;
     }
-
     return this;
   }
 
@@ -175,7 +170,7 @@ public abstract class TakeSnapshotHandler extends EventHandler implements Snapsh
       snapshotManifest.addTableDescriptor(this.htd);
       monitor.rethrowException();
 
-      List<Pair<HRegionInfo, ServerName>> regionsAndLocations;
+      List<Pair<RegionInfo, ServerName>> regionsAndLocations;
       if (TableName.META_TABLE_NAME.equals(snapshotTable)) {
         regionsAndLocations = new MetaTableLocator().getMetaRegionsAndLocations(
           server.getZooKeeper());
@@ -189,10 +184,10 @@ public abstract class TakeSnapshotHandler extends EventHandler implements Snapsh
       monitor.rethrowException();
 
       // extract each pair to separate lists
-      Set<String> serverNames = new HashSet<String>();
-      for (Pair<HRegionInfo, ServerName> p : regionsAndLocations) {
+      Set<String> serverNames = new HashSet<>();
+      for (Pair<RegionInfo, ServerName> p : regionsAndLocations) {
         if (p != null && p.getFirst() != null && p.getSecond() != null) {
-          HRegionInfo hri = p.getFirst();
+          RegionInfo hri = p.getFirst();
           if (hri.isOffline() && (hri.isSplit() || hri.isSplitParent())) continue;
           serverNames.add(p.getSecond().toString());
         }
@@ -234,17 +229,7 @@ public abstract class TakeSnapshotHandler extends EventHandler implements Snapsh
         LOG.error("Couldn't delete snapshot working directory:" + workingDir);
       }
       lock.unlock();
-      releaseTableLock();
-    }
-  }
-
-  protected void releaseTableLock() {
-    if (this.tableLock != null) {
-      try {
-        this.tableLock.release();
-      } catch (IOException ex) {
-        LOG.warn("Could not release the table lock", ex);
-      }
+      tableLock.release();
     }
   }
 
@@ -271,13 +256,13 @@ public abstract class TakeSnapshotHandler extends EventHandler implements Snapsh
   /**
    * Snapshot the specified regions
    */
-  protected abstract void snapshotRegions(List<Pair<HRegionInfo, ServerName>> regions)
+  protected abstract void snapshotRegions(List<Pair<RegionInfo, ServerName>> regions)
       throws IOException, KeeperException;
 
   /**
    * Take a snapshot of the specified disabled region
    */
-  protected void snapshotDisabledRegion(final HRegionInfo regionInfo)
+  protected void snapshotDisabledRegion(final RegionInfo regionInfo)
       throws IOException {
     snapshotManifest.addRegion(FSUtils.getTableDir(rootDir, snapshotTable), regionInfo);
     monitor.rethrowException();

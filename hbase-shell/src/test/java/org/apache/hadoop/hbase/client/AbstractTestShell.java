@@ -39,6 +39,7 @@ public abstract class AbstractTestShell {
     // Start mini cluster
     TEST_UTIL.getConfiguration().setInt("hbase.regionserver.msginterval", 100);
     TEST_UTIL.getConfiguration().setInt("hbase.client.pause", 250);
+    TEST_UTIL.getConfiguration().setBoolean("hbase.quota.enabled", true);
     TEST_UTIL.getConfiguration().setInt(HConstants.HBASE_CLIENT_RETRIES_NUMBER, 6);
     TEST_UTIL.getConfiguration().setBoolean(CoprocessorHost.ABORT_ON_ERROR_KEY, false);
     TEST_UTIL.getConfiguration().setInt("hfile.format.version", 3);
@@ -54,10 +55,10 @@ public abstract class AbstractTestShell {
     TEST_UTIL.startMiniCluster();
 
     // Configure jruby runtime
-    List<String> loadPaths = new ArrayList();
+    List<String> loadPaths = new ArrayList<>(2);
     loadPaths.add("src/main/ruby");
     loadPaths.add("src/test/ruby");
-    jruby.getProvider().setLoadPaths(loadPaths);
+    jruby.setLoadPaths(loadPaths);
     jruby.put("$TEST_CLUSTER", TEST_UTIL);
     System.setProperty("jruby.jit.logging.verbose", "true");
     System.setProperty("jruby.jit.logging", "true");

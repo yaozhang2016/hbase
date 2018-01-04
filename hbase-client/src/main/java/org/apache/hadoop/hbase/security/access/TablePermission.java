@@ -25,7 +25,7 @@ import java.io.IOException;
 import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.TableName;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.hbase.util.Bytes;
 
 /**
@@ -155,6 +155,10 @@ public class TablePermission extends Permission {
     return table;
   }
 
+  public void setTableName(TableName table) {
+    this.table = table;
+  }
+
   public boolean hasFamily() {
     return family != null;
   }
@@ -189,7 +193,7 @@ public class TablePermission extends Permission {
    *   by this permission, <code>false</code>
    */
   public boolean implies(String namespace, Action action) {
-    if (!this.namespace.equals(namespace)) {
+    if (this.namespace == null || !this.namespace.equals(namespace)) {
       return false;
     }
 
@@ -212,7 +216,7 @@ public class TablePermission extends Permission {
    */
   public boolean implies(TableName table, byte[] family, byte[] qualifier,
       Action action) {
-    if (!this.table.equals(table)) {
+    if (this.table == null || !this.table.equals(table)) {
       return false;
     }
 
@@ -242,7 +246,7 @@ public class TablePermission extends Permission {
    *   by this permission, otherwise <code>false</code>
    */
   public boolean implies(TableName table, KeyValue kv, Action action) {
-    if (!this.table.equals(table)) {
+    if (this.table == null || !this.table.equals(table)) {
       return false;
     }
 
@@ -267,7 +271,7 @@ public class TablePermission extends Permission {
    * return false.
    */
   public boolean matchesFamily(TableName table, byte[] family, Action action) {
-    if (!this.table.equals(table)) {
+    if (this.table == null || !this.table.equals(table)) {
       return false;
     }
 
@@ -305,6 +309,21 @@ public class TablePermission extends Permission {
     return super.implies(action);
   }
 
+  public boolean tableFieldsEqual(TablePermission other){
+    if (!(((table == null && other.getTableName() == null) ||
+           (table != null && table.equals(other.getTableName()))) &&
+         ((family == null && other.getFamily() == null) ||
+           Bytes.equals(family, other.getFamily())) &&
+         ((qualifier == null && other.getQualifier() == null) ||
+          Bytes.equals(qualifier, other.getQualifier())) &&
+         ((namespace == null && other.getNamespace() == null) ||
+          (namespace != null && namespace.equals(other.getNamespace())))
+    )) {
+      return false;
+    }
+    return true;
+  }
+
   @Override
   @edu.umd.cs.findbugs.annotations.SuppressWarnings(value="NP_NULL_ON_SOME_PATH",
     justification="Passed on construction except on constructor not to be used")
@@ -314,14 +333,7 @@ public class TablePermission extends Permission {
     }
     TablePermission other = (TablePermission)obj;
 
-    if (!(table.equals(other.getTableName()) &&
-        ((family == null && other.getFamily() == null) ||
-         Bytes.equals(family, other.getFamily())) &&
-        ((qualifier == null && other.getQualifier() == null) ||
-         Bytes.equals(qualifier, other.getQualifier())) &&
-        ((namespace == null && other.getNamespace() == null) ||
-         (namespace != null && namespace.equals(other.getNamespace())))
-       )) {
+    if(!this.tableFieldsEqual(other)){
       return false;
     }
 
@@ -355,17 +367,16 @@ public class TablePermission extends Permission {
       str.append("namespace=").append(namespace)
          .append(", ");
     }
-    else if(table != null) {
+    if(table != null) {
        str.append("table=").append(table)
           .append(", family=")
           .append(family == null ? null : Bytes.toString(family))
           .append(", qualifier=")
           .append(qualifier == null ? null : Bytes.toString(qualifier))
           .append(", ");
-    } else {
-      str.append("actions=");
     }
     if (actions != null) {
+      str.append("actions=");
       for (int i=0; i<actions.length; i++) {
         if (i > 0)
           str.append(",");
@@ -384,7 +395,9 @@ public class TablePermission extends Permission {
   public void readFields(DataInput in) throws IOException {
     super.readFields(in);
     byte[] tableBytes = Bytes.readByteArray(in);
-    table = TableName.valueOf(tableBytes);
+    if(tableBytes.length > 0) {
+      table = TableName.valueOf(tableBytes);
+    }
     if (in.readBoolean()) {
       family = Bytes.readByteArray(in);
     }
@@ -399,7 +412,8 @@ public class TablePermission extends Permission {
   @Override
   public void write(DataOutput out) throws IOException {
     super.write(out);
-    Bytes.writeByteArray(out, table.getName());
+    // Explicitly writing null to maintain se/deserialize backward compatibility.
+    Bytes.writeByteArray(out, (table == null) ? null : table.getName());
     out.writeBoolean(family != null);
     if (family != null) {
       Bytes.writeByteArray(out, family);

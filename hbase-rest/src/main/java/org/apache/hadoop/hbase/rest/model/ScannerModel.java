@@ -21,19 +21,19 @@ package org.apache.hadoop.hbase.rest.model;
 
 import java.io.IOException;
 import java.io.Serializable;
-import java.io.StringReader;
-import java.io.StringWriter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.NavigableSet;
 
+import javax.ws.rs.core.MediaType;
 import javax.xml.bind.annotation.XmlAttribute;
 import javax.xml.bind.annotation.XmlElement;
 import javax.xml.bind.annotation.XmlRootElement;
 
+import org.apache.hadoop.hbase.CompareOperator;
 import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.filter.BinaryComparator;
 import org.apache.hadoop.hbase.filter.BinaryPrefixComparator;
@@ -44,7 +44,6 @@ import org.apache.hadoop.hbase.filter.ColumnPaginationFilter;
 import org.apache.hadoop.hbase.filter.ColumnPrefixFilter;
 import org.apache.hadoop.hbase.filter.ColumnRangeFilter;
 import org.apache.hadoop.hbase.filter.CompareFilter;
-import org.apache.hadoop.hbase.filter.CompareFilter.CompareOp;
 import org.apache.hadoop.hbase.filter.DependentColumnFilter;
 import org.apache.hadoop.hbase.filter.FamilyFilter;
 import org.apache.hadoop.hbase.filter.Filter;
@@ -77,11 +76,9 @@ import org.apache.hadoop.hbase.util.Base64;
 import org.apache.hadoop.hbase.util.ByteStringer;
 import org.apache.hadoop.hbase.util.Bytes;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.jaxrs.json.JacksonJaxbJsonProvider;
 import com.google.protobuf.ByteString;
-import com.sun.jersey.api.json.JSONConfiguration;
-import com.sun.jersey.api.json.JSONJAXBContext;
-import com.sun.jersey.api.json.JSONMarshaller;
-import com.sun.jersey.api.json.JSONUnmarshaller;
 
 /**
  * A representation of Scanner parameters.
@@ -103,22 +100,31 @@ import com.sun.jersey.api.json.JSONUnmarshaller;
  * </pre>
  */
 @XmlRootElement(name="Scanner")
+@JsonInclude(JsonInclude.Include.NON_NULL)
 @InterfaceAudience.Private
 public class ScannerModel implements ProtobufMessageHandler, Serializable {
 
   private static final long serialVersionUID = 1L;
 
   private byte[] startRow = HConstants.EMPTY_START_ROW;
-  private byte[] endRow = HConstants.EMPTY_END_ROW;;
-  private List<byte[]> columns = new ArrayList<byte[]>();
+  private byte[] endRow = HConstants.EMPTY_END_ROW;
+  private List<byte[]> columns = new ArrayList<>();
   private int batch = Integer.MAX_VALUE;
   private long startTime = 0;
   private long endTime = Long.MAX_VALUE;
   private String filter = null;
   private int maxVersions = Integer.MAX_VALUE;
   private int caching = -1;
-  private List<String> labels = new ArrayList<String>();
+  private List<String> labels = new ArrayList<>();
   private boolean cacheBlocks = true;
+
+  /**
+   * Implement lazily-instantiated singleton as per recipe
+   * here: http://literatejava.com/jvm/fastest-threadsafe-singleton-jvm/
+   */
+  private static class JaxbJsonProviderHolder {
+    static final JacksonJaxbJsonProvider INSTANCE = new JacksonJaxbJsonProvider();
+  }
 
   @XmlRootElement
   static class FilterModel {
@@ -280,7 +286,7 @@ public class ScannerModel implements ProtobufMessageHandler, Serializable {
         } break;
         case FilterList:
           this.op = ((FilterList)filter).getOperator().toString();
-          this.filters = new ArrayList<FilterModel>();
+          this.filters = new ArrayList<>();
           for (Filter child: ((FilterList)filter).getFilters()) {
             this.filters.add(new FilterModel(child));
           }
@@ -293,13 +299,13 @@ public class ScannerModel implements ProtobufMessageHandler, Serializable {
             Base64.encodeBytes(((InclusiveStopFilter)filter).getStopRowKey());
           break;
         case MultipleColumnPrefixFilter:
-          this.prefixes = new ArrayList<String>();
+          this.prefixes = new ArrayList<>();
           for (byte[] prefix: ((MultipleColumnPrefixFilter)filter).getPrefix()) {
             this.prefixes.add(Base64.encodeBytes(prefix));
           }
           break;
         case MultiRowRangeFilter:
-          this.ranges = new ArrayList<RowRange>();
+          this.ranges = new ArrayList<>();
           for(RowRange range : ((MultiRowRangeFilter)filter).getRowRanges()) {
             this.ranges.add(new RowRange(range.getStartRow(), range.isStartRowInclusive(),
                 range.getStopRow(), range.isStopRowInclusive()));
@@ -342,14 +348,14 @@ public class ScannerModel implements ProtobufMessageHandler, Serializable {
           }
         } break;
         case SkipFilter:
-          this.filters = new ArrayList<FilterModel>();
+          this.filters = new ArrayList<>();
           this.filters.add(new FilterModel(((SkipFilter)filter).getFilter()));
           break;
         case TimestampsFilter:
           this.timestamps = ((TimestampsFilter)filter).getTimestamps();
           break;
         case WhileMatchFilter:
-          this.filters = new ArrayList<FilterModel>();
+          this.filters = new ArrayList<>();
           this.filters.add(
             new FilterModel(((WhileMatchFilter)filter).getFilter()));
           break;
@@ -378,13 +384,13 @@ public class ScannerModel implements ProtobufMessageHandler, Serializable {
       case DependentColumnFilter:
         filter = new DependentColumnFilter(Base64.decode(family),
             qualifier != null ? Base64.decode(qualifier) : null,
-            dropDependentColumn, CompareOp.valueOf(op), comparator.build());
+            dropDependentColumn, CompareOperator.valueOf(op), comparator.build());
         break;
       case FamilyFilter:
-        filter = new FamilyFilter(CompareOp.valueOf(op), comparator.build());
+        filter = new FamilyFilter(CompareOperator.valueOf(op), comparator.build());
         break;
       case FilterList: {
-        List<Filter> list = new ArrayList<Filter>();
+        List<Filter> list = new ArrayList<>(filters.size());
         for (FilterModel model: filters) {
           list.add(model.build());
         }
@@ -416,18 +422,18 @@ public class ScannerModel implements ProtobufMessageHandler, Serializable {
         filter = new PrefixFilter(Base64.decode(value));
         break;
       case QualifierFilter:
-        filter = new QualifierFilter(CompareOp.valueOf(op), comparator.build());
+        filter = new QualifierFilter(CompareOperator.valueOf(op), comparator.build());
         break;
       case RandomRowFilter:
         filter = new RandomRowFilter(chance);
         break;
       case RowFilter:
-        filter = new RowFilter(CompareOp.valueOf(op), comparator.build());
+        filter = new RowFilter(CompareOperator.valueOf(op), comparator.build());
         break;
       case SingleColumnValueFilter:
         filter = new SingleColumnValueFilter(Base64.decode(family),
           qualifier != null ? Base64.decode(qualifier) : null,
-          CompareOp.valueOf(op), comparator.build());
+        CompareOperator.valueOf(op), comparator.build());
         if (ifMissing != null) {
           ((SingleColumnValueFilter)filter).setFilterIfMissing(ifMissing);
         }
@@ -438,7 +444,7 @@ public class ScannerModel implements ProtobufMessageHandler, Serializable {
       case SingleColumnValueExcludeFilter:
         filter = new SingleColumnValueExcludeFilter(Base64.decode(family),
           qualifier != null ? Base64.decode(qualifier) : null,
-          CompareOp.valueOf(op), comparator.build());
+        CompareOperator.valueOf(op), comparator.build());
         if (ifMissing != null) {
           ((SingleColumnValueExcludeFilter)filter).setFilterIfMissing(ifMissing);
         }
@@ -453,7 +459,7 @@ public class ScannerModel implements ProtobufMessageHandler, Serializable {
         filter = new TimestampsFilter(timestamps);
         break;
       case ValueFilter:
-        filter = new ValueFilter(CompareOp.valueOf(op), comparator.build());
+        filter = new ValueFilter(CompareOperator.valueOf(op), comparator.build());
         break;
       case WhileMatchFilter:
         filter = new WhileMatchFilter(filters.get(0).build());
@@ -467,17 +473,22 @@ public class ScannerModel implements ProtobufMessageHandler, Serializable {
   }
 
   /**
+   * Get the <code>JacksonJaxbJsonProvider</code> instance;
+   *
+   * @return A <code>JacksonJaxbJsonProvider</code>.
+   */
+  private static JacksonJaxbJsonProvider getJasonProvider() {
+    return JaxbJsonProviderHolder.INSTANCE;
+  }
+
+  /**
    * @param s the JSON representation of the filter
    * @return the filter
    * @throws Exception
    */
   public static Filter buildFilter(String s) throws Exception {
-    JSONJAXBContext context =
-      new JSONJAXBContext(JSONConfiguration.natural().build(),
-        FilterModel.class);
-    JSONUnmarshaller unmarshaller = context.createJSONUnmarshaller();
-    FilterModel model = unmarshaller.unmarshalFromJSON(new StringReader(s),
-      FilterModel.class);
+    FilterModel model = getJasonProvider().locateMapper(FilterModel.class,
+        MediaType.APPLICATION_JSON_TYPE).readValue(s, FilterModel.class);
     return model.build();
   }
 
@@ -487,13 +498,8 @@ public class ScannerModel implements ProtobufMessageHandler, Serializable {
    * @throws Exception
    */
   public static String stringifyFilter(final Filter filter) throws Exception {
-    JSONJAXBContext context =
-      new JSONJAXBContext(JSONConfiguration.natural().build(),
-        FilterModel.class);
-    JSONMarshaller marshaller = context.createJSONMarshaller();
-    StringWriter writer = new StringWriter();
-    marshaller.marshallToJSON(new FilterModel(filter), writer);
-    return writer.toString();
+    return getJasonProvider().locateMapper(FilterModel.class,
+        MediaType.APPLICATION_JSON_TYPE).writeValueAsString(new FilterModel(filter));
   }
 
   private static final byte[] COLUMN_DIVIDER = Bytes.toBytes(":");

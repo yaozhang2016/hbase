@@ -26,17 +26,18 @@ import java.util.Set;
 import org.apache.hadoop.hbase.NamespaceDescriptor;
 import org.apache.hadoop.hbase.NamespaceNotFoundException;
 import org.apache.hadoop.hbase.ServiceNotRunningException;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.hbase.master.procedure.CreateNamespaceProcedure;
 import org.apache.hadoop.hbase.master.procedure.DeleteNamespaceProcedure;
 import org.apache.hadoop.hbase.master.procedure.MasterProcedureEnv;
 import org.apache.hadoop.hbase.master.procedure.ModifyNamespaceProcedure;
 import org.apache.hadoop.hbase.procedure2.Procedure;
 import org.apache.hadoop.hbase.procedure2.ProcedureExecutor;
+import org.apache.hbase.thirdparty.com.google.common.util.concurrent.AbstractService;
+import org.apache.hadoop.hbase.util.NonceKey;
 
 @InterfaceAudience.Private
-class ClusterSchemaServiceImpl implements ClusterSchemaService {
-  private boolean running = false;
+class ClusterSchemaServiceImpl extends AbstractService implements ClusterSchemaService {
   private final TableNamespaceManager tableNamespaceManager;
   private final MasterServices masterServices;
   private final static List<NamespaceDescriptor> EMPTY_NAMESPACE_LIST =
@@ -49,28 +50,25 @@ class ClusterSchemaServiceImpl implements ClusterSchemaService {
 
   // All below are synchronized so consistent view on whether running or not.
 
-  @Override
-  public synchronized boolean isRunning() {
-    return this.running;
-  }
 
   private synchronized void checkIsRunning() throws ServiceNotRunningException {
     if (!isRunning()) throw new ServiceNotRunningException();
   }
 
   @Override
-  public synchronized void startAndWait() throws IOException {
-    if (isRunning()) throw new IllegalStateException("Already running; cannot double-start.");
-    // Set to running FIRST because tableNamespaceManager start uses this class to do namespace ops
-    this.running = true;
-    this.tableNamespaceManager.start();
+  public synchronized void doStart() {
+    try {
+      notifyStarted();
+      this.tableNamespaceManager.start();
+    } catch (IOException ioe) {
+      notifyFailed(ioe);
+    }
   }
 
   @Override
-  public synchronized void stopAndWait() throws IOException {
-    checkIsRunning();
-    // You can't stop tableNamespaceManager.
-    this.running = false;
+  protected void doStop() {
+    // This is no stop for the table manager.
+    notifyStopped();
   }
 
   @Override
@@ -78,38 +76,35 @@ class ClusterSchemaServiceImpl implements ClusterSchemaService {
     return this.tableNamespaceManager;
   }
 
-  private long submitProcedure(final Procedure<?> procedure, long nonceGroup,
-      long nonce)
-  throws ServiceNotRunningException {
+  private long submitProcedure(final Procedure<?> procedure, final NonceKey nonceKey)
+      throws ServiceNotRunningException {
     checkIsRunning();
     ProcedureExecutor<MasterProcedureEnv> pe = this.masterServices.getMasterProcedureExecutor();
-    return pe.submitProcedure(procedure, nonceGroup, nonce);
+    return pe.submitProcedure(procedure, nonceKey);
   }
 
   @Override
-  public long createNamespace(NamespaceDescriptor namespaceDescriptor,
-      long nonceGroup, long nonce)
-  throws IOException {
+  public long createNamespace(NamespaceDescriptor namespaceDescriptor, final NonceKey nonceKey)
+      throws IOException {
     return submitProcedure(new CreateNamespaceProcedure(
       this.masterServices.getMasterProcedureExecutor().getEnvironment(), namespaceDescriptor),
-        nonceGroup, nonce);
+        nonceKey);
   }
 
   @Override
-  public long modifyNamespace(NamespaceDescriptor namespaceDescriptor,
-      long nonceGroup, long nonce)
-  throws IOException {
+  public long modifyNamespace(NamespaceDescriptor namespaceDescriptor, final NonceKey nonceKey)
+      throws IOException {
     return submitProcedure(new ModifyNamespaceProcedure(
       this.masterServices.getMasterProcedureExecutor().getEnvironment(), namespaceDescriptor),
-        nonceGroup, nonce);
+        nonceKey);
   }
 
   @Override
-  public long deleteNamespace(String name, long nonceGroup, long nonce)
-  throws IOException {
+  public long deleteNamespace(String name, final NonceKey nonceKey)
+      throws IOException {
     return submitProcedure(new DeleteNamespaceProcedure(
       this.masterServices.getMasterProcedureExecutor().getEnvironment(), name),
-        nonceGroup, nonce);
+      nonceKey);
   }
 
   @Override
@@ -124,7 +119,7 @@ class ClusterSchemaServiceImpl implements ClusterSchemaService {
     checkIsRunning();
     Set<NamespaceDescriptor> set = getTableNamespaceManager().list();
     if (set == null || set.isEmpty()) return EMPTY_NAMESPACE_LIST;
-    List<NamespaceDescriptor> list = new ArrayList<NamespaceDescriptor>(set.size());
+    List<NamespaceDescriptor> list = new ArrayList<>(set.size());
     list.addAll(set);
     return Collections.unmodifiableList(list);
   }

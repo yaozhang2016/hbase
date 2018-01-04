@@ -1,4 +1,4 @@
-/*
+/**
  * Licensed to the Apache Software Foundation (ASF) under one or more
  * contributor license agreements. See the NOTICE file distributed with this
  * work for additional information regarding copyright ownership. The ASF
@@ -22,21 +22,23 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 
+import org.apache.commons.cli.BasicParser;
 import org.apache.commons.cli.CommandLine;
+import org.apache.commons.cli.CommandLineParser;
 import org.apache.commons.cli.DefaultParser;
 import org.apache.commons.cli.HelpFormatter;
 import org.apache.commons.cli.MissingOptionException;
 import org.apache.commons.cli.Option;
 import org.apache.commons.cli.Options;
 import org.apache.commons.cli.ParseException;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configurable;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.util.Tool;
 import org.apache.hadoop.util.ToolRunner;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Common base class used for HBase command-line tools. Simplifies workflow and
@@ -47,12 +49,15 @@ public abstract class AbstractHBaseTool implements Tool, Configurable {
   protected static final int EXIT_SUCCESS = 0;
   protected static final int EXIT_FAILURE = 1;
 
+  public static final String SHORT_HELP_OPTION = "h";
+  public static final String LONG_HELP_OPTION = "help";
+
   private static final Option HELP_OPTION = new Option("h", "help", false,
       "Prints help for this tool.");
 
-  private static final Log LOG = LogFactory.getLog(AbstractHBaseTool.class);
+  private static final Logger LOG = LoggerFactory.getLogger(AbstractHBaseTool.class);
 
-  private final Options options = new Options();
+  protected final Options options = new Options();
 
   protected Configuration conf = null;
 
@@ -108,7 +113,7 @@ public abstract class AbstractHBaseTool implements Tool, Configurable {
   }
 
   @Override
-  public final int run(String[] args) throws IOException {
+  public int run(String[] args) throws IOException {
     cmdLineArgs = args;
     if (conf == null) {
       LOG.error("Tool configuration is not initialized");
@@ -116,7 +121,7 @@ public abstract class AbstractHBaseTool implements Tool, Configurable {
     }
 
     CommandLine cmd;
-    List<String> argsList = new ArrayList<>();
+    List<String> argsList = new ArrayList<>(args.length);
     for (String arg : args) {
       argsList.add(arg);
     }
@@ -161,8 +166,15 @@ public abstract class AbstractHBaseTool implements Tool, Configurable {
     return cl.getOptions().length != 0;
   }
 
+  protected CommandLine parseArgs(String[] args) throws ParseException {
+    options.addOption(SHORT_HELP_OPTION, LONG_HELP_OPTION, false, "Show usage");
+    addOptions();
+    CommandLineParser parser = new BasicParser();
+    return parser.parse(options, args);
+  }
+
   protected void printUsage() {
-    printUsage("bin/hbase " + getClass().getName() + " <options>", "Options:", "");
+    printUsage("hbase " + getClass().getName() + " <options>", "Options:", "");
   }
 
   protected void printUsage(final String usageStr, final String usageHeader,
@@ -214,6 +226,14 @@ public abstract class AbstractHBaseTool implements Tool, Configurable {
   public int getOptionAsInt(CommandLine cmd, String opt, int defaultValue) {
     if (cmd.hasOption(opt)) {
       return Integer.parseInt(cmd.getOptionValue(opt));
+    } else {
+      return defaultValue;
+    }
+  }
+
+  public long getOptionAsLong(CommandLine cmd, String opt, int defaultValue) {
+    if (cmd.hasOption(opt)) {
+      return Long.parseLong(cmd.getOptionValue(opt));
     } else {
       return defaultValue;
     }

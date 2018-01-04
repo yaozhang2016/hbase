@@ -33,19 +33,23 @@ import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.constraint.TestConstraint.CheckWasRunConstraint;
 import org.apache.hadoop.hbase.constraint.WorksConstraint.NameConstraint;
 import org.apache.hadoop.hbase.util.Pair;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.junit.rules.TestName;
 
 /**
  * Test reading/writing the constraints into the {@link HTableDescriptor}
  */
 @Category({MiscTests.class, SmallTests.class})
 public class TestConstraints {
+  @Rule
+  public TestName name = new TestName();
 
   @SuppressWarnings("unchecked")
   @Test
   public void testSimpleReadWrite() throws Throwable {
-    HTableDescriptor desc = new HTableDescriptor(TableName.valueOf("table"));
+    HTableDescriptor desc = new HTableDescriptor(TableName.valueOf(name.getMethodName()));
     Constraints.add(desc, WorksConstraint.class);
 
     List<? extends Constraint> constraints = Constraints.getConstraints(desc,
@@ -70,12 +74,10 @@ public class TestConstraints {
   @SuppressWarnings("unchecked")
   @Test
   public void testReadWriteWithConf() throws Throwable {
-    HTableDescriptor desc = new HTableDescriptor(TableName.valueOf("table"));
-    Constraints.add(
-        desc,
-        new Pair<Class<? extends Constraint>, Configuration>(
-            CheckConfigurationConstraint.class, CheckConfigurationConstraint
-                .getConfiguration()));
+    HTableDescriptor desc = new HTableDescriptor(TableName.valueOf(name.getMethodName()));
+    Constraints.add(desc,
+      new Pair<>(CheckConfigurationConstraint.class,
+        CheckConfigurationConstraint.getConfiguration()));
 
     List<? extends Constraint> c = Constraints.getConstraints(desc, this
         .getClass().getClassLoader());
@@ -84,7 +86,7 @@ public class TestConstraints {
     assertEquals(CheckConfigurationConstraint.class, c.get(0).getClass());
 
     // check to make sure that we overwrite configurations
-    Constraints.add(desc, new Pair<Class<? extends Constraint>, Configuration>(
+    Constraints.add(desc, new Pair<>(
         CheckConfigurationConstraint.class, new Configuration(false)));
 
     try {
@@ -103,7 +105,7 @@ public class TestConstraints {
   @SuppressWarnings("unchecked")
   @Test
   public void testEnableDisableRemove() throws Exception {
-    HTableDescriptor desc = new HTableDescriptor(TableName.valueOf("table"));
+    HTableDescriptor desc = new HTableDescriptor(TableName.valueOf(name.getMethodName()));
     // check general enabling/disabling of constraints
     // first add a constraint
     Constraints.add(desc, AllPassConstraint.class);
@@ -139,7 +141,7 @@ public class TestConstraints {
   @SuppressWarnings("unchecked")
   @Test
   public void testUpdateConstraint() throws Exception {
-    HTableDescriptor desc = new HTableDescriptor(TableName.valueOf("table"));
+    HTableDescriptor desc = new HTableDescriptor(TableName.valueOf(name.getMethodName()));
     Constraints.add(desc, CheckConfigurationConstraint.class,
         CheckWasRunConstraint.class);
     Constraints.setConfiguration(desc, CheckConfigurationConstraint.class,
@@ -165,7 +167,7 @@ public class TestConstraints {
    */
   @Test
   public void testRemoveUnsetConstraint() throws Throwable {
-    HTableDescriptor desc = new HTableDescriptor(TableName.valueOf("table"));
+    HTableDescriptor desc = new HTableDescriptor(TableName.valueOf(name.getMethodName()));
     Constraints.remove(desc);
     Constraints.remove(desc, AlsoWorks.class);
   }
@@ -175,7 +177,7 @@ public class TestConstraints {
     Configuration conf = new Configuration();
     conf.setBoolean("_ENABLED", false);
     conf.setLong("_PRIORITY", 10);
-    HTableDescriptor desc = new HTableDescriptor(TableName.valueOf("table"));
+    HTableDescriptor desc = new HTableDescriptor(TableName.valueOf(name.getMethodName()));
     Constraints.add(desc, AlsoWorks.class, conf);
     Constraints.add(desc, WorksConstraint.class);
     assertFalse(Constraints.enabled(desc, AlsoWorks.class));

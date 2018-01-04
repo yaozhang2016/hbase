@@ -30,18 +30,17 @@ import static org.mockito.Mockito.when;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.OptionalLong;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.hbase.CellComparator;
+import org.apache.hadoop.hbase.CellComparatorImpl;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.regionserver.compactions.CompactionContext;
-import org.apache.hadoop.hbase.regionserver.compactions.CompactionRequest;
+import org.apache.hadoop.hbase.regionserver.compactions.CompactionRequestImpl;
 import org.apache.hadoop.hbase.regionserver.compactions.StripeCompactionPolicy;
 import org.apache.hadoop.hbase.regionserver.compactions.StripeCompactor;
 import org.apache.hadoop.hbase.regionserver.throttle.NoLimitThroughputController;
-import org.apache.hadoop.hbase.regionserver.throttle.ThroughputController;
-import org.apache.hadoop.hbase.security.User;
 import org.apache.hadoop.hbase.testclassification.RegionServerTests;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.junit.Test;
@@ -75,14 +74,14 @@ public class TestStripeStoreEngine {
     StripeCompactor mockCompactor = mock(StripeCompactor.class);
     se.setCompactorOverride(mockCompactor);
     when(
-      mockCompactor.compact(any(CompactionRequest.class), anyInt(), anyLong(), any(byte[].class),
-        any(byte[].class), any(byte[].class), any(byte[].class),
-        any(ThroughputController.class), any(User.class)))
-        .thenReturn(new ArrayList<Path>());
+      mockCompactor.compact(any(), anyInt(), anyLong(), any(),
+        any(), any(), any(),
+        any(), any()))
+        .thenReturn(new ArrayList<>());
 
     // Produce 3 L0 files.
-    StoreFile sf = createFile();
-    ArrayList<StoreFile> compactUs = al(sf, createFile(), createFile());
+    HStoreFile sf = createFile();
+    ArrayList<HStoreFile> compactUs = al(sf, createFile(), createFile());
     se.getStoreFileManager().loadFiles(compactUs);
     // Create a compaction that would want to split the stripe.
     CompactionContext compaction = se.createCompaction();
@@ -91,7 +90,7 @@ public class TestStripeStoreEngine {
     // Override the file list. Granted, overriding this compaction in this manner will
     // break things in real world, but we only want to verify the override.
     compactUs.remove(sf);
-    CompactionRequest req = new CompactionRequest(compactUs);
+    CompactionRequestImpl req = new CompactionRequestImpl(compactUs);
     compaction.forceSelect(req);
     assertEquals(2, compaction.getRequest().getFiles().size());
     assertFalse(compaction.getRequest().getFiles().contains(sf));
@@ -102,22 +101,23 @@ public class TestStripeStoreEngine {
       NoLimitThroughputController.INSTANCE, null);
   }
 
-  private static StoreFile createFile() throws Exception {
-    StoreFile sf = mock(StoreFile.class);
-    when(sf.getMetadataValue(any(byte[].class)))
+  private static HStoreFile createFile() throws Exception {
+    HStoreFile sf = mock(HStoreFile.class);
+    when(sf.getMetadataValue(any()))
       .thenReturn(StripeStoreFileManager.INVALID_KEY);
     when(sf.getReader()).thenReturn(mock(StoreFileReader.class));
     when(sf.getPath()).thenReturn(new Path("moo"));
+    when(sf.getBulkLoadTimestamp()).thenReturn(OptionalLong.empty());
     return sf;
   }
 
   private static TestStoreEngine createEngine(Configuration conf) throws Exception {
-    Store store = mock(Store.class);
-    CellComparator kvComparator = mock(CellComparator.class);
+    HStore store = mock(HStore.class);
+    CellComparatorImpl kvComparator = mock(CellComparatorImpl.class);
     return (TestStoreEngine)StoreEngine.create(store, conf, kvComparator);
   }
 
-  private static ArrayList<StoreFile> al(StoreFile... sfs) {
-    return new ArrayList<StoreFile>(Arrays.asList(sfs));
+  private static ArrayList<HStoreFile> al(HStoreFile... sfs) {
+    return new ArrayList<>(Arrays.asList(sfs));
   }
 }

@@ -18,6 +18,15 @@
 
 package org.apache.hadoop.hbase.client;
 
+import static junit.framework.TestCase.assertEquals;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.ThreadLocalRandom;
+
+import org.apache.hadoop.hbase.Cell;
+import org.apache.hadoop.hbase.CellBuilderFactory;
+import org.apache.hadoop.hbase.CellBuilderType;
 import org.apache.hadoop.hbase.CompatibilityFactory;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HColumnDescriptor;
@@ -35,14 +44,10 @@ import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
-
-import java.util.ArrayList;
-import java.util.List;
-import java.util.concurrent.ThreadLocalRandom;
-
-import static junit.framework.TestCase.assertEquals;
+import org.junit.rules.TestName;
 
 /**
  * This test sets the multi size WAAAAAY low and then checks to make sure that gets will still make
@@ -55,6 +60,9 @@ public class TestMultiRespectsLimits {
       CompatibilityFactory.getInstance(MetricsAssertHelper.class);
   private final static byte[] FAMILY = Bytes.toBytes("D");
   public static final int MAX_SIZE = 500;
+
+  @Rule
+  public TestName name = new TestName();
 
   @BeforeClass
   public static void setUpBeforeClass() throws Exception {
@@ -73,17 +81,17 @@ public class TestMultiRespectsLimits {
 
   @Test
   public void testMultiLimits() throws Exception {
-    final TableName name = TableName.valueOf("testMultiLimits");
-    Table t = TEST_UTIL.createTable(name, FAMILY);
+    final TableName tableName = TableName.valueOf(name.getMethodName());
+    Table t = TEST_UTIL.createTable(tableName, FAMILY);
     TEST_UTIL.loadTable(t, FAMILY, false);
 
     // Split the table to make sure that the chunking happens accross regions.
     try (final Admin admin = TEST_UTIL.getAdmin()) {
-      admin.split(name);
+      admin.split(tableName);
       TEST_UTIL.waitFor(60000, new Waiter.Predicate<Exception>() {
         @Override
         public boolean evaluate() throws Exception {
-          return admin.getTableRegions(name).size() > 1;
+          return admin.getTableRegions(tableName).size() > 1;
         }
       });
     }
@@ -112,13 +120,13 @@ public class TestMultiRespectsLimits {
 
   @Test
   public void testBlockMultiLimits() throws Exception {
-    final TableName name = TableName.valueOf("testBlockMultiLimits");
-    HTableDescriptor desc = new HTableDescriptor(name);
+    final TableName tableName = TableName.valueOf(name.getMethodName());
+    HTableDescriptor desc = new HTableDescriptor(tableName);
     HColumnDescriptor hcd = new HColumnDescriptor(FAMILY);
     hcd.setDataBlockEncoding(DataBlockEncoding.FAST_DIFF);
     desc.addFamily(hcd);
-    TEST_UTIL.getHBaseAdmin().createTable(desc);
-    Table t = TEST_UTIL.getConnection().getTable(name);
+    TEST_UTIL.getAdmin().createTable(desc);
+    Table t = TEST_UTIL.getConnection().getTable(tableName);
 
     final HRegionServer regionServer = TEST_UTIL.getHBaseCluster().getRegionServer(0);
     RpcServerInterface rpcServer = regionServer.getRpcServer();
@@ -144,17 +152,24 @@ public class TestMultiRespectsLimits {
 
     for (byte[] col:cols) {
       Put p = new Put(row);
-      p.addImmutable(FAMILY, col, value);
+      p.add(CellBuilderFactory.create(CellBuilderType.SHALLOW_COPY)
+              .setRow(row)
+              .setFamily(FAMILY)
+              .setQualifier(col)
+              .setTimestamp(p.getTimeStamp())
+              .setType(Cell.Type.Put)
+              .setValue(value)
+              .build());
       t.put(p);
     }
 
     // Make sure that a flush happens
     try (final Admin admin = TEST_UTIL.getAdmin()) {
-      admin.flush(name);
+      admin.flush(tableName);
       TEST_UTIL.waitFor(60000, new Waiter.Predicate<Exception>() {
         @Override
         public boolean evaluate() throws Exception {
-          return regionServer.getOnlineRegions(name).get(0).getMaxFlushedSeqId() > 3;
+          return regionServer.getRegions(tableName).get(0).getMaxFlushedSeqId() > 3;
         }
       });
     }

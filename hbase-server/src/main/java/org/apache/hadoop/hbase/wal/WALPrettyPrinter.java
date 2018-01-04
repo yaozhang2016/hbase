@@ -40,15 +40,15 @@ import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.HBaseInterfaceAudience;
+import org.apache.hadoop.hbase.PrivateCellUtil;
 import org.apache.hadoop.hbase.Tag;
-import org.apache.hadoop.hbase.TagUtil;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
 import org.apache.hadoop.hbase.regionserver.wal.ProtobufLogReader;
-import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.FSUtils;
-import org.codehaus.jackson.map.ObjectMapper;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceStability;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 /**
  * WALPrettyPrinter prints the contents of a given WAL with a variety of
@@ -283,17 +283,17 @@ public class WALPrettyPrinter {
         if (region != null && !((String) txn.get("region")).equals(region))
           continue;
         // initialize list into which we will store atomic actions
-        List<Map> actions = new ArrayList<Map>();
+        List<Map> actions = new ArrayList<>();
         for (Cell cell : edit.getCells()) {
           // add atomic operation to txn
-          Map<String, Object> op = new HashMap<String, Object>(toStringMap(cell));
+          Map<String, Object> op = new HashMap<>(toStringMap(cell));
           if (outputValues) op.put("value", Bytes.toStringBinary(CellUtil.cloneValue(cell)));
           // check row output filter
           if (row == null || ((String) op.get("row")).equals(row)) {
             actions.add(op);
           }
         }
-        if (actions.size() == 0)
+        if (actions.isEmpty())
           continue;
         txn.put("actions", actions);
         if (outputJSON) {
@@ -328,7 +328,7 @@ public class WALPrettyPrinter {
   }
 
   private static Map<String, Object> toStringMap(Cell cell) {
-    Map<String, Object> stringMap = new HashMap<String, Object>();
+    Map<String, Object> stringMap = new HashMap<>();
     stringMap.put("row",
         Bytes.toStringBinary(cell.getRowArray(), cell.getRowOffset(), cell.getRowLength()));
     stringMap.put("family", Bytes.toStringBinary(cell.getFamilyArray(), cell.getFamilyOffset(),
@@ -339,11 +339,12 @@ public class WALPrettyPrinter {
     stringMap.put("timestamp", cell.getTimestamp());
     stringMap.put("vlen", cell.getValueLength());
     if (cell.getTagsLength() > 0) {
-      List<String> tagsString = new ArrayList<String>();
-      Iterator<Tag> tagsIterator = CellUtil.tagsIterator(cell);
+      List<String> tagsString = new ArrayList<>();
+      Iterator<Tag> tagsIterator = PrivateCellUtil.tagsIterator(cell);
       while (tagsIterator.hasNext()) {
         Tag tag = tagsIterator.next();
-        tagsString.add((tag.getType()) + ":" + Bytes.toStringBinary(TagUtil.cloneValue(tag)));
+        tagsString
+            .add((tag.getType()) + ":" + Bytes.toStringBinary(Tag.cloneValue(tag)));
       }
       stringMap.put("tag", tagsString);
     }
@@ -381,7 +382,7 @@ public class WALPrettyPrinter {
     try {
       CommandLine cmd = parser.parse(options, args);
       files = cmd.getArgList();
-      if (files.size() == 0 || cmd.hasOption("h")) {
+      if (files.isEmpty() || cmd.hasOption("h")) {
         HelpFormatter formatter = new HelpFormatter();
         formatter.printHelp("WAL <filename...>", options, true);
         System.exit(-1);

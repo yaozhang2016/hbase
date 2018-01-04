@@ -25,11 +25,6 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
-import com.google.common.collect.Lists;
-import org.apache.hadoop.hbase.shaded.com.google.protobuf.BlockingService;
-import org.apache.hadoop.hbase.shaded.com.google.protobuf.Descriptors.MethodDescriptor;
-import org.apache.hadoop.hbase.shaded.com.google.protobuf.Message;
-
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.util.ArrayList;
@@ -42,27 +37,26 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.hbase.CellScanner;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.codec.Codec;
+import org.apache.hadoop.hbase.ipc.RpcServer.BlockingServiceAndInterface;
 import org.apache.hadoop.hbase.shaded.ipc.protobuf.generated.TestProtos.EchoRequestProto;
 import org.apache.hadoop.hbase.shaded.ipc.protobuf.generated.TestProtos.EchoResponseProto;
 import org.apache.hadoop.hbase.shaded.ipc.protobuf.generated.TestRpcServiceProtos.TestProtobufRpcProto.BlockingInterface;
-import org.apache.hadoop.hbase.monitoring.MonitoredRPCHandler;
 import org.apache.hadoop.hbase.testclassification.IntegrationTests;
-import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.hbase.util.Threads;
 import org.junit.Ignore;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.apache.hbase.thirdparty.com.google.common.collect.Lists;
 
 @Category(IntegrationTests.class)
 public class IntegrationTestRpcClient {
 
-  private static final Log LOG = LogFactory.getLog(IntegrationTestRpcClient.class);
+  private static final Logger LOG = LoggerFactory.getLogger(IntegrationTestRpcClient.class);
 
   private final Configuration conf;
 
@@ -70,26 +64,6 @@ public class IntegrationTestRpcClient {
 
   public IntegrationTestRpcClient() {
     conf = HBaseConfiguration.create();
-  }
-
-  static class TestRpcServer extends RpcServer {
-
-    TestRpcServer(Configuration conf) throws IOException {
-      this(new FifoRpcScheduler(conf, 1), conf);
-    }
-
-    TestRpcServer(RpcScheduler scheduler, Configuration conf) throws IOException {
-      super(null, "testRpcServer", Lists
-          .newArrayList(new BlockingServiceAndInterface(SERVICE, null)), new InetSocketAddress(
-          "localhost", 0), conf, scheduler);
-    }
-
-    @Override
-    public Pair<Message, CellScanner> call(BlockingService service, MethodDescriptor md,
-        Message param, CellScanner cellScanner, long receiveTime, MonitoredRPCHandler status)
-        throws IOException {
-      return super.call(service, md, param, cellScanner, receiveTime, status);
-    }
   }
 
   protected AbstractRpcClient<?> createRpcClient(Configuration conf, boolean isSyncClient) {
@@ -116,8 +90,8 @@ public class IntegrationTestRpcClient {
   class Cluster {
     Random random = new Random();
     ReadWriteLock lock = new ReentrantReadWriteLock();
-    HashMap<InetSocketAddress, TestRpcServer> rpcServers = new HashMap<>();
-    List<TestRpcServer> serverList = new ArrayList<>();
+    HashMap<InetSocketAddress, RpcServer> rpcServers = new HashMap<>();
+    List<RpcServer> serverList = new ArrayList<>();
     int maxServers;
     int minServers;
 
@@ -126,14 +100,18 @@ public class IntegrationTestRpcClient {
       this.maxServers = maxServers;
     }
 
-    TestRpcServer startServer() throws IOException {
+    RpcServer startServer() throws IOException {
       lock.writeLock().lock();
       try {
         if (rpcServers.size() >= maxServers) {
           return null;
         }
 
-        TestRpcServer rpcServer = new TestRpcServer(conf);
+        RpcServer rpcServer = RpcServerFactory.createRpcServer(null,
+            "testRpcServer", Lists
+                .newArrayList(new BlockingServiceAndInterface(SERVICE, null)),
+            new InetSocketAddress("localhost", 0), conf, new FifoRpcScheduler(
+                conf, 1));
         rpcServer.start();
         InetSocketAddress address = rpcServer.getListenerAddress();
         if (address == null) {
@@ -150,7 +128,7 @@ public class IntegrationTestRpcClient {
 
     void stopRandomServer() throws Exception {
       lock.writeLock().lock();
-      TestRpcServer rpcServer = null;
+      RpcServer rpcServer = null;
       try {
         if (rpcServers.size() <= minServers) {
           return;
@@ -174,7 +152,7 @@ public class IntegrationTestRpcClient {
       }
     }
 
-    void stopServer(TestRpcServer rpcServer) throws InterruptedException {
+    void stopServer(RpcServer rpcServer) throws InterruptedException {
       InetSocketAddress address = rpcServer.getListenerAddress();
       LOG.info("Stopping server: " + address);
       rpcServer.stop();
@@ -185,7 +163,7 @@ public class IntegrationTestRpcClient {
     void stopRunning() throws InterruptedException {
       lock.writeLock().lock();
       try {
-        for (TestRpcServer rpcServer : serverList) {
+        for (RpcServer rpcServer : serverList) {
           stopServer(rpcServer);
         }
 
@@ -194,7 +172,7 @@ public class IntegrationTestRpcClient {
       }
     }
 
-    TestRpcServer getRandomServer() {
+    RpcServer getRandomServer() {
       lock.readLock().lock();
       try {
         int size = rpcServers.size();
@@ -219,24 +197,22 @@ public class IntegrationTestRpcClient {
     @Override
     public void run() {
       while (running.get()) {
-        switch (random.nextInt() % 2) {
-        case 0: //start a server
+        if (random.nextBoolean()) {
+          //start a server
           try {
             cluster.startServer();
           } catch (Exception e) {
-            LOG.warn(e);
+            LOG.warn(e.toString(), e);
             exception.compareAndSet(null, e);
           }
-          break;
-
-        case 1: // stop a server
+        } else {
+          // stop a server
           try {
             cluster.stopRandomServer();
           } catch (Exception e) {
-            LOG.warn(e);
+            LOG.warn(e.toString(), e);
             exception.compareAndSet(null, e);
           }
-        default:
         }
 
         Threads.sleep(100);
@@ -278,13 +254,13 @@ public class IntegrationTestRpcClient {
         String message = isBigPayload ? BIG_PAYLOAD : id + numCalls;
         EchoRequestProto param = EchoRequestProto.newBuilder().setMessage(message).build();
         EchoResponseProto ret;
-        TestRpcServer server = cluster.getRandomServer();
+        RpcServer server = cluster.getRandomServer();
         try {
           sending.set(true);
           BlockingInterface stub = newBlockingStub(rpcClient, server.getListenerAddress());
           ret = stub.echo(null, param);
         } catch (Exception e) {
-          LOG.warn(e);
+          LOG.warn(e.toString(), e);
           continue; // expected in case connection is closing or closed
         }
 
@@ -413,7 +389,7 @@ public class IntegrationTestRpcClient {
       cluster.startServer();
     }
 
-    ArrayList<SimpleClient> clients = new ArrayList<>();
+    ArrayList<SimpleClient> clients = new ArrayList<>(30);
 
     // all threads should share the same rpc client
     AbstractRpcClient<?> rpcClient = createRpcClient(conf, isSyncClient);

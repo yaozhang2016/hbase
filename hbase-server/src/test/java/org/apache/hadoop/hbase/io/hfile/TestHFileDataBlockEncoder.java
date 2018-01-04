@@ -39,7 +39,7 @@ import org.apache.hadoop.hbase.io.encoding.HFileBlockEncodingContext;
 import org.apache.hadoop.hbase.testclassification.IOTests;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.apache.hadoop.hbase.util.ChecksumType;
-import org.apache.hadoop.hbase.util.test.RedundantKVGenerator;
+import org.apache.hadoop.hbase.util.RedundantKVGenerator;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.junit.runner.RunWith;
@@ -149,10 +149,6 @@ public class TestHFileDataBlockEncoder {
   @Test
   public void testEncodingWithOffheapKeyValue() throws IOException {
     // usually we have just block without headers, but don't complicate that
-    if(blockEncoder.getDataBlockEncoding() == DataBlockEncoding.PREFIX_TREE) {
-      // This is a TODO: Only after PrefixTree is fixed we can remove this check
-      return;
-    }
     try {
       List<Cell> kvs = generator.generateTestExtendedOffheapKeyValues(60, true);
       HFileContext meta = new HFileContextBuilder().withIncludesMvcc(includesMemstoreTS)
@@ -243,8 +239,7 @@ public class TestHFileDataBlockEncoder {
    */
   @Parameters
   public static Collection<Object[]> getAllConfigurations() {
-    List<Object[]> configurations =
-        new ArrayList<Object[]>();
+    List<Object[]> configurations = new ArrayList<>();
 
     for (DataBlockEncoding diskAlgo : DataBlockEncoding.values()) {
       for (boolean includesMemstoreTS : new boolean[] { false, true }) {

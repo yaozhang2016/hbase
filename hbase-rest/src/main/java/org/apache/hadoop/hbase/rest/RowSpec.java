@@ -27,7 +27,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.TreeSet;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.util.Bytes;
 
@@ -44,9 +44,8 @@ public class RowSpec {
   
   private byte[] row = HConstants.EMPTY_START_ROW;
   private byte[] endRow = null;
-  private TreeSet<byte[]> columns =
-    new TreeSet<byte[]>(Bytes.BYTES_COMPARATOR);
-  private List<String> labels = new ArrayList<String>();  
+  private TreeSet<byte[]> columns = new TreeSet<>(Bytes.BYTES_COMPARATOR);
+  private List<String> labels = new ArrayList<>();
   private long startTime = DEFAULT_START_TIMESTAMP;
   private long endTime = DEFAULT_END_TIMESTAMP;
   private int maxVersions = 1;

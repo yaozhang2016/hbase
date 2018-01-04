@@ -20,9 +20,9 @@ package org.apache.hadoop.hbase.util;
 import java.util.ArrayList;
 import java.util.List;
 
+import org.apache.hadoop.hbase.ArrayBackedTag;
 import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.Tag;
-import org.apache.hadoop.hbase.ArrayBackedTag;
 import org.apache.hadoop.hbase.testclassification.MiscTests;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.junit.Assert;
@@ -64,7 +64,7 @@ public class TestByteRangeWithKVSerialization {
     final byte[] QUALIFIER = Bytes.toBytes("q1");
     final byte[] VALUE = Bytes.toBytes("v");
     int kvCount = 1000000;
-    List<KeyValue> kvs = new ArrayList<KeyValue>(kvCount);
+    List<KeyValue> kvs = new ArrayList<>(kvCount);
     int totalSize = 0;
     Tag[] tags = new Tag[] { new ArrayBackedTag((byte) 1, "tag1") };
     for (int i = 0; i < kvCount; i++) {

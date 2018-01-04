@@ -17,8 +17,8 @@
  */
 package org.apache.hadoop.hbase.client;
 
-import org.apache.hadoop.hbase.shaded.com.google.protobuf.RpcController;
-import org.apache.hadoop.hbase.shaded.com.google.protobuf.ServiceException;
+import org.apache.hbase.thirdparty.com.google.protobuf.RpcController;
+import org.apache.hbase.thirdparty.com.google.protobuf.ServiceException;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.*;
 
@@ -30,7 +30,6 @@ import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos;
 import org.apache.hadoop.hbase.quotas.ThrottlingException;
 import org.apache.hadoop.hbase.regionserver.HRegionServer;
 import org.apache.hadoop.hbase.regionserver.RSRpcServices;
-import org.apache.hadoop.hbase.regionserver.Region;
 import org.apache.hadoop.hbase.testclassification.ClientTests;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.util.Bytes;
@@ -103,7 +102,7 @@ public class TestMetaCache {
       put.addColumn(FAMILY, QUALIFIER, Bytes.toBytes(10));
       Get get = new Get(row);
       Append append = new Append(row);
-      append.add(FAMILY, QUALIFIER, Bytes.toBytes(11));
+      append.addColumn(FAMILY, QUALIFIER, Bytes.toBytes(11));
       Increment increment = new Increment(row);
       increment.addColumn(FAMILY, QUALIFIER, 10);
       Delete delete = new Delete(row);
@@ -188,7 +187,7 @@ public class TestMetaCache {
   public static List<Throwable> metaCachePreservingExceptions() {
     return new ArrayList<Throwable>() {{
       add(new RegionOpeningException(" "));
-      add(new RegionTooBusyException());
+      add(new RegionTooBusyException("Some old message"));
       add(new ThrottlingException(" "));
       add(new MultiActionResultTooLarge(" "));
       add(new RetryImmediatelyException(" "));
@@ -199,9 +198,9 @@ public class TestMetaCache {
   public static class RegionServerWithFakeRpcServices extends HRegionServer {
     private FakeRSRpcServices rsRpcServices;
 
-    public RegionServerWithFakeRpcServices(Configuration conf, CoordinatedStateManager cp)
+    public RegionServerWithFakeRpcServices(Configuration conf)
       throws IOException, InterruptedException {
-      super(conf, cp);
+      super(conf);
     }
 
     @Override
@@ -248,11 +247,6 @@ public class TestMetaCache {
       exceptions.throwOnScan(this, request);
       return super.scan(controller, request);
     }
-
-    public Region getRegion(
-        final HBaseProtos.RegionSpecifier regionSpecifier) throws IOException {
-      return super.getRegion(regionSpecifier);
-    }
   }
 
   public static abstract class ExceptionInjector {
@@ -260,7 +254,7 @@ public class TestMetaCache {
                                   HBaseProtos.RegionSpecifier regionSpec) throws ServiceException {
       try {
         return TABLE_NAME.equals(
-            rpcServices.getRegion(regionSpec).getTableDesc().getTableName());
+            rpcServices.getRegion(regionSpec).getTableDescriptor().getTableName());
       } catch (IOException ioe) {
         throw new ServiceException(ioe);
       }

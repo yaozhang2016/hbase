@@ -21,18 +21,16 @@ package org.apache.hadoop.hbase.regionserver;
 
 import java.io.IOException;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HRegionInfo;
-import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.NotServingRegionException;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.RegionLocator;
 import org.apache.hadoop.hbase.client.Table;
+import org.apache.hadoop.hbase.client.TableDescriptor;
 import org.apache.hadoop.hbase.master.HMaster;
 import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.shaded.protobuf.RequestConverter;
@@ -44,12 +42,14 @@ import org.apache.hadoop.hbase.testclassification.RegionServerTests;
 import org.apache.hadoop.hbase.util.JVMClusterUtil.RegionServerThread;
 import org.apache.hadoop.hbase.util.Threads;
 import org.apache.hadoop.hbase.zookeeper.MetaTableLocator;
-import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher;
+import org.apache.hadoop.hbase.zookeeper.ZKWatcher;
 import org.junit.AfterClass;
 import org.junit.Assert;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 
 /**
@@ -58,7 +58,7 @@ import org.junit.experimental.categories.Category;
 @Category({RegionServerTests.class, MediumTests.class})
 public class TestRegionServerNoMaster {
 
-  private static final Log LOG = LogFactory.getLog(TestRegionServerNoMaster.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestRegionServerNoMaster.class);
   private static final int NB_SERVERS = 1;
   private static Table table;
   private static final byte[] row = "ee".getBytes();
@@ -106,7 +106,7 @@ public class TestRegionServerNoMaster {
     // so that regions can be assigned during the mocking phase.
     HRegionServer hrs = HTU.getHBaseCluster()
       .getLiveRegionServerThreads().get(0).getRegionServer();
-    ZooKeeperWatcher zkw = hrs.getZooKeeper();
+    ZKWatcher zkw = hrs.getZooKeeper();
     MetaTableLocator mtl = new MetaTableLocator();
     ServerName sn = mtl.getMetaRegionLocation(zkw);
     if (sn != null && !masterAddr.equals(sn)) {
@@ -129,7 +129,7 @@ public class TestRegionServerNoMaster {
   /** Flush the given region in the mini cluster. Since no master, we cannot use HBaseAdmin.flush() */
   public static void flushRegion(HBaseTestingUtility HTU, HRegionInfo regionInfo) throws IOException {
     for (RegionServerThread rst : HTU.getMiniHBaseCluster().getRegionServerThreads()) {
-      Region region = rst.getRegionServer().getRegionByEncodedName(regionInfo.getEncodedName());
+      HRegion region = rst.getRegionServer().getRegionByEncodedName(regionInfo.getEncodedName());
       if (region != null) {
         region.flush(true);
         return;
@@ -153,7 +153,7 @@ public class TestRegionServerNoMaster {
   public static void openRegion(HBaseTestingUtility HTU, HRegionServer rs, HRegionInfo hri)
       throws Exception {
     AdminProtos.OpenRegionRequest orr =
-      RequestConverter.buildOpenRegionRequest(rs.getServerName(), hri, null, null);
+      RequestConverter.buildOpenRegionRequest(rs.getServerName(), hri, null);
     AdminProtos.OpenRegionResponse responseOpen = rs.rpcServices.openRegion(null, orr);
 
     Assert.assertTrue(responseOpen.getOpeningStateCount() == 1);
@@ -176,7 +176,7 @@ public class TestRegionServerNoMaster {
   public static void closeRegion(HBaseTestingUtility HTU, HRegionServer rs, HRegionInfo hri)
       throws Exception {
     AdminProtos.CloseRegionRequest crr = ProtobufUtil.buildCloseRegionRequest(
-      rs.getServerName(), hri.getEncodedName());
+      rs.getServerName(), hri.getRegionName());
     AdminProtos.CloseRegionResponse responseClose = rs.rpcServices.closeRegion(null, crr);
     Assert.assertTrue(responseClose.getClosed());
     checkRegionIsClosed(HTU, rs, hri);
@@ -225,7 +225,7 @@ public class TestRegionServerNoMaster {
         AdminProtos.CloseRegionResponse responseClose = getRS().rpcServices.closeRegion(null, crr);
         Assert.assertTrue("request " + i + " failed",
             responseClose.getClosed() || responseClose.hasClosed());
-      } catch (org.apache.hadoop.hbase.shaded.com.google.protobuf.ServiceException se) {
+      } catch (org.apache.hbase.thirdparty.com.google.protobuf.ServiceException se) {
         Assert.assertTrue("The next queries may throw an exception.", i > 0);
       }
     }
@@ -253,7 +253,7 @@ public class TestRegionServerNoMaster {
     try {
       getRS().rpcServices.closeRegion(null, crr);
       Assert.assertTrue(false);
-    } catch (org.apache.hadoop.hbase.shaded.com.google.protobuf.ServiceException expected) {
+    } catch (org.apache.hbase.thirdparty.com.google.protobuf.ServiceException expected) {
     }
 
     // The state in RIT should have changed to close
@@ -261,9 +261,9 @@ public class TestRegionServerNoMaster {
         hri.getEncodedNameAsBytes()));
 
     // Let's start the open handler
-    HTableDescriptor htd = getRS().tableDescriptors.get(hri.getTable());
+    TableDescriptor htd = getRS().tableDescriptors.get(hri.getTable());
 
-    getRS().service.submit(new OpenRegionHandler(getRS(), getRS(), hri, htd, -1));
+    getRS().executorService.submit(new OpenRegionHandler(getRS(), getRS(), hri, htd, -1));
 
     // The open handler should have removed the region from RIT but kept the region closed
     checkRegionIsClosed(HTU, getRS(), hri);
@@ -286,7 +286,7 @@ public class TestRegionServerNoMaster {
       CloseRegionRequest request = ProtobufUtil.buildCloseRegionRequest(earlierServerName, regionName);
       getRS().getRSRpcServices().closeRegion(null, request);
       Assert.fail("The closeRegion should have been rejected");
-    } catch (org.apache.hadoop.hbase.shaded.com.google.protobuf.ServiceException se) {
+    } catch (org.apache.hbase.thirdparty.com.google.protobuf.ServiceException se) {
       Assert.assertTrue(se.getCause() instanceof IOException);
       Assert.assertTrue(se.getCause().getMessage().contains("This RPC was intended for a different server"));
     }
@@ -295,10 +295,10 @@ public class TestRegionServerNoMaster {
     closeRegionNoZK();
     try {
       AdminProtos.OpenRegionRequest orr = RequestConverter.buildOpenRegionRequest(
-        earlierServerName, hri, null, null);
+        earlierServerName, hri, null);
       getRS().getRSRpcServices().openRegion(null, orr);
       Assert.fail("The openRegion should have been rejected");
-    } catch (org.apache.hadoop.hbase.shaded.com.google.protobuf.ServiceException se) {
+    } catch (org.apache.hbase.thirdparty.com.google.protobuf.ServiceException se) {
       Assert.assertTrue(se.getCause() instanceof IOException);
       Assert.assertTrue(se.getCause().getMessage().contains("This RPC was intended for a different server"));
     } finally {

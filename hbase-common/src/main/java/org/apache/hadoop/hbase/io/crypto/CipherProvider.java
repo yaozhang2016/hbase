@@ -17,15 +17,13 @@
 package org.apache.hadoop.hbase.io.crypto;
 
 import org.apache.hadoop.conf.Configurable;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * An CipherProvider contributes support for various cryptographic
  * Ciphers.
  */
 @InterfaceAudience.Public
-@InterfaceStability.Evolving
 public interface CipherProvider extends Configurable {
 
   /**

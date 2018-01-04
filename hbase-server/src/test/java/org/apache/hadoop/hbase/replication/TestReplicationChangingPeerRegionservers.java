@@ -24,8 +24,6 @@ import static org.junit.Assert.fail;
 
 import java.io.IOException;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.MiniHBaseCluster;
 import org.apache.hadoop.hbase.client.Get;
 import org.apache.hadoop.hbase.client.Put;
@@ -39,14 +37,16 @@ import org.apache.hadoop.hbase.util.JVMClusterUtil;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Test handling of changes to the number of a peer's regionservers.
  */
 @Category({ReplicationTests.class, LargeTests.class})
 public class TestReplicationChangingPeerRegionservers extends TestReplicationBase {
-
-  private static final Log LOG = LogFactory.getLog(TestReplicationChangingPeerRegionservers.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(TestReplicationChangingPeerRegionservers.class);
 
   /**
    * @throws java.lang.Exception
@@ -57,7 +57,7 @@ public class TestReplicationChangingPeerRegionservers extends TestReplicationBas
     // rolling like this makes sure the most recent one gets added to the queue
     for (JVMClusterUtil.RegionServerThread r :
                           utility1.getHBaseCluster().getRegionServerThreads()) {
-      utility1.getHBaseAdmin().rollWALWriter(r.getRegionServer().getServerName());
+      utility1.getAdmin().rollWALWriter(r.getRegionServer().getServerName());
     }
     utility1.deleteTableData(tableName);
     // truncating the table will send one Delete per row to the slave cluster
@@ -130,7 +130,7 @@ public class TestReplicationChangingPeerRegionservers extends TestReplicationBas
         fail("Waited too much time for put replication");
       }
       Result res = htable2.get(get);
-      if (res.size() == 0) {
+      if (res.isEmpty()) {
         LOG.info("Row not available");
         Thread.sleep(SLEEP_TIME);
       } else {

@@ -29,12 +29,6 @@ import java.util.Timer;
 import java.util.TimerTask;
 import java.util.concurrent.locks.ReentrantLock;
 
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.collect.Lists;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
@@ -43,6 +37,13 @@ import org.apache.hadoop.hbase.Stoppable;
 import org.apache.hadoop.hbase.snapshot.CorruptedSnapshotException;
 import org.apache.hadoop.hbase.snapshot.SnapshotDescriptionUtils;
 import org.apache.hadoop.hbase.util.FSUtils;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceStability;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
+import org.apache.hbase.thirdparty.com.google.common.collect.Lists;
 
 /**
  * Intelligently keep track of all the files for all the snapshots.
@@ -85,18 +86,17 @@ public class SnapshotFileCache implements Stoppable {
     Collection<String> filesUnderSnapshot(final Path snapshotDir) throws IOException;
   }
 
-  private static final Log LOG = LogFactory.getLog(SnapshotFileCache.class);
+  private static final Logger LOG = LoggerFactory.getLogger(SnapshotFileCache.class);
   private volatile boolean stop = false;
   private final FileSystem fs;
   private final SnapshotFileInspector fileInspector;
   private final Path snapshotDir;
-  private final Set<String> cache = new HashSet<String>();
+  private final Set<String> cache = new HashSet<>();
   /**
    * This is a helper map of information about the snapshot directories so we don't need to rescan
    * them if they haven't changed since the last time we looked.
    */
-  private final Map<String, SnapshotDirectoryInfo> snapshots =
-      new HashMap<String, SnapshotDirectoryInfo>();
+  private final Map<String, SnapshotDirectoryInfo> snapshots = new HashMap<>();
   private final Timer refreshTimer;
 
   private long lastModifiedTime = Long.MIN_VALUE;
@@ -205,14 +205,10 @@ public class SnapshotFileCache implements Stoppable {
   }
 
   private synchronized void refreshCache() throws IOException {
-    long lastTimestamp = Long.MAX_VALUE;
-    boolean hasChanges = false;
-
     // get the status of the snapshots directory and check if it is has changes
+    FileStatus dirStatus;
     try {
-      FileStatus dirStatus = fs.getFileStatus(snapshotDir);
-      lastTimestamp = dirStatus.getModificationTime();
-      hasChanges |= (lastTimestamp >= lastModifiedTime);
+      dirStatus = fs.getFileStatus(snapshotDir);
     } catch (FileNotFoundException e) {
       if (this.cache.size() > 0) {
         LOG.error("Snapshot directory: " + snapshotDir + " doesn't exist");
@@ -220,30 +216,8 @@ public class SnapshotFileCache implements Stoppable {
       return;
     }
 
-    // get the status of the snapshots temporary directory and check if it has changes
-    // The top-level directory timestamp is not updated, so we have to check the inner-level.
-    try {
-      Path snapshotTmpDir = new Path(snapshotDir, SnapshotDescriptionUtils.SNAPSHOT_TMP_DIR_NAME);
-      FileStatus tempDirStatus = fs.getFileStatus(snapshotTmpDir);
-      lastTimestamp = Math.min(lastTimestamp, tempDirStatus.getModificationTime());
-      hasChanges |= (lastTimestamp >= lastModifiedTime);
-      if (!hasChanges) {
-        FileStatus[] tmpSnapshots = FSUtils.listStatus(fs, snapshotDir);
-        if (tmpSnapshots != null) {
-          for (FileStatus dirStatus: tmpSnapshots) {
-            lastTimestamp = Math.min(lastTimestamp, dirStatus.getModificationTime());
-          }
-          hasChanges |= (lastTimestamp >= lastModifiedTime);
-        }
-      }
-    } catch (FileNotFoundException e) {
-      // Nothing todo, if the tmp dir is empty
-    }
-
     // if the snapshot directory wasn't modified since we last check, we are done
-    if (!hasChanges) {
-      return;
-    }
+    if (dirStatus.getModificationTime() <= this.lastModifiedTime) return;
 
     // directory was modified, so we need to reload our cache
     // there could be a slight race here where we miss the cache, check the directory modification
@@ -251,11 +225,11 @@ public class SnapshotFileCache implements Stoppable {
     // However, snapshot directories are only created once, so this isn't an issue.
 
     // 1. update the modified time
-    this.lastModifiedTime = lastTimestamp;
+    this.lastModifiedTime = dirStatus.getModificationTime();
 
     // 2.clear the cache
     this.cache.clear();
-    Map<String, SnapshotDirectoryInfo> known = new HashMap<String, SnapshotDirectoryInfo>();
+    Map<String, SnapshotDirectoryInfo> known = new HashMap<>();
 
     // 3. check each of the snapshot directories
     FileStatus[] snapshots = FSUtils.listStatus(fs, snapshotDir);

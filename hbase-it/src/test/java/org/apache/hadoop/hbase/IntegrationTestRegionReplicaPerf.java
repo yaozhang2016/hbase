@@ -18,12 +18,10 @@
  */
 package org.apache.hadoop.hbase;
 
-import com.google.common.base.Objects;
-import com.google.common.collect.Sets;
+import org.apache.hbase.thirdparty.com.google.common.base.MoreObjects;
+import org.apache.hbase.thirdparty.com.google.common.collect.Sets;
 import com.codahale.metrics.Histogram;
 import org.apache.commons.cli.CommandLine;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.chaos.actions.MoveRandomRegionOfTableAction;
 import org.apache.hadoop.hbase.chaos.actions.RestartRandomRsExceptMetaAction;
@@ -40,6 +38,8 @@ import org.apache.hadoop.mapreduce.Counters;
 import org.apache.hadoop.mapreduce.Job;
 import org.apache.hadoop.util.ToolRunner;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.*;
 import java.util.concurrent.Callable;
@@ -59,7 +59,7 @@ import static org.junit.Assert.assertTrue;
 @Category(IntegrationTests.class)
 public class IntegrationTestRegionReplicaPerf extends IntegrationTestBase {
 
-  private static final Log LOG = LogFactory.getLog(IntegrationTestRegionReplicaPerf.class);
+  private static final Logger LOG = LoggerFactory.getLogger(IntegrationTestRegionReplicaPerf.class);
 
   private static final String SLEEP_TIME_KEY = "sleeptime";
   // short default interval because tests don't run very long.
@@ -72,6 +72,7 @@ public class IntegrationTestRegionReplicaPerf extends IntegrationTestBase {
   private static final String PRIMARY_TIMEOUT_DEFAULT = "" + 10 * 1000; // 10 ms
   private static final String NUM_RS_KEY = "numRs";
   private static final String NUM_RS_DEFAULT = "" + 3;
+  public static final String FAMILY_NAME = "info";
 
   /** Extract a descriptive statistic from a {@link com.codahale.metrics.Histogram}. */
   private enum Stat {
@@ -149,7 +150,7 @@ public class IntegrationTestRegionReplicaPerf extends IntegrationTestBase {
 
     @Override
     public String toString() {
-      return Objects.toStringHelper(this)
+      return MoreObjects.toStringHelper(this)
         .add("numRows", numRows)
         .add("elapsedTime", elapsedTime)
         .toString();
@@ -214,7 +215,7 @@ public class IntegrationTestRegionReplicaPerf extends IntegrationTestBase {
     primaryTimeout =
       Integer.parseInt(cmd.getOptionValue(PRIMARY_TIMEOUT_KEY, PRIMARY_TIMEOUT_DEFAULT));
     clusterSize = Integer.parseInt(cmd.getOptionValue(NUM_RS_KEY, NUM_RS_DEFAULT));
-    LOG.debug(Objects.toStringHelper("Parsed Options")
+    LOG.debug(MoreObjects.toStringHelper("Parsed Options")
       .add(TABLE_NAME_KEY, tableName)
       .add(SLEEP_TIME_KEY, sleepTime)
       .add(REPLICA_COUNT_KEY, replicaCount)
@@ -236,7 +237,7 @@ public class IntegrationTestRegionReplicaPerf extends IntegrationTestBase {
 
   @Override
   protected Set<String> getColumnFamilies() {
-    return Sets.newHashSet(Bytes.toString(PerformanceEvaluation.FAMILY_NAME));
+    return Sets.newHashSet(FAMILY_NAME);
   }
 
   /** Compute the mean of the given {@code stat} from a timing results. */
@@ -266,23 +267,23 @@ public class IntegrationTestRegionReplicaPerf extends IntegrationTestBase {
       format("--nomapred --table=%s --latency --sampleRate=0.1 randomRead 4", tableName);
     String replicaReadOpts = format("%s %s", replicas, readOpts);
 
-    ArrayList<TimingResult> resultsWithoutReplicas = new ArrayList<TimingResult>(maxIters);
-    ArrayList<TimingResult> resultsWithReplicas = new ArrayList<TimingResult>(maxIters);
+    ArrayList<TimingResult> resultsWithoutReplicas = new ArrayList<>(maxIters);
+    ArrayList<TimingResult> resultsWithReplicas = new ArrayList<>(maxIters);
 
     // create/populate the table, replicas disabled
     LOG.debug("Populating table.");
-    new PerfEvalCallable(util.getHBaseAdmin(), writeOpts).call();
+    new PerfEvalCallable(util.getAdmin(), writeOpts).call();
 
     // one last sanity check, then send in the clowns!
     assertEquals("Table must be created with DisabledRegionSplitPolicy. Broken test.",
         DisabledRegionSplitPolicy.class.getName(),
-        util.getHBaseAdmin().getTableDescriptor(tableName).getRegionSplitPolicyClassName());
+        util.getAdmin().getTableDescriptor(tableName).getRegionSplitPolicyClassName());
     startMonkey();
 
     // collect a baseline without region replicas.
     for (int i = 0; i < maxIters; i++) {
       LOG.debug("Launching non-replica job " + (i + 1) + "/" + maxIters);
-      resultsWithoutReplicas.add(new PerfEvalCallable(util.getHBaseAdmin(), readOpts).call());
+      resultsWithoutReplicas.add(new PerfEvalCallable(util.getAdmin(), readOpts).call());
       // TODO: sleep to let cluster stabilize, though monkey continues. is it necessary?
       Thread.sleep(5000l);
     }
@@ -290,14 +291,14 @@ public class IntegrationTestRegionReplicaPerf extends IntegrationTestBase {
     // disable monkey, enable region replicas, enable monkey
     cleanUpMonkey("Altering table.");
     LOG.debug("Altering " + tableName + " replica count to " + replicaCount);
-    IntegrationTestingUtility.setReplicas(util.getHBaseAdmin(), tableName, replicaCount);
+    IntegrationTestingUtility.setReplicas(util.getAdmin(), tableName, replicaCount);
     setUpMonkey();
     startMonkey();
 
     // run test with region replicas.
     for (int i = 0; i < maxIters; i++) {
       LOG.debug("Launching replica job " + (i + 1) + "/" + maxIters);
-      resultsWithReplicas.add(new PerfEvalCallable(util.getHBaseAdmin(), replicaReadOpts).call());
+      resultsWithReplicas.add(new PerfEvalCallable(util.getAdmin(), replicaReadOpts).call());
       // TODO: sleep to let cluster stabilize, though monkey continues. is it necessary?
       Thread.sleep(5000l);
     }
@@ -313,7 +314,7 @@ public class IntegrationTestRegionReplicaPerf extends IntegrationTestBase {
     double withReplicas9999Mean =
         calcMean("withReplicas", Stat.FOUR_9S, resultsWithReplicas);
 
-    LOG.info(Objects.toStringHelper(this)
+    LOG.info(MoreObjects.toStringHelper(this)
       .add("withoutReplicas", resultsWithoutReplicas)
       .add("withReplicas", resultsWithReplicas)
       .add("withoutReplicasStdevMean", withoutReplicasStdevMean)

@@ -21,12 +21,14 @@ package org.apache.hadoop.hbase.procedure2.store;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import org.apache.yetus.audience.InterfaceAudience;
+
 /**
  * Base class for {@link ProcedureStore}s.
  */
+@InterfaceAudience.Private
 public abstract class ProcedureStoreBase implements ProcedureStore {
-  private final CopyOnWriteArrayList<ProcedureStoreListener> listeners =
-      new CopyOnWriteArrayList<ProcedureStoreListener>();
+  private final CopyOnWriteArrayList<ProcedureStoreListener> listeners = new CopyOnWriteArrayList<>();
 
   private final AtomicBoolean running = new AtomicBoolean(false);
 

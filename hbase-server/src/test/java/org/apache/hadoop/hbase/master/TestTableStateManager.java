@@ -29,12 +29,15 @@ import org.apache.hadoop.hbase.shaded.protobuf.generated.ZooKeeperProtos;
 import org.apache.hadoop.hbase.testclassification.LargeTests;
 import org.apache.hadoop.hbase.testclassification.MasterTests;
 import org.apache.hadoop.hbase.zookeeper.ZKUtil;
-import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher;
+import org.apache.hadoop.hbase.zookeeper.ZKWatcher;
+import org.apache.hadoop.hbase.zookeeper.ZNodePaths;
 import org.apache.zookeeper.KeeperException;
 import org.junit.After;
 import org.junit.Assert;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.junit.rules.TestName;
 
 /**
  * Tests the default table lock manager
@@ -44,6 +47,9 @@ public class TestTableStateManager {
 
   private final HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
 
+  @Rule
+  public TestName name = new TestName();
+
   @After
   public void tearDown() throws Exception {
     TEST_UTIL.shutdownMiniCluster();
@@ -51,11 +57,10 @@ public class TestTableStateManager {
 
   @Test(timeout = 60000)
   public void testUpgradeFromZk() throws Exception {
-    TableName tableName =
-        TableName.valueOf("testUpgradeFromZk");
+    final TableName tableName = TableName.valueOf(name.getMethodName());
     TEST_UTIL.startMiniCluster(2, 1);
     TEST_UTIL.shutdownMiniHBaseCluster();
-    ZooKeeperWatcher watcher = TEST_UTIL.getZooKeeperWatcher();
+    ZKWatcher watcher = TEST_UTIL.getZooKeeperWatcher();
     setTableStateInZK(watcher, tableName, ZooKeeperProtos.DeprecatedTableState.State.DISABLED);
     TEST_UTIL.restartHBaseCluster(1);
 
@@ -65,10 +70,10 @@ public class TestTableStateManager {
         TableState.State.DISABLED);
   }
 
-  private void setTableStateInZK(ZooKeeperWatcher watcher, final TableName tableName,
-      final ZooKeeperProtos.DeprecatedTableState.State state)
+  private void setTableStateInZK(ZKWatcher watcher, final TableName tableName,
+                                 final ZooKeeperProtos.DeprecatedTableState.State state)
       throws KeeperException, IOException {
-    String znode = ZKUtil.joinZNode(watcher.znodePaths.tableZNode, tableName.getNameAsString());
+    String znode = ZNodePaths.joinZNode(watcher.znodePaths.tableZNode, tableName.getNameAsString());
     if (ZKUtil.checkExists(watcher, znode) == -1) {
       ZKUtil.createAndFailSilent(watcher, znode);
     }

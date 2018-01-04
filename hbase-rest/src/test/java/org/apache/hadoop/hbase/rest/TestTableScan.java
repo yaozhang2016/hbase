@@ -30,7 +30,6 @@ import java.io.Serializable;
 import java.net.URLEncoder;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.Iterator;
 import java.util.List;
 
 import javax.ws.rs.core.MediaType;
@@ -59,23 +58,27 @@ import org.apache.hadoop.hbase.rest.client.Response;
 import org.apache.hadoop.hbase.rest.model.CellModel;
 import org.apache.hadoop.hbase.rest.model.CellSetModel;
 import org.apache.hadoop.hbase.rest.model.RowModel;
-import org.apache.hadoop.hbase.rest.provider.JacksonProvider;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.testclassification.RestTests;
 import org.apache.hadoop.hbase.util.Bytes;
-import org.codehaus.jackson.JsonFactory;
-import org.codehaus.jackson.JsonParser;
-import org.codehaus.jackson.JsonToken;
-import org.codehaus.jackson.map.ObjectMapper;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.xml.sax.InputSource;
 import org.xml.sax.XMLReader;
 
+import com.fasterxml.jackson.core.JsonFactory;
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.core.JsonToken;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.jaxrs.json.JacksonJaxbJsonProvider;
+
 @Category({RestTests.class, MediumTests.class})
 public class TestTableScan {
+  private static final Logger LOG = LoggerFactory.getLogger(TestTableScan.class);
 
   private static final TableName TABLE = TableName.valueOf("TestScanResource");
   private static final String CFA = "a";
@@ -94,12 +97,12 @@ public class TestTableScan {
   @BeforeClass
   public static void setUpBeforeClass() throws Exception {
     conf = TEST_UTIL.getConfiguration();
-    conf.set(Constants.CUSTOM_FILTERS, "CustomFilter:" + CustomFilter.class.getName()); 
+    conf.set(Constants.CUSTOM_FILTERS, "CustomFilter:" + CustomFilter.class.getName());
     TEST_UTIL.startMiniCluster();
     REST_TEST_UTIL.startServletContainer(conf);
     client = new Client(new Cluster().add("localhost",
       REST_TEST_UTIL.getServletPort()));
-    Admin admin = TEST_UTIL.getHBaseAdmin();
+    Admin admin = TEST_UTIL.getAdmin();
     if (!admin.tableExists(TABLE)) {
     HTableDescriptor htd = new HTableDescriptor(TABLE);
     htd.addFamily(new HColumnDescriptor(CFA));
@@ -112,8 +115,8 @@ public class TestTableScan {
 
   @AfterClass
   public static void tearDownAfterClass() throws Exception {
-    TEST_UTIL.getHBaseAdmin().disableTable(TABLE);
-    TEST_UTIL.getHBaseAdmin().deleteTable(TABLE);
+    TEST_UTIL.getAdmin().disableTable(TABLE);
+    TEST_UTIL.getAdmin().deleteTable(TABLE);
     REST_TEST_UTIL.shutdownServletContainer();
     TEST_UTIL.shutdownMiniCluster();
   }
@@ -146,7 +149,7 @@ public class TestTableScan {
     response = client.get("/" + TABLE + builder.toString(),
       Constants.MIMETYPE_XML);
     assertEquals(200, response.getCode());
-    assertEquals(Constants.MIMETYPE_XML, response.getHeader("content-type")); 
+    assertEquals(Constants.MIMETYPE_XML, response.getHeader("content-type"));
     model = (CellSetModel) ush.unmarshal(response.getStream());
     count = TestScannerResource.countCellSet(model);
     assertEquals(expectedRows1, count);
@@ -202,16 +205,16 @@ public class TestTableScan {
     builder.append("?");
     builder.append(Constants.SCAN_COLUMN + "=" + COLUMN_1);
     builder.append("&");
-    builder.append(Constants.SCAN_LIMIT + "=20");
+    builder.append(Constants.SCAN_LIMIT + "=2");
     Response response = client.get("/" + TABLE + builder.toString(),
       Constants.MIMETYPE_JSON);
     assertEquals(200, response.getCode());
     assertEquals(Constants.MIMETYPE_JSON, response.getHeader("content-type"));
-    ObjectMapper mapper = new JacksonProvider()
+    ObjectMapper mapper = new JacksonJaxbJsonProvider()
         .locateMapper(CellSetModel.class, MediaType.APPLICATION_JSON_TYPE);
     CellSetModel model = mapper.readValue(response.getStream(), CellSetModel.class);
     int count = TestScannerResource.countCellSet(model);
-    assertEquals(20, count);
+    assertEquals(2, count);
     checkRowsNotNull(model);
 
     //Test scanning with no limit.
@@ -306,40 +309,8 @@ public class TestTableScan {
 
   @Test
   public void testStreamingJSON() throws Exception {
-    // Test scanning particular columns with limit.
-    StringBuilder builder = new StringBuilder();
-    builder.append("/*");
-    builder.append("?");
-    builder.append(Constants.SCAN_COLUMN + "=" + COLUMN_1);
-    builder.append("&");
-    builder.append(Constants.SCAN_LIMIT + "=20");
-    Response response = client.get("/" + TABLE + builder.toString(),
-      Constants.MIMETYPE_JSON);
-    assertEquals(200, response.getCode());
-    assertEquals(Constants.MIMETYPE_JSON, response.getHeader("content-type"));
-    ObjectMapper mapper = new JacksonProvider()
-        .locateMapper(CellSetModel.class, MediaType.APPLICATION_JSON_TYPE);
-    CellSetModel model = mapper.readValue(response.getStream(), CellSetModel.class);
-    int count = TestScannerResource.countCellSet(model);
-    assertEquals(20, count);
-    checkRowsNotNull(model);
-
-    //Test scanning with no limit.
-    builder = new StringBuilder();
-    builder.append("/*");
-    builder.append("?");
-    builder.append(Constants.SCAN_COLUMN + "=" + COLUMN_2);
-    response = client.get("/" + TABLE + builder.toString(),
-      Constants.MIMETYPE_JSON);
-    assertEquals(200, response.getCode());
-    assertEquals(Constants.MIMETYPE_JSON, response.getHeader("content-type"));
-    model = mapper.readValue(response.getStream(), CellSetModel.class);
-    count = TestScannerResource.countCellSet(model);
-    assertEquals(expectedRows2, count);
-    checkRowsNotNull(model);
-
     //Test with start row and end row.
-    builder = new StringBuilder();
+    StringBuilder builder = new StringBuilder();
     builder.append("/*");
     builder.append("?");
     builder.append(Constants.SCAN_COLUMN + "=" + COLUMN_1);
@@ -347,11 +318,13 @@ public class TestTableScan {
     builder.append(Constants.SCAN_START_ROW + "=aaa");
     builder.append("&");
     builder.append(Constants.SCAN_END_ROW + "=aay");
-    response = client.get("/" + TABLE + builder.toString(),
+    Response response = client.get("/" + TABLE + builder.toString(),
       Constants.MIMETYPE_JSON);
     assertEquals(200, response.getCode());
 
-    count = 0;
+    int count = 0;
+    ObjectMapper mapper = new JacksonJaxbJsonProvider()
+        .locateMapper(CellSetModel.class, MediaType.APPLICATION_JSON_TYPE);
     JsonFactory jfactory = new JsonFactory(mapper);
     JsonParser jParser = jfactory.createJsonParser(response.getStream());
     boolean found = false;
@@ -391,7 +364,7 @@ public class TestTableScan {
     int rowCount = readProtobufStream(response.getStream());
     assertEquals(15, rowCount);
 
-  //Test with start row and end row.
+    //Test with start row and end row.
     builder = new StringBuilder();
     builder.append("/*");
     builder.append("?");
@@ -460,17 +433,16 @@ public class TestTableScan {
       Constants.MIMETYPE_JSON);
     assertEquals(200, response.getCode());
     assertEquals(Constants.MIMETYPE_JSON, response.getHeader("content-type"));
-    ObjectMapper mapper = new JacksonProvider().locateMapper(CellSetModel.class,
+    ObjectMapper mapper = new JacksonJaxbJsonProvider().locateMapper(CellSetModel.class,
       MediaType.APPLICATION_JSON_TYPE);
     CellSetModel model = mapper.readValue(response.getStream(), CellSetModel.class);
     int count = TestScannerResource.countCellSet(model);
     assertEquals(0, count);
   }
-  
+
   @Test
   public void testSimpleFilter() throws IOException, JAXBException {
     StringBuilder builder = new StringBuilder();
-    builder = new StringBuilder();
     builder.append("/*");
     builder.append("?");
     builder.append(Constants.SCAN_COLUMN + "=" + COLUMN_1);
@@ -492,9 +464,26 @@ public class TestTableScan {
   }
 
   @Test
+  public void testQualifierAndPrefixFilters() throws IOException, JAXBException {
+    StringBuilder builder = new StringBuilder();
+    builder.append("/abc*");
+    builder.append("?");
+    builder.append(Constants.SCAN_FILTER + "="
+        + URLEncoder.encode("QualifierFilter(=,'binary:1')", "UTF-8"));
+    Response response =
+        client.get("/" + TABLE + builder.toString(), Constants.MIMETYPE_XML);
+    assertEquals(200, response.getCode());
+    JAXBContext ctx = JAXBContext.newInstance(CellSetModel.class);
+    Unmarshaller ush = ctx.createUnmarshaller();
+    CellSetModel model = (CellSetModel) ush.unmarshal(response.getStream());
+    int count = TestScannerResource.countCellSet(model);
+    assertEquals(1, count);
+    assertEquals("abc", new String(model.getRows().get(0).getCells().get(0).getValue()));
+  }
+
+  @Test
   public void testCompoundFilter() throws IOException, JAXBException {
     StringBuilder builder = new StringBuilder();
-    builder = new StringBuilder();
     builder.append("/*");
     builder.append("?");
     builder.append(Constants.SCAN_FILTER + "="
@@ -513,7 +502,6 @@ public class TestTableScan {
   @Test
   public void testCustomFilter() throws IOException, JAXBException {
     StringBuilder builder = new StringBuilder();
-    builder = new StringBuilder();
     builder.append("/a*");
     builder.append("?");
     builder.append(Constants.SCAN_COLUMN + "=" + COLUMN_1);
@@ -529,11 +517,10 @@ public class TestTableScan {
     assertEquals(1, count);
     assertEquals("abc", new String(model.getRows().get(0).getCells().get(0).getValue()));
   }
-  
+
   @Test
   public void testNegativeCustomFilter() throws IOException, JAXBException {
     StringBuilder builder = new StringBuilder();
-    builder = new StringBuilder();
     builder.append("/b*");
     builder.append("?");
     builder.append(Constants.SCAN_COLUMN + "=" + COLUMN_1);
@@ -606,7 +593,7 @@ public class TestTableScan {
     public CustomFilter(byte[] key) {
       super(key);
     }
-    
+
     @Override
     public boolean filterRowKey(byte[] buffer, int offset, int length) {
       int cmp = Bytes.compareTo(buffer, offset, length, this.key, 0, this.key.length);

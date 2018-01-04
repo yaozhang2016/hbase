@@ -18,33 +18,29 @@
 
 package org.apache.hadoop.hbase.procedure2;
 
+import static org.junit.Assert.assertEquals;
+
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.HBaseCommonTestingUtility;
-import org.apache.hadoop.hbase.procedure2.store.ProcedureStore;
 import org.apache.hadoop.hbase.procedure2.store.NoopProcedureStore;
-import org.apache.hadoop.hbase.testclassification.SmallTests;
+import org.apache.hadoop.hbase.procedure2.store.ProcedureStore;
 import org.apache.hadoop.hbase.testclassification.MasterTests;
+import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.apache.hadoop.hbase.util.Threads;
-
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
-
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Category({MasterTests.class, SmallTests.class})
 public class TestProcedureSuspended {
-  private static final Log LOG = LogFactory.getLog(TestProcedureSuspended.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestProcedureSuspended.class);
 
   private static final int PROCEDURE_EXECUTOR_SLOTS = 1;
   private static final Procedure NULL_PROC = null;
@@ -163,7 +159,7 @@ public class TestProcedureSuspended {
   }
 
   public static class TestLockProcedure extends Procedure<TestProcEnv> {
-    private final ArrayList<Long> timestamps = new ArrayList<Long>();
+    private final ArrayList<Long> timestamps = new ArrayList<>();
     private final String key;
 
     private boolean triggerRollback = false;
@@ -214,11 +210,12 @@ public class TestProcedureSuspended {
     }
 
     @Override
-    protected boolean acquireLock(final TestProcEnv env) {
+    protected LockState acquireLock(final TestProcEnv env) {
       if ((hasLock = lock.compareAndSet(false, true))) {
         LOG.info("ACQUIRE LOCK " + this + " " + (hasLock));
+        return LockState.LOCK_ACQUIRED;
       }
-      return hasLock;
+      return LockState.LOCK_YIELD_WAIT;
     }
 
     @Override
@@ -252,11 +249,13 @@ public class TestProcedureSuspended {
     protected boolean abort(TestProcEnv env) { return false; }
 
     @Override
-    protected void serializeStateData(final OutputStream stream) throws IOException {
+    protected void serializeStateData(ProcedureStateSerializer serializer)
+        throws IOException {
     }
 
     @Override
-    protected void deserializeStateData(final InputStream stream) throws IOException {
+    protected void deserializeStateData(ProcedureStateSerializer serializer)
+        throws IOException {
     }
   }
 

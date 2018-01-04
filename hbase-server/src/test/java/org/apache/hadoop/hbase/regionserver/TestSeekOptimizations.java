@@ -32,14 +32,13 @@ import java.util.Map;
 import java.util.Random;
 import java.util.Set;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.Cell;
-import org.apache.hadoop.hbase.CellComparator;
+import org.apache.hadoop.hbase.CellComparatorImpl;
 import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HConstants;
+import org.apache.hadoop.hbase.PrivateCellUtil;
 import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.client.Delete;
 import org.apache.hadoop.hbase.client.Put;
@@ -55,6 +54,8 @@ import org.junit.experimental.categories.Category;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 import org.junit.runners.Parameterized.Parameters;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Test various seek optimizations for correctness and check if they are
@@ -64,8 +65,8 @@ import org.junit.runners.Parameterized.Parameters;
 @Category({RegionServerTests.class, MediumTests.class})
 public class TestSeekOptimizations {
 
-  private static final Log LOG =
-      LogFactory.getLog(TestSeekOptimizations.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(TestSeekOptimizations.class);
 
   // Constants
   private static final String FAMILY = "myCF";
@@ -107,13 +108,13 @@ public class TestSeekOptimizations {
   private static final int[] MAX_VERSIONS_VALUES = new int[] { 1, 2 };
 
   // Instance variables
-  private Region region;
+  private HRegion region;
   private Put put;
   private Delete del;
   private Random rand;
-  private Set<Long> putTimestamps = new HashSet<Long>();
-  private Set<Long> delTimestamps = new HashSet<Long>();
-  private List<Cell> expectedKVs = new ArrayList<Cell>();
+  private Set<Long> putTimestamps = new HashSet<>();
+  private Set<Long> delTimestamps = new HashSet<>();
+  private List<Cell> expectedKVs = new ArrayList<>();
 
   private Compression.Algorithm comprAlgo;
   private BloomType bloomType;
@@ -199,7 +200,7 @@ public class TestSeekOptimizations {
       throws IOException {
     StoreScanner.enableLazySeekGlobally(lazySeekEnabled);
     final Scan scan = new Scan();
-    final Set<String> qualSet = new HashSet<String>();
+    final Set<String> qualSet = new HashSet<>();
     for (int iColumn : columnArr) {
       String qualStr = getQualStr(iColumn);
       scan.addColumn(FAMILY_BYTES, Bytes.toBytes(qualStr));
@@ -217,8 +218,8 @@ public class TestSeekOptimizations {
 
     final long initialSeekCount = StoreFileScanner.getSeekCount();
     final InternalScanner scanner = region.getScanner(scan);
-    final List<Cell> results = new ArrayList<Cell>();
-    final List<Cell> actualKVs = new ArrayList<Cell>();
+    final List<Cell> results = new ArrayList<>();
+    final List<Cell> actualKVs = new ArrayList<>();
 
     // Such a clumsy do-while loop appears to be the official way to use an
     // internalScanner. scanner.next() return value refers to the _next_
@@ -260,8 +261,8 @@ public class TestSeekOptimizations {
 
   private List<Cell> filterExpectedResults(Set<String> qualSet,
       byte[] startRow, byte[] endRow, int maxVersions) {
-    final List<Cell> filteredKVs = new ArrayList<Cell>();
-    final Map<String, Integer> verCount = new HashMap<String, Integer>();
+    final List<Cell> filteredKVs = new ArrayList<>();
+    final Map<String, Integer> verCount = new HashMap<>();
     for (Cell kv : expectedKVs) {
       if (startRow.length > 0 &&
           Bytes.compareTo(kv.getRowArray(), kv.getRowOffset(), kv.getRowLength(),
@@ -297,14 +298,14 @@ public class TestSeekOptimizations {
   }
 
   private void prepareExpectedKVs(long latestDelTS) {
-    final List<Cell> filteredKVs = new ArrayList<Cell>();
+    final List<Cell> filteredKVs = new ArrayList<>();
     for (Cell kv : expectedKVs) {
       if (kv.getTimestamp() > latestDelTS || latestDelTS == -1) {
         filteredKVs.add(kv);
       }
     }
     expectedKVs = filteredKVs;
-    Collections.sort(expectedKVs, CellComparator.COMPARATOR);
+    Collections.sort(expectedKVs, CellComparatorImpl.COMPARATOR);
   }
 
   public void put(String qual, long ts) {
@@ -459,8 +460,9 @@ public class TestSeekOptimizations {
 
     int i;
     for (i = 0; i < minLen
-        && CellComparator.COMPARATOR.compareKeyIgnoresMvcc(expected.get(i), actual.get(i)) == 0;
-        ++i) {}
+        && PrivateCellUtil.compareKeyIgnoresMvcc(CellComparatorImpl.COMPARATOR, expected.get(i),
+          actual.get(i)) == 0; ++i) {
+    }
 
     if (additionalMsg == null) {
       additionalMsg = "";

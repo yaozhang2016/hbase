@@ -19,21 +19,19 @@
 package org.apache.hadoop.hbase.master.procedure;
 
 
-import static org.junit.Assert.*;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
-import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.NamespaceDescriptor;
 import org.apache.hadoop.hbase.NamespaceNotFoundException;
-import org.apache.hadoop.hbase.ProcedureInfo;
 import org.apache.hadoop.hbase.constraint.ConstraintException;
+import org.apache.hadoop.hbase.procedure2.Procedure;
 import org.apache.hadoop.hbase.procedure2.ProcedureExecutor;
 import org.apache.hadoop.hbase.procedure2.ProcedureTestingUtility;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProcedureProtos.ModifyNamespaceState;
 import org.apache.hadoop.hbase.testclassification.MasterTests;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.junit.After;
@@ -42,15 +40,14 @@ import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Category({MasterTests.class, MediumTests.class})
 public class TestModifyNamespaceProcedure {
-  private static final Log LOG = LogFactory.getLog(TestModifyNamespaceProcedure.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestModifyNamespaceProcedure.class);
 
   protected static final HBaseTestingUtility UTIL = new HBaseTestingUtility();
-
-  private static long nonceGroup = HConstants.NO_NONCE;
-  private static long nonce = HConstants.NO_NONCE;
 
   private static void setupConf(Configuration conf) {
     conf.setInt(MasterProcedureConstants.MASTER_PROCEDURE_THREADS, 1);
@@ -74,15 +71,12 @@ public class TestModifyNamespaceProcedure {
   @Before
   public void setup() throws Exception {
     ProcedureTestingUtility.setKillAndToggleBeforeStoreUpdate(getMasterProcedureExecutor(), false);
-    nonceGroup =
-        MasterProcedureTestingUtility.generateNonceGroup(UTIL.getHBaseCluster().getMaster());
-    nonce = MasterProcedureTestingUtility.generateNonce(UTIL.getHBaseCluster().getMaster());
   }
 
   @After
   public void tearDown() throws Exception {
     ProcedureTestingUtility.setKillAndToggleBeforeStoreUpdate(getMasterProcedureExecutor(), false);
-    for (HTableDescriptor htd: UTIL.getHBaseAdmin().listTables()) {
+    for (HTableDescriptor htd: UTIL.getAdmin().listTables()) {
       LOG.info("Tear down, remove table=" + htd.getTableName());
       UTIL.deleteTable(htd.getTableName());
     }
@@ -104,7 +98,7 @@ public class TestModifyNamespaceProcedure {
 
     // Before modify
     NamespaceDescriptor currentNsDescriptor =
-        UTIL.getHBaseAdmin().getNamespaceDescriptor(nsd.getName());
+        UTIL.getAdmin().getNamespaceDescriptor(nsd.getName());
     assertEquals(currentNsDescriptor.getConfigurationValue(nsKey1), nsValue1before);
     assertNull(currentNsDescriptor.getConfigurationValue(nsKey2));
 
@@ -113,16 +107,14 @@ public class TestModifyNamespaceProcedure {
     nsd.setConfiguration(nsKey2, nsValue2);
 
     long procId1 = procExec.submitProcedure(
-      new ModifyNamespaceProcedure(procExec.getEnvironment(), nsd),
-      nonceGroup,
-      nonce);
+      new ModifyNamespaceProcedure(procExec.getEnvironment(), nsd));
     // Wait the completion
     ProcedureTestingUtility.waitProcedure(procExec, procId1);
     ProcedureTestingUtility.assertProcNotFailed(procExec, procId1);
 
     // Verify the namespace is updated.
     currentNsDescriptor =
-        UTIL.getHBaseAdmin().getNamespaceDescriptor(nsd.getName());
+        UTIL.getAdmin().getNamespaceDescriptor(nsd.getName());
     assertEquals(nsd.getConfigurationValue(nsKey1), nsValue1after);
     assertEquals(currentNsDescriptor.getConfigurationValue(nsKey2), nsValue2);
   }
@@ -133,7 +125,7 @@ public class TestModifyNamespaceProcedure {
     final ProcedureExecutor<MasterProcedureEnv> procExec = getMasterProcedureExecutor();
 
     try {
-      NamespaceDescriptor nsDescriptor = UTIL.getHBaseAdmin().getNamespaceDescriptor(namespaceName);
+      NamespaceDescriptor nsDescriptor = UTIL.getAdmin().getNamespaceDescriptor(namespaceName);
       assertNull(nsDescriptor);
     } catch (NamespaceNotFoundException nsnfe) {
       // Expected
@@ -143,16 +135,14 @@ public class TestModifyNamespaceProcedure {
     final NamespaceDescriptor nsd = NamespaceDescriptor.create(namespaceName).build();
 
     long procId = procExec.submitProcedure(
-      new ModifyNamespaceProcedure(procExec.getEnvironment(), nsd),
-      nonceGroup,
-      nonce);
+      new ModifyNamespaceProcedure(procExec.getEnvironment(), nsd));
     // Wait the completion
     ProcedureTestingUtility.waitProcedure(procExec, procId);
 
     // Expect fail with NamespaceNotFoundException
-    ProcedureInfo result = procExec.getResult(procId);
+    Procedure<?> result = procExec.getResult(procId);
     assertTrue(result.isFailed());
-    LOG.debug("modify namespace failed with exception: " + result.getExceptionFullMessage());
+    LOG.debug("modify namespace failed with exception: " + result.getException());
     assertTrue(
       ProcedureTestingUtility.getExceptionCause(result) instanceof NamespaceNotFoundException);
   }
@@ -171,14 +161,12 @@ public class TestModifyNamespaceProcedure {
     nsd.setConfiguration(nsKey, nsValue);
 
     long procId = procExec.submitProcedure(
-      new ModifyNamespaceProcedure(procExec.getEnvironment(), nsd),
-      nonceGroup,
-      nonce);
+      new ModifyNamespaceProcedure(procExec.getEnvironment(), nsd));
     // Wait the completion
     ProcedureTestingUtility.waitProcedure(procExec, procId);
-    ProcedureInfo result = procExec.getResult(procId);
+    Procedure<?> result = procExec.getResult(procId);
     assertTrue(result.isFailed());
-    LOG.debug("Modify namespace failed with exception: " + result.getExceptionFullMessage());
+    LOG.debug("Modify namespace failed with exception: " + result.getException());
     assertTrue(ProcedureTestingUtility.getExceptionCause(result) instanceof ConstraintException);
   }
 
@@ -196,14 +184,12 @@ public class TestModifyNamespaceProcedure {
     nsd.setConfiguration(nsKey, nsValue);
 
     long procId = procExec.submitProcedure(
-      new ModifyNamespaceProcedure(procExec.getEnvironment(), nsd),
-      nonceGroup,
-      nonce);
+      new ModifyNamespaceProcedure(procExec.getEnvironment(), nsd));
     // Wait the completion
     ProcedureTestingUtility.waitProcedure(procExec, procId);
-    ProcedureInfo result = procExec.getResult(procId);
+    Procedure<?> result = procExec.getResult(procId);
     assertTrue(result.isFailed());
-    LOG.debug("Modify namespace failed with exception: " + result.getExceptionFullMessage());
+    LOG.debug("Modify namespace failed with exception: " + result.getException());
     assertTrue(ProcedureTestingUtility.getExceptionCause(result) instanceof ConstraintException);
   }
 
@@ -224,18 +210,15 @@ public class TestModifyNamespaceProcedure {
 
     // Start the Modify procedure && kill the executor
     long procId = procExec.submitProcedure(
-      new ModifyNamespaceProcedure(procExec.getEnvironment(), nsd),
-      nonceGroup,
-      nonce);
+      new ModifyNamespaceProcedure(procExec.getEnvironment(), nsd));
 
     // Restart the executor and execute the step twice
-    int numberOfSteps = ModifyNamespaceState.values().length;
-    MasterProcedureTestingUtility.testRecoveryAndDoubleExecution(procExec, procId, numberOfSteps);
+    MasterProcedureTestingUtility.testRecoveryAndDoubleExecution(procExec, procId);
 
     ProcedureTestingUtility.assertProcNotFailed(procExec, procId);
     // Validate
     NamespaceDescriptor currentNsDescriptor =
-        UTIL.getHBaseAdmin().getNamespaceDescriptor(nsd.getName());
+        UTIL.getAdmin().getNamespaceDescriptor(nsd.getName());
     assertEquals(currentNsDescriptor.getConfigurationValue(nsKey), nsValue);
   }
 
@@ -256,16 +239,14 @@ public class TestModifyNamespaceProcedure {
 
     // Start the Modify procedure && kill the executor
     long procId = procExec.submitProcedure(
-      new ModifyNamespaceProcedure(procExec.getEnvironment(), nsd),
-      nonceGroup,
-      nonce);
+      new ModifyNamespaceProcedure(procExec.getEnvironment(), nsd));
 
     int numberOfSteps = 0; // failing at pre operation
     MasterProcedureTestingUtility.testRollbackAndDoubleExecution(procExec, procId, numberOfSteps);
 
     // Validate
     NamespaceDescriptor currentNsDescriptor =
-        UTIL.getHBaseAdmin().getNamespaceDescriptor(nsd.getName());
+        UTIL.getAdmin().getNamespaceDescriptor(nsd.getName());
     assertNull(currentNsDescriptor.getConfigurationValue(nsKey));
   }
 
@@ -277,9 +258,7 @@ public class TestModifyNamespaceProcedure {
     final ProcedureExecutor<MasterProcedureEnv> procExec = getMasterProcedureExecutor();
 
     long procId = procExec.submitProcedure(
-      new CreateNamespaceProcedure(procExec.getEnvironment(), nsDescriptor),
-      nonceGroup + 1,
-      nonce + 1);
+      new CreateNamespaceProcedure(procExec.getEnvironment(), nsDescriptor));
     // Wait the completion
     ProcedureTestingUtility.waitProcedure(procExec, procId);
     ProcedureTestingUtility.assertProcNotFailed(procExec, procId);

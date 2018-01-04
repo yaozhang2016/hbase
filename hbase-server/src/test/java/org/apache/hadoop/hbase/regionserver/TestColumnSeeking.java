@@ -30,8 +30,6 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.CategoryBasedTimeout;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
@@ -52,6 +50,8 @@ import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.junit.rules.TestName;
 import org.junit.rules.TestRule;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Category({RegionServerTests.class, MediumTests.class})
 public class TestColumnSeeking {
@@ -60,7 +60,7 @@ public class TestColumnSeeking {
       withLookingForStuckThread(true).build();
   private final static HBaseTestingUtility TEST_UTIL = HBaseTestingUtility.createLocalHTU();
 
-  private static final Log LOG = LogFactory.getLog(TestColumnSeeking.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestColumnSeeking.class);
 
   @SuppressWarnings("unchecked")
   @Test
@@ -76,7 +76,7 @@ public class TestColumnSeeking {
     htd.addFamily(hcd);
     HRegionInfo info = new HRegionInfo(table, null, null, false);
     // Set this so that the archiver writes to the temp dir as well.
-    Region region = TEST_UTIL.createLocalHRegion(info, htd);
+    HRegion region = TEST_UTIL.createLocalHRegion(info, htd);
     try {
       List<String> rows = generateRandomWords(10, "row");
       List<String> allColumns = generateRandomWords(10, "column");
@@ -90,14 +90,14 @@ public class TestColumnSeeking {
       double majorPercentage = 0.2;
       double putPercentage = 0.2;
 
-      HashMap<String, KeyValue> allKVMap = new HashMap<String, KeyValue>();
+      HashMap<String, KeyValue> allKVMap = new HashMap<>();
 
       HashMap<String, KeyValue>[] kvMaps = new HashMap[numberOfTests];
       ArrayList<String>[] columnLists = new ArrayList[numberOfTests];
 
       for (int i = 0; i < numberOfTests; i++) {
-        kvMaps[i] = new HashMap<String, KeyValue>();
-        columnLists[i] = new ArrayList<String>();
+        kvMaps[i] = new HashMap<>();
+        columnLists[i] = new ArrayList<>();
         for (String column : allColumns) {
           if (Math.random() < selectPercent) {
             columnLists[i].add(column);
@@ -147,7 +147,7 @@ public class TestColumnSeeking {
         Scan scan = new Scan();
         scan.setMaxVersions();
         if (i < numberOfTests) {
-          if (columnLists[i].size() == 0) continue; // HBASE-7700
+          if (columnLists[i].isEmpty()) continue; // HBASE-7700
           kvSet = kvMaps[i].values();
           for (String column : columnLists[i]) {
             scan.addColumn(familyBytes, Bytes.toBytes(column));
@@ -162,7 +162,7 @@ public class TestColumnSeeking {
 
         }
         InternalScanner scanner = region.getScanner(scan);
-        List<Cell> results = new ArrayList<Cell>();
+        List<Cell> results = new ArrayList<>();
         while (scanner.next(results))
           ;
         assertEquals(kvSet.size(), results.size());
@@ -188,7 +188,7 @@ public class TestColumnSeeking {
     htd.addFamily(hcd);
 
     HRegionInfo info = new HRegionInfo(table, null, null, false);
-    Region region = TEST_UTIL.createLocalHRegion(info, htd);
+    HRegion region = TEST_UTIL.createLocalHRegion(info, htd);
 
     List<String> rows = generateRandomWords(10, "row");
     List<String> allColumns = generateRandomWords(100, "column");
@@ -201,15 +201,15 @@ public class TestColumnSeeking {
     double majorPercentage = 0.2;
     double putPercentage = 0.2;
 
-    HashMap<String, KeyValue> allKVMap = new HashMap<String, KeyValue>();
+    HashMap<String, KeyValue> allKVMap = new HashMap<>();
 
     HashMap<String, KeyValue>[] kvMaps = new HashMap[numberOfTests];
     ArrayList<String>[] columnLists = new ArrayList[numberOfTests];
     String valueString = "Value";
 
     for (int i = 0; i < numberOfTests; i++) {
-      kvMaps[i] = new HashMap<String, KeyValue>();
-      columnLists[i] = new ArrayList<String>();
+      kvMaps[i] = new HashMap<>();
+      columnLists[i] = new ArrayList<>();
       for (String column : allColumns) {
         if (Math.random() < selectPercent) {
           columnLists[i].add(column);
@@ -259,7 +259,7 @@ public class TestColumnSeeking {
       Scan scan = new Scan();
       scan.setMaxVersions();
       if (i < numberOfTests) {
-        if (columnLists[i].size() == 0) continue; // HBASE-7700
+        if (columnLists[i].isEmpty()) continue; // HBASE-7700
         kvSet = kvMaps[i].values();
         for (String column : columnLists[i]) {
           scan.addColumn(familyBytes, Bytes.toBytes(column));
@@ -274,7 +274,7 @@ public class TestColumnSeeking {
 
       }
       InternalScanner scanner = region.getScanner(scan);
-      List<Cell> results = new ArrayList<Cell>();
+      List<Cell> results = new ArrayList<>();
       while (scanner.next(results))
         ;
       assertEquals(kvSet.size(), results.size());
@@ -285,7 +285,7 @@ public class TestColumnSeeking {
   }
 
   List<String> generateRandomWords(int numberOfWords, String suffix) {
-    Set<String> wordSet = new HashSet<String>();
+    Set<String> wordSet = new HashSet<>();
     for (int i = 0; i < numberOfWords; i++) {
       int lengthOfWords = (int) (Math.random() * 5) + 1;
       char[] wordChar = new char[lengthOfWords];
@@ -300,7 +300,7 @@ public class TestColumnSeeking {
       }
       wordSet.add(word);
     }
-    List<String> wordList = new ArrayList<String>(wordSet);
+    List<String> wordList = new ArrayList<>(wordSet);
     return wordList;
   }
 

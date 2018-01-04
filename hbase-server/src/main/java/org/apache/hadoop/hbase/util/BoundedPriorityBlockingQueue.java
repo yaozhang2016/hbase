@@ -27,8 +27,8 @@ import java.util.Comparator;
 import java.util.Iterator;
 import java.util.AbstractQueue;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceStability;
 
 
 /**
@@ -152,7 +152,7 @@ public class BoundedPriorityBlockingQueue<E> extends AbstractQueue<E> implements
    */
   public BoundedPriorityBlockingQueue(int capacity,
       Comparator<? super E> comparator) {
-    this.queue = new PriorityQueue<E>(capacity, comparator);
+    this.queue = new PriorityQueue<>(capacity, comparator);
   }
 
   public boolean offer(E e) {

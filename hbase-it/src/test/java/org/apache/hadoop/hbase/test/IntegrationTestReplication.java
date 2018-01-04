@@ -18,10 +18,8 @@
 
 package org.apache.hadoop.hbase.test;
 
-import com.google.common.base.Joiner;
+import org.apache.hbase.thirdparty.com.google.common.base.Joiner;
 import org.apache.commons.cli.CommandLine;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.conf.Configured;
 import org.apache.hadoop.fs.Path;
@@ -38,6 +36,8 @@ import org.apache.hadoop.hbase.client.Admin;
 import org.apache.hadoop.hbase.replication.ReplicationPeerConfig;
 import org.apache.hadoop.util.Tool;
 import org.apache.hadoop.util.ToolRunner;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -165,7 +165,7 @@ public class IntegrationTestReplication extends IntegrationTestBigLinkedList {
    * {@link org.apache.hadoop.hbase.test.IntegrationTestBigLinkedList.Loop}
    */
   protected class VerifyReplicationLoop extends Configured implements Tool {
-    private final Log LOG = LogFactory.getLog(VerifyReplicationLoop.class);
+    private final Logger LOG = LoggerFactory.getLogger(VerifyReplicationLoop.class);
     protected ClusterID source;
     protected ClusterID sink;
 
@@ -234,7 +234,7 @@ public class IntegrationTestReplication extends IntegrationTestBigLinkedList {
 
         // set the test table to be the table to replicate
         HashMap<TableName, ArrayList<String>> toReplicate = new HashMap<>();
-        toReplicate.put(tableName, new ArrayList<String>(0));
+        toReplicate.put(tableName, new ArrayList<>(0));
 
         replicationAdmin.addPeer("TestPeer", peerConfig, toReplicate);
 

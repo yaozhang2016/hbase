@@ -26,11 +26,11 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.Cell;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.io.hfile.CacheConfig;
 import org.apache.hadoop.hbase.regionserver.BloomType;
-import org.apache.hadoop.hbase.regionserver.StoreFile;
+import org.apache.hadoop.hbase.regionserver.HStoreFile;
 import org.apache.hadoop.hbase.regionserver.StoreFileScanner;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * The mob file.
@@ -38,13 +38,13 @@ import org.apache.hadoop.hbase.regionserver.StoreFileScanner;
 @InterfaceAudience.Private
 public class MobFile {
 
-  private StoreFile sf;
+  private HStoreFile sf;
 
   // internal use only for sub classes
   protected MobFile() {
   }
 
-  protected MobFile(StoreFile sf) {
+  protected MobFile(HStoreFile sf) {
     this.sf = sf;
   }
 
@@ -55,10 +55,10 @@ public class MobFile {
    * @throws IOException
    */
   public StoreFileScanner getScanner() throws IOException {
-    List<StoreFile> sfs = new ArrayList<StoreFile>();
+    List<HStoreFile> sfs = new ArrayList<>();
     sfs.add(sf);
     List<StoreFileScanner> sfScanners = StoreFileScanner.getScannersForStoreFiles(sfs, false, true,
-        false, false, sf.getMaxMemstoreTS());
+        false, false, sf.getMaxMemStoreTS());
 
     return sfScanners.get(0);
   }
@@ -71,7 +71,7 @@ public class MobFile {
    * @throws IOException
    */
   public Cell readCell(Cell search, boolean cacheMobBlocks) throws IOException {
-    return readCell(search, cacheMobBlocks, sf.getMaxMemstoreTS());
+    return readCell(search, cacheMobBlocks, sf.getMaxMemStoreTS());
   }
 
   /**
@@ -85,7 +85,7 @@ public class MobFile {
   public Cell readCell(Cell search, boolean cacheMobBlocks, long readPt) throws IOException {
     Cell result = null;
     StoreFileScanner scanner = null;
-    List<StoreFile> sfs = new ArrayList<StoreFile>();
+    List<HStoreFile> sfs = new ArrayList<>();
     sfs.add(sf);
     try {
       List<StoreFileScanner> sfScanners = StoreFileScanner.getScannersForStoreFiles(sfs,
@@ -118,9 +118,7 @@ public class MobFile {
    * @throws IOException
    */
   public void open() throws IOException {
-    if (sf.getReader() == null) {
-      sf.createReader();
-    }
+    sf.initReader();
   }
 
   /**
@@ -130,7 +128,7 @@ public class MobFile {
    */
   public void close() throws IOException {
     if (sf != null) {
-      sf.closeReader(false);
+      sf.closeStoreFile(false);
       sf = null;
     }
   }
@@ -146,7 +144,9 @@ public class MobFile {
    */
   public static MobFile create(FileSystem fs, Path path, Configuration conf, CacheConfig cacheConf)
       throws IOException {
-    StoreFile sf = new StoreFile(fs, path, conf, cacheConf, BloomType.NONE);
+    // XXX: primaryReplica is only used for constructing the key of block cache so it is not a
+    // critical problem if we pass the wrong value, so here we always pass true. Need to fix later.
+    HStoreFile sf = new HStoreFile(fs, path, conf, cacheConf, BloomType.NONE, true);
     return new MobFile(sf);
   }
 }

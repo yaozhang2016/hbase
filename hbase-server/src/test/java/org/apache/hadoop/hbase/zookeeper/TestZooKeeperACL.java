@@ -23,16 +23,19 @@ import static org.junit.Assert.assertTrue;
 import java.io.File;
 import java.io.FileWriter;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
 
 import javax.security.auth.login.AppConfigurationEntry;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.hbase.*;
+import org.apache.hadoop.hbase.HBaseConfiguration;
+import org.apache.hadoop.hbase.HBaseTestingUtility;
+import org.apache.hadoop.hbase.HConstants;
+import org.apache.hadoop.hbase.ServerName;
+import org.apache.hadoop.hbase.TestZooKeeper;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
-import org.apache.hadoop.hbase.testclassification.MiscTests;
+import org.apache.hadoop.hbase.testclassification.ZKTests;
 import org.apache.zookeeper.ZooDefs;
 import org.apache.zookeeper.data.ACL;
 import org.apache.zookeeper.data.Stat;
@@ -41,16 +44,18 @@ import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-@Category({MiscTests.class, MediumTests.class})
+@Category({ ZKTests.class, MediumTests.class })
 public class TestZooKeeperACL {
-  private final static Log LOG = LogFactory.getLog(TestZooKeeperACL.class);
+  private final static Logger LOG = LoggerFactory.getLogger(TestZooKeeperACL.class);
   private final static HBaseTestingUtility TEST_UTIL =
       new HBaseTestingUtility();
 
-  private static ZooKeeperWatcher zkw;
+  private static ZKWatcher zkw;
   private static boolean secureZKAvailable;
-  
+
   @BeforeClass
   public static void setUpBeforeClass() throws Exception {
     File saslConfFile = File.createTempFile("tmp", "jaas.conf");
@@ -75,7 +80,7 @@ public class TestZooKeeperACL {
     TEST_UTIL.getConfiguration().setInt("hbase.zookeeper.property.maxClientCnxns", 1000);
 
     // If Hadoop is missing HADOOP-7070 the cluster will fail to start due to
-    // the JAAS configuration required by ZK being clobbered by Hadoop 
+    // the JAAS configuration required by ZK being clobbered by Hadoop
     try {
       TEST_UTIL.startMiniCluster();
     } catch (IOException e) {
@@ -83,14 +88,11 @@ public class TestZooKeeperACL {
       secureZKAvailable = false;
       return;
     }
-    zkw = new ZooKeeperWatcher(
+    zkw = new ZKWatcher(
       new Configuration(TEST_UTIL.getConfiguration()),
         TestZooKeeper.class.getName(), null);
   }
 
-  /**
-   * @throws java.lang.Exception
-   */
   @AfterClass
   public static void tearDownAfterClass() throws Exception {
     if (!secureZKAvailable) {
@@ -99,9 +101,6 @@ public class TestZooKeeperACL {
     TEST_UTIL.shutdownMiniCluster();
   }
 
-  /**
-   * @throws java.lang.Exception
-   */
   @Before
   public void setUp() throws Exception {
     if (!secureZKAvailable) {
@@ -111,7 +110,7 @@ public class TestZooKeeperACL {
   }
 
   /**
-   * Create a node and check its ACL. When authentication is enabled on 
+   * Create a node and check its ACL. When authentication is enabled on
    * ZooKeeper, all nodes (except /hbase/root-region-server, /hbase/master
    * and /hbase/hbaseid) should be created so that only the hbase server user
    * (master or region server user) that created them can access them, and
@@ -269,7 +268,8 @@ public class TestZooKeeperACL {
    */
   @Test
   public void testIsZooKeeperSecure() throws Exception {
-    boolean testJaasConfig = ZKUtil.isSecureZooKeeper(new Configuration(TEST_UTIL.getConfiguration()));
+    boolean testJaasConfig =
+        ZKUtil.isSecureZooKeeper(new Configuration(TEST_UTIL.getConfiguration()));
     assertEquals(testJaasConfig, secureZKAvailable);
     // Define Jaas configuration without ZooKeeper Jaas config
     File saslConfFile = File.createTempFile("tmp", "fakeJaas.conf");
@@ -284,7 +284,7 @@ public class TestZooKeeperACL {
     assertEquals(testJaasConfig, false);
     saslConfFile.delete();
   }
-  
+
   /**
    * Check if Programmatic way of setting zookeeper security settings is valid.
    */
@@ -317,6 +317,26 @@ public class TestZooKeeperACL {
     public AppConfigurationEntry[] getAppConfigurationEntry(String name) {
       return null;
     }
+  }
+
+  @Test(timeout = 10000)
+  public void testAdminDrainAllowedOnSecureZK() throws Exception {
+    if (!secureZKAvailable) {
+      return;
+    }
+    List<ServerName> decommissionedServers = new ArrayList<>(1);
+    decommissionedServers.add(ServerName.parseServerName("ZZZ,123,123"));
+
+    // If unable to connect to secure ZK cluster then this operation would fail.
+    TEST_UTIL.getAdmin().decommissionRegionServers(decommissionedServers, false);
+
+    decommissionedServers = TEST_UTIL.getAdmin().listDecommissionedRegionServers();
+    assertEquals(1, decommissionedServers.size());
+    assertEquals(ServerName.parseServerName("ZZZ,123,123"), decommissionedServers.get(0));
+
+    TEST_UTIL.getAdmin().recommissionRegionServer(decommissionedServers.get(0), null);
+    decommissionedServers = TEST_UTIL.getAdmin().listDecommissionedRegionServers();
+    assertEquals(0, decommissionedServers.size());
   }
 
 }

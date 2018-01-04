@@ -20,13 +20,13 @@ package org.apache.hadoop.hbase.errorhandling;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.testclassification.MasterTests;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.mockito.Mockito;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Test that we propagate errors through an dispatcher exactly once via different failure
@@ -34,7 +34,7 @@ import org.mockito.Mockito;
  */
 @Category({MasterTests.class, SmallTests.class})
 public class TestForeignExceptionDispatcher {
-  private static final Log LOG = LogFactory.getLog(TestForeignExceptionDispatcher.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestForeignExceptionDispatcher.class);
 
   /**
    * Exception thrown from the test
@@ -96,8 +96,8 @@ public class TestForeignExceptionDispatcher {
     assertTrue("Monitor didn't get timeout", monitor.hasException());
 
     // verify that that we propagated the error
-    Mockito.verify(listener1).receive(Mockito.any(ForeignException.class));
-    Mockito.verify(listener2).receive(Mockito.any(ForeignException.class));
+    Mockito.verify(listener1).receive(Mockito.any());
+    Mockito.verify(listener2).receive(Mockito.any());
   }
 
   /**
@@ -118,7 +118,7 @@ public class TestForeignExceptionDispatcher {
     timer.start();
     timer.trigger();
     // make sure that we got the timer error
-    Mockito.verify(listener1, Mockito.times(1)).receive(Mockito.any(ForeignException.class));
-    Mockito.verify(listener2, Mockito.times(1)).receive(Mockito.any(ForeignException.class));
+    Mockito.verify(listener1, Mockito.times(1)).receive(Mockito.any());
+    Mockito.verify(listener2, Mockito.times(1)).receive(Mockito.any());
   }
 }

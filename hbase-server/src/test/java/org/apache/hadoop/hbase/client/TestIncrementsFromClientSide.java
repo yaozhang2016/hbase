@@ -19,6 +19,8 @@
 package org.apache.hadoop.hbase.client;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotEquals;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -28,14 +30,14 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.Cell;
+import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.DoNotRetryIOException;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HTableDescriptor;
+import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.coprocessor.CoprocessorHost;
 import org.apache.hadoop.hbase.coprocessor.MultiRowMutationEndpoint;
@@ -47,6 +49,8 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.junit.rules.TestName;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Run Increment tests that use the HBase clients; {@link HTable}.
@@ -59,7 +63,7 @@ import org.junit.rules.TestName;
  */
 @Category(LargeTests.class)
 public class TestIncrementsFromClientSide {
-  final Log LOG = LogFactory.getLog(getClass());
+  final Logger LOG = LoggerFactory.getLogger(getClass());
   protected final static HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
   private static byte [] ROW = Bytes.toBytes("testRow");
   private static byte [] FAMILY = Bytes.toBytes("testFamily");
@@ -92,8 +96,8 @@ public class TestIncrementsFromClientSide {
    */
   @Test
   public void testDuplicateIncrement() throws Exception {
-    HTableDescriptor hdt = TEST_UTIL.createTableDescriptor("HCM-testDuplicateIncrement");
-    Map<String, String> kvs = new HashMap<String, String>();
+    HTableDescriptor hdt = TEST_UTIL.createTableDescriptor(TableName.valueOf(name.getMethodName()));
+    Map<String, String> kvs = new HashMap<>();
     kvs.put(HConnectionTestingUtility.SleepAtFirstRpcCall.SLEEP_TIME_CONF_KEY, "2000");
     hdt.addCoprocessor(HConnectionTestingUtility.SleepAtFirstRpcCall.class.getName(), null, 1, kvs);
     TEST_UTIL.createTable(hdt, new byte[][] { ROW }).close();
@@ -104,7 +108,7 @@ public class TestIncrementsFromClientSide {
     c.setInt(HConstants.HBASE_RPC_TIMEOUT_KEY, 1500);
 
     Connection connection = ConnectionFactory.createConnection(c);
-    Table t = connection.getTable(TableName.valueOf("HCM-testDuplicateIncrement"));
+    Table t = connection.getTable(TableName.valueOf(name.getMethodName()));
     if (t instanceof HTable) {
       HTable table = (HTable) t;
       table.setOperationTimeout(3 * 1000);
@@ -182,8 +186,8 @@ public class TestIncrementsFromClientSide {
   @Test
   public void testBatchIncrementsWithReturnResultFalse() throws Exception {
     LOG.info("Starting testBatchIncrementsWithReturnResultFalse");
-    final TableName TABLENAME = TableName.valueOf("testBatchAppend");
-    Table table = TEST_UTIL.createTable(TABLENAME, FAMILY);
+    final TableName tableName = TableName.valueOf(name.getMethodName());
+    Table table = TEST_UTIL.createTable(tableName, FAMILY);
     Increment inc1 = new Increment(Bytes.toBytes("row2"));
     inc1.setReturnResults(false);
     inc1.addColumn(FAMILY, Bytes.toBytes("f1"), 1);
@@ -224,13 +228,6 @@ public class TestIncrementsFromClientSide {
     } catch (IOException iox) {
       // success
     }
-    try {
-      // try null qualifier
-      ht.incrementColumnValue(ROW, FAMILY, null, 5);
-      fail("Should have thrown IOException");
-    } catch (IOException iox) {
-      // success
-    }
     // try null row
     try {
       Increment incNoRow = new Increment((byte [])null);
@@ -245,14 +242,6 @@ public class TestIncrementsFromClientSide {
     try {
       Increment incNoFamily = new Increment(ROW);
       incNoFamily.addColumn(null, COLUMN, 5);
-      fail("Should have thrown IllegalArgumentException");
-    } catch (IllegalArgumentException iax) {
-      // success
-    }
-    // try null qualifier
-    try {
-      Increment incNoQualifier = new Increment(ROW);
-      incNoQualifier.addColumn(FAMILY, null, 5);
       fail("Should have thrown IllegalArgumentException");
     } catch (IllegalArgumentException iax) {
       // success
@@ -346,6 +335,49 @@ public class TestIncrementsFromClientSide {
   }
 
   @Test
+  public void testIncrementIncrZeroAtFirst() throws Exception {
+    LOG.info("Starting " + this.name.getMethodName());
+    final TableName TABLENAME =
+            TableName.valueOf(filterStringSoTableNameSafe(this.name.getMethodName()));
+    Table ht = TEST_UTIL.createTable(TABLENAME, FAMILY);
+
+    byte[] col1 = Bytes.toBytes("col1");
+    byte[] col2 = Bytes.toBytes("col2");
+    byte[] col3 = Bytes.toBytes("col3");
+
+    // Now increment zero at first time incr
+    Increment inc = new Increment(ROW);
+    inc.addColumn(FAMILY, col1, 0);
+    ht.increment(inc);
+
+    // Verify expected results
+    Get get = new Get(ROW);
+    Result r = ht.get(get);
+    Cell [] kvs = r.rawCells();
+    assertEquals(1, kvs.length);
+    assertNotNull(kvs[0]);
+    assertIncrementKey(kvs[0], ROW, FAMILY, col1, 0);
+
+    // Now try multiple columns by different amounts
+    inc = new Increment(ROW);
+    inc.addColumn(FAMILY, col1, 1);
+    inc.addColumn(FAMILY, col2, 0);
+    inc.addColumn(FAMILY, col3, 2);
+    ht.increment(inc);
+    // Verify
+    get = new Get(ROW);
+    r = ht.get(get);
+    kvs = r.rawCells();
+    assertEquals(3, kvs.length);
+    assertNotNull(kvs[0]);
+    assertNotNull(kvs[1]);
+    assertNotNull(kvs[2]);
+    assertIncrementKey(kvs[0], ROW, FAMILY, col1, 1);
+    assertIncrementKey(kvs[1], ROW, FAMILY, col2, 0);
+    assertIncrementKey(kvs[2], ROW, FAMILY, col3, 2);
+  }
+
+  @Test
   public void testIncrement() throws Exception {
     LOG.info("Starting " + this.name.getMethodName());
     final TableName TABLENAME =
@@ -433,6 +465,26 @@ public class TestIncrementsFromClientSide {
     }
   }
 
+  @Test
+  public void testIncrementWithCustomTimestamp() throws IOException {
+    TableName TABLENAME = TableName.valueOf(name.getMethodName());
+    Table table = TEST_UTIL.createTable(TABLENAME, FAMILY);
+    long timestamp = 999;
+    Increment increment = new Increment(ROW);
+    increment.add(CellUtil.createCell(ROW, FAMILY, QUALIFIER, timestamp, KeyValue.Type.Put.getCode(), Bytes.toBytes(100L)));
+    Result r = table.increment(increment);
+    assertEquals(1, r.size());
+    assertEquals(timestamp, r.rawCells()[0].getTimestamp());
+    r = table.get(new Get(ROW));
+    assertEquals(1, r.size());
+    assertEquals(timestamp, r.rawCells()[0].getTimestamp());
+    r = table.increment(increment);
+    assertEquals(1, r.size());
+    assertNotEquals(timestamp, r.rawCells()[0].getTimestamp());
+    r = table.get(new Get(ROW));
+    assertEquals(1, r.size());
+    assertNotEquals(timestamp, r.rawCells()[0].getTimestamp());
+  }
 
   /**
    * Call over to the adjacent class's method of same name.

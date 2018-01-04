@@ -22,8 +22,6 @@ import java.io.IOException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.ConcurrentSkipListSet;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.procedure2.ProcedureTestingUtility.NoopProcedure;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.testclassification.MasterTests;
@@ -33,6 +31,8 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -40,7 +40,7 @@ import static org.junit.Assert.assertTrue;
 
 @Category({MasterTests.class, MediumTests.class})
 public class TestProcedureSchedulerConcurrency {
-  private static final Log LOG = LogFactory.getLog(TestProcedureEvents.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestProcedureEvents.class);
 
   private SimpleProcedureScheduler procSched;
 
@@ -79,8 +79,7 @@ public class TestProcedureSchedulerConcurrency {
     final AtomicInteger waitCount = new AtomicInteger(0);
     final AtomicInteger wakeCount = new AtomicInteger(0);
 
-    final ConcurrentSkipListSet<TestProcedureWithEvent> waitQueue =
-      new ConcurrentSkipListSet<TestProcedureWithEvent>();
+    final ConcurrentSkipListSet<TestProcedureWithEvent> waitQueue = new ConcurrentSkipListSet<>();
     threads[0] = new Thread() {
       @Override
       public void run() {
@@ -93,13 +92,13 @@ public class TestProcedureSchedulerConcurrency {
               ev[i] = waitQueue.pollFirst().getEvent();
               LOG.debug("WAKE BATCH " + ev[i] + " total=" + wakeCount.get());
             }
-            sched.wakeEvents(ev.length, ev);
+            ProcedureEvent.wakeEvents((AbstractProcedureScheduler) sched, ev);
             wakeCount.addAndGet(ev.length);
           } else {
             int size = waitQueue.size();
             while (size-- > 0) {
               ProcedureEvent ev = waitQueue.pollFirst().getEvent();
-              sched.wakeEvent(ev);
+              ev.wake(procSched);
               LOG.debug("WAKE " + ev + " total=" + wakeCount.get());
               wakeCount.incrementAndGet();
             }
@@ -123,9 +122,9 @@ public class TestProcedureSchedulerConcurrency {
             TestProcedureWithEvent proc = (TestProcedureWithEvent)sched.poll();
             if (proc == null) continue;
 
-            sched.suspendEvent(proc.getEvent());
+            proc.getEvent().suspend();
             waitQueue.add(proc);
-            sched.waitEvent(proc.getEvent(), proc);
+            proc.getEvent().suspendIfNotReady(proc);
             LOG.debug("WAIT " + proc.getEvent());
             if (waitCount.incrementAndGet() >= NRUNS) {
               break;

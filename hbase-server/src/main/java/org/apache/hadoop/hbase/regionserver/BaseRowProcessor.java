@@ -23,11 +23,11 @@ import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceStability;
 import org.apache.hadoop.hbase.HBaseInterfaceAudience;
 import org.apache.hadoop.hbase.client.Durability;
-import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
+import org.apache.hadoop.hbase.wal.WALEdit;
 
 import com.google.protobuf.Message;
 
@@ -57,7 +57,7 @@ implements RowProcessor<S,T> {
 
   @Override
   public List<UUID> getClusterIds() {
-    return new ArrayList<UUID>();
+    return new ArrayList<>();
   }
 
   @Override

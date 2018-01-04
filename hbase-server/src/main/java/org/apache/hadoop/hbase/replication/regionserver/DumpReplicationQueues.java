@@ -17,34 +17,49 @@
  */
 package org.apache.hadoop.hbase.replication.regionserver;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Queue;
+import java.util.Set;
+import java.util.stream.Collectors;
+
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.conf.Configured;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
-import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.hbase.*;
+import org.apache.hadoop.hbase.Abortable;
+import org.apache.hadoop.hbase.HBaseConfiguration;
+import org.apache.hadoop.hbase.ServerName;
+import org.apache.hadoop.hbase.Stoppable;
+import org.apache.hadoop.hbase.client.Admin;
 import org.apache.hadoop.hbase.client.ClusterConnection;
 import org.apache.hadoop.hbase.client.ConnectionFactory;
 import org.apache.hadoop.hbase.client.HBaseAdmin;
-import org.apache.hadoop.hbase.client.replication.ReplicationAdmin;
+import org.apache.hadoop.hbase.client.replication.TableCFs;
 import org.apache.hadoop.hbase.io.WALLink;
 import org.apache.hadoop.hbase.procedure2.util.StringUtils;
-import org.apache.hadoop.hbase.replication.*;
-import org.apache.hadoop.hbase.util.FSUtils;
+import org.apache.hadoop.hbase.replication.ReplicationFactory;
+import org.apache.hadoop.hbase.replication.ReplicationPeerConfig;
+import org.apache.hadoop.hbase.replication.ReplicationPeerDescription;
+import org.apache.hadoop.hbase.replication.ReplicationPeers;
+import org.apache.hadoop.hbase.replication.ReplicationQueueInfo;
+import org.apache.hadoop.hbase.replication.ReplicationQueues;
+import org.apache.hadoop.hbase.replication.ReplicationQueuesClient;
+import org.apache.hadoop.hbase.replication.ReplicationQueuesClientArguments;
+import org.apache.hadoop.hbase.replication.ReplicationTracker;
 import org.apache.hadoop.hbase.zookeeper.ZKUtil;
-import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher;
+import org.apache.hadoop.hbase.zookeeper.ZKWatcher;
 import org.apache.hadoop.util.Tool;
 import org.apache.hadoop.util.ToolRunner;
 import org.apache.zookeeper.KeeperException;
-import org.mortbay.util.IO;
-
-import com.google.common.util.concurrent.AtomicLongMap;
-
-import java.io.FileNotFoundException;
-import java.io.IOException;
-import java.util.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.apache.hbase.thirdparty.com.google.common.util.concurrent.AtomicLongMap;
 
 /**
  * Provides information about the existing states of replication, replication peers and queues.
@@ -56,7 +71,7 @@ import java.util.*;
 
 public class DumpReplicationQueues extends Configured implements Tool {
 
-  private static final Log LOG = LogFactory.getLog(DumpReplicationQueues.class.getName());
+  private static final Logger LOG = LoggerFactory.getLogger(DumpReplicationQueues.class.getName());
 
   private List<String> deadRegionServers;
   private List<String> deletedQueues;
@@ -65,8 +80,8 @@ public class DumpReplicationQueues extends Configured implements Tool {
   private long numWalsNotFound;
 
   public DumpReplicationQueues() {
-    deadRegionServers = new ArrayList<String>();
-    deletedQueues = new ArrayList<String>();
+    deadRegionServers = new ArrayList<>();
+    deletedQueues = new ArrayList<>();
     peersQueueSize = AtomicLongMap.create();
     totalSizeOfWALs = 0;
     numWalsNotFound = 0;
@@ -147,7 +162,7 @@ public class DumpReplicationQueues extends Configured implements Tool {
   public int run(String[] args) throws Exception {
 
     int errCode = -1;
-    LinkedList<String> argv = new LinkedList<String>();
+    LinkedList<String> argv = new LinkedList<>();
     argv.addAll(Arrays.asList(args));
     DumpOptions opts = parseOpts(argv);
 
@@ -172,7 +187,7 @@ public class DumpReplicationQueues extends Configured implements Tool {
     if (message != null && message.length() > 0) {
       System.err.println(message);
     }
-    System.err.println("Usage: bin/hbase " + className + " \\");
+    System.err.println("Usage: hbase " + className + " \\");
     System.err.println("  <OPTIONS> [-D<property=value>]*");
     System.err.println();
     System.err.println("General Options:");
@@ -193,35 +208,37 @@ public class DumpReplicationQueues extends Configured implements Tool {
 
     Configuration conf = getConf();
     HBaseAdmin.available(conf);
-    ReplicationAdmin replicationAdmin = new ReplicationAdmin(conf);
     ClusterConnection connection = (ClusterConnection) ConnectionFactory.createConnection(conf);
+    Admin admin = connection.getAdmin();
 
-    ZooKeeperWatcher zkw = new ZooKeeperWatcher(conf, "DumpReplicationQueues" + System.currentTimeMillis(),
+    ZKWatcher zkw = new ZKWatcher(conf, "DumpReplicationQueues" + System.currentTimeMillis(),
         new WarnOnlyAbortable(), true);
 
     try {
       // Our zk watcher
       LOG.info("Our Quorum: " + zkw.getQuorum());
-      List<HashMap<String, String>> replicatedTables = replicationAdmin.listReplicated();
-      if (replicatedTables.isEmpty()) {
+      List<TableCFs> replicatedTableCFs = admin.listReplicatedTableCFs();
+      if (replicatedTableCFs.isEmpty()) {
         LOG.info("No tables with a configured replication peer were found.");
         return(0);
       } else {
-        LOG.info("Replicated Tables: " + replicatedTables);
+        LOG.info("Replicated Tables: " + replicatedTableCFs);
       }
 
-      Map<String, ReplicationPeerConfig> peerConfigs = replicationAdmin.listPeerConfigs();
+      List<ReplicationPeerDescription> peers = admin.listReplicationPeers();
 
-      if (peerConfigs.isEmpty()) {
+      if (peers.isEmpty()) {
         LOG.info("Replication is enabled but no peer configuration was found.");
       }
 
       System.out.println("Dumping replication peers and configurations:");
-      System.out.println(dumpPeersState(replicationAdmin, peerConfigs));
+      System.out.println(dumpPeersState(peers));
 
       if (opts.isDistributed()) {
         LOG.info("Found [--distributed], will poll each RegionServer.");
-        System.out.println(dumpQueues(connection, zkw, peerConfigs.keySet(), opts.isHdfs()));
+        Set<String> peerIds = peers.stream().map((peer) -> peer.getPeerId())
+            .collect(Collectors.toSet());
+        System.out.println(dumpQueues(connection, zkw, peerIds, opts.isHdfs()));
         System.out.println(dumpReplicationSummary());
       } else {
         // use ZK instead
@@ -265,34 +282,28 @@ public class DumpReplicationQueues extends Configured implements Tool {
     return sb.toString();
   }
 
-  public String dumpPeersState(ReplicationAdmin replicationAdmin,
-      Map<String, ReplicationPeerConfig> peerConfigs) throws Exception {
+  public String dumpPeersState(List<ReplicationPeerDescription> peers) throws Exception {
     Map<String, String> currentConf;
     StringBuilder sb = new StringBuilder();
-    for (Map.Entry<String, ReplicationPeerConfig> peer : peerConfigs.entrySet()) {
-      try {
-        ReplicationPeerConfig peerConfig = peer.getValue();
-        sb.append("Peer: " + peer.getKey() + "\n");
-        sb.append("    " + "State: "
-            + (replicationAdmin.getPeerState(peer.getKey()) ? "ENABLED" : "DISABLED") + "\n");
-        sb.append("    " + "Cluster Name: " + peerConfig.getClusterKey() + "\n");
-        sb.append("    " + "Replication Endpoint: " + peerConfig.getReplicationEndpointImpl() + "\n");
-        currentConf = peerConfig.getConfiguration();
-        // Only show when we have a custom configuration for the peer
-        if (currentConf.size() > 1) {
-          sb.append("    " + "Peer Configuration: " + currentConf + "\n");
-        }
-        sb.append("    " + "Peer Table CFs: " + peerConfig.getTableCFsMap() + "\n");
-        sb.append("    " + "Peer Namespaces: " + peerConfig.getNamespaces() + "\n");
-      } catch (ReplicationException re) {
-        sb.append("Got an exception while invoking ReplicationAdmin: " + re + "\n");
+    for (ReplicationPeerDescription peer : peers) {
+      ReplicationPeerConfig peerConfig = peer.getPeerConfig();
+      sb.append("Peer: " + peer.getPeerId() + "\n");
+      sb.append("    " + "State: " + (peer.isEnabled() ? "ENABLED" : "DISABLED") + "\n");
+      sb.append("    " + "Cluster Name: " + peerConfig.getClusterKey() + "\n");
+      sb.append("    " + "Replication Endpoint: " + peerConfig.getReplicationEndpointImpl() + "\n");
+      currentConf = peerConfig.getConfiguration();
+      // Only show when we have a custom configuration for the peer
+      if (currentConf.size() > 1) {
+        sb.append("    " + "Peer Configuration: " + currentConf + "\n");
       }
+      sb.append("    " + "Peer Table CFs: " + peerConfig.getTableCFsMap() + "\n");
+      sb.append("    " + "Peer Namespaces: " + peerConfig.getNamespaces() + "\n");
     }
     return sb.toString();
   }
 
-  public String dumpQueues(ClusterConnection connection, ZooKeeperWatcher zkw, Set<String> peerIds,
-      boolean hdfs) throws Exception {
+  public String dumpQueues(ClusterConnection connection, ZKWatcher zkw, Set<String> peerIds,
+                           boolean hdfs) throws Exception {
     ReplicationQueuesClient queuesClient;
     ReplicationPeers replicationPeers;
     ReplicationQueues replicationQueues;
@@ -312,6 +323,9 @@ public class DumpReplicationQueues extends Configured implements Tool {
     // Loops each peer on each RS and dumps the queues
     try {
       List<String> regionservers = queuesClient.getListOfReplicators();
+      if (regionservers == null || regionservers.isEmpty()) {
+        return sb.toString();
+      }
       for (String regionserver : regionservers) {
         List<String> queueIds = queuesClient.getAllQueues(regionserver);
         replicationQueues.init(regionserver);
@@ -342,7 +356,7 @@ public class DumpReplicationQueues extends Configured implements Tool {
 
     StringBuilder sb = new StringBuilder();
 
-    List<String> deadServers ;
+    List<ServerName> deadServers;
 
     sb.append("Dumping replication queue info for RegionServer: [" + regionserver + "]" + "\n");
     sb.append("    Queue znode: " + queueId + "\n");
@@ -371,11 +385,12 @@ public class DumpReplicationQueues extends Configured implements Tool {
     }
     return sb.toString();
   }
+
   /**
    *  return total size in bytes from a list of WALs
    */
   private long getTotalWALSize(FileSystem fs, List<String> wals, String server) throws IOException {
-    int size = 0;
+    long size = 0;
     FileStatus fileStatus;
 
     for (String wal : wals) {
@@ -402,7 +417,7 @@ public class DumpReplicationQueues extends Configured implements Tool {
     public void abort(String why, Throwable e) {
       LOG.warn("DumpReplicationQueue received abort, ignoring.  Reason: " + why);
       if (LOG.isDebugEnabled()) {
-        LOG.debug(e);
+        LOG.debug(e.toString(), e);
       }
     }
 

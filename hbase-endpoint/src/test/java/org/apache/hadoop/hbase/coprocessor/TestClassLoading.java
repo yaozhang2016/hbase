@@ -18,11 +18,17 @@
  */
 package org.apache.hadoop.hbase.coprocessor;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.hbase.*;
+import org.apache.hadoop.hbase.Coprocessor;
+import org.apache.hadoop.hbase.CoprocessorEnvironment;
+import org.apache.hadoop.hbase.HBaseTestingUtility;
+import org.apache.hadoop.hbase.HColumnDescriptor;
+import org.apache.hadoop.hbase.HTableDescriptor;
+import org.apache.hadoop.hbase.MiniHBaseCluster;
+import org.apache.hadoop.hbase.ServerName;
+import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Admin;
+import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.Region;
 import org.apache.hadoop.hbase.regionserver.TestServerCustomProtocol;
 import org.apache.hadoop.hbase.testclassification.CoprocessorTests;
@@ -40,6 +46,8 @@ import java.util.*;
 
 import org.junit.*;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
@@ -51,8 +59,15 @@ import static org.junit.Assert.assertFalse;
  */
 @Category({CoprocessorTests.class, MediumTests.class})
 public class TestClassLoading {
-  private static final Log LOG = LogFactory.getLog(TestClassLoading.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestClassLoading.class);
   private final static HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
+
+  public static class TestMasterCoprocessor implements MasterCoprocessor, MasterObserver {
+    @Override
+    public Optional<MasterObserver> getMasterObserver() {
+      return Optional.of(this);
+    }
+  }
 
   private static MiniDFSCluster cluster;
 
@@ -67,8 +82,8 @@ public class TestClassLoading {
   private static Class<?> regionCoprocessor1 = ColumnAggregationEndpoint.class;
   // TOOD: Fix the import of this handler.  It is coming in from a package that is far away.
   private static Class<?> regionCoprocessor2 = TestServerCustomProtocol.PingHandler.class;
-  private static Class<?> regionServerCoprocessor = SampleRegionWALObserver.class;
-  private static Class<?> masterCoprocessor = BaseMasterObserver.class;
+  private static Class<?> regionServerCoprocessor = SampleRegionWALCoprocessor.class;
+  private static Class<?> masterCoprocessor = TestMasterCoprocessor.class;
 
   private static final String[] regionServerSystemCoprocessors =
       new String[]{
@@ -108,8 +123,9 @@ public class TestClassLoading {
   }
 
   static File buildCoprocessorJar(String className) throws Exception {
-    String code = "import org.apache.hadoop.hbase.coprocessor.*;" +
-      "public class " + className + " extends BaseRegionObserver {}";
+    String code =
+        "import org.apache.hadoop.hbase.coprocessor.*;" +
+            "public class " + className + " implements RegionCoprocessor {}";
     return ClassLoaderTestHelper.buildJar(
       TEST_UTIL.getDataTestDir().toString(), className, code);
   }
@@ -150,7 +166,7 @@ public class TestClassLoading {
       // with configuration values
     htd.setValue("COPROCESSOR$2", jarFileOnHDFS2.toString() + "|" + cpName2 +
       "|" + Coprocessor.PRIORITY_USER + "|k1=v1,k2=v2,k3=v3");
-    Admin admin = TEST_UTIL.getHBaseAdmin();
+    Admin admin = TEST_UTIL.getAdmin();
     if (admin.tableExists(tableName)) {
       if (admin.isTableEnabled(tableName)) {
         admin.disableTable(tableName);
@@ -166,10 +182,9 @@ public class TestClassLoading {
     // verify that the coprocessors were loaded
     boolean foundTableRegion=false;
     boolean found1 = true, found2 = true, found2_k1 = true, found2_k2 = true, found2_k3 = true;
-    Map<Region, Set<ClassLoader>> regionsActiveClassLoaders =
-        new HashMap<Region, Set<ClassLoader>>();
+    Map<Region, Set<ClassLoader>> regionsActiveClassLoaders = new HashMap<>();
     MiniHBaseCluster hbase = TEST_UTIL.getHBaseCluster();
-    for (Region region:
+    for (HRegion region:
         hbase.getRegionServer(0).getOnlineRegionsLocalContext()) {
       if (region.getRegionInfo().getRegionNameAsString().startsWith(tableName.getNameAsString())) {
         foundTableRegion = true;
@@ -207,7 +222,7 @@ public class TestClassLoading {
       " of external jar files",
       2, CoprocessorClassLoader.getAllCached().size());
     //check if region active classloaders are shared across all RS regions
-    Set<ClassLoader> externalClassLoaders = new HashSet<ClassLoader>(
+    Set<ClassLoader> externalClassLoaders = new HashSet<>(
       CoprocessorClassLoader.getAllCached());
     for (Map.Entry<Region, Set<ClassLoader>> regionCP : regionsActiveClassLoaders.entrySet()) {
       assertTrue("Some CP classloaders for region " + regionCP.getKey() + " are not cached."
@@ -231,14 +246,14 @@ public class TestClassLoading {
     htd.addFamily(new HColumnDescriptor("test"));
     htd.setValue("COPROCESSOR$1", getLocalPath(jarFile) + "|" + cpName3 + "|" +
       Coprocessor.PRIORITY_USER);
-    Admin admin = TEST_UTIL.getHBaseAdmin();
+    Admin admin = TEST_UTIL.getAdmin();
     admin.createTable(htd);
     waitForTable(htd.getTableName());
 
     // verify that the coprocessor was loaded
     boolean found = false;
     MiniHBaseCluster hbase = TEST_UTIL.getHBaseCluster();
-    for (Region region: hbase.getRegionServer(0).getOnlineRegionsLocalContext()) {
+    for (HRegion region: hbase.getRegionServer(0).getOnlineRegionsLocalContext()) {
       if (region.getRegionInfo().getRegionNameAsString().startsWith(cpName3)) {
         found = (region.getCoprocessorHost().findCoprocessor(cpName3) != null);
       }
@@ -256,14 +271,14 @@ public class TestClassLoading {
     htd.addFamily(new HColumnDescriptor("test"));
     htd.setValue("COPROCESSOR$1", getLocalPath(jarFile) + "|" + cpName4 + "|" +
       Coprocessor.PRIORITY_USER);
-    Admin admin = TEST_UTIL.getHBaseAdmin();
+    Admin admin = TEST_UTIL.getAdmin();
     admin.createTable(htd);
     waitForTable(htd.getTableName());
 
     // verify that the coprocessor was loaded correctly
     boolean found = false;
     MiniHBaseCluster hbase = TEST_UTIL.getHBaseCluster();
-    for (Region region: hbase.getRegionServer(0).getOnlineRegionsLocalContext()) {
+    for (HRegion region: hbase.getRegionServer(0).getOnlineRegionsLocalContext()) {
       if (region.getRegionInfo().getRegionNameAsString().startsWith(cpName4)) {
         Coprocessor cp = region.getCoprocessorHost().findCoprocessor(cpName4);
         if (cp != null) {
@@ -310,14 +325,14 @@ public class TestClassLoading {
     // add 2 coprocessor by using new htd.addCoprocessor() api
     htd.addCoprocessor(cpName5, new Path(getLocalPath(jarFile5)),
         Coprocessor.PRIORITY_USER, null);
-    Map<String, String> kvs = new HashMap<String, String>();
+    Map<String, String> kvs = new HashMap<>();
     kvs.put("k1", "v1");
     kvs.put("k2", "v2");
     kvs.put("k3", "v3");
     htd.addCoprocessor(cpName6, new Path(getLocalPath(jarFile6)),
         Coprocessor.PRIORITY_USER, kvs);
 
-    Admin admin = TEST_UTIL.getHBaseAdmin();
+    Admin admin = TEST_UTIL.getAdmin();
     if (admin.tableExists(tableName)) {
       if (admin.isTableEnabled(tableName)) {
         admin.disableTable(tableName);
@@ -334,7 +349,7 @@ public class TestClassLoading {
         found6_k4 = false;
 
     MiniHBaseCluster hbase = TEST_UTIL.getHBaseCluster();
-    for (Region region: hbase.getRegionServer(0).getOnlineRegionsLocalContext()) {
+    for (HRegion region: hbase.getRegionServer(0).getOnlineRegionsLocalContext()) {
       if (region.getRegionInfo().getRegionNameAsString().startsWith(tableName.getNameAsString())) {
         found_1 = found_1 ||
             (region.getCoprocessorHost().findCoprocessor(cpName1) != null);
@@ -408,7 +423,7 @@ public class TestClassLoading {
       // with configuration values
     htd.setValue("COPROCESSOR$2", jarFileOnHDFS.toString() + "|" + cpName2 +
       "|" + Coprocessor.PRIORITY_USER + "|k1=v1,k2=v2,k3=v3");
-    Admin admin = TEST_UTIL.getHBaseAdmin();
+    Admin admin = TEST_UTIL.getAdmin();
     if (admin.tableExists(tableName)) {
       if (admin.isTableEnabled(tableName)) {
         admin.disableTable(tableName);
@@ -422,7 +437,7 @@ public class TestClassLoading {
     boolean found1 = false, found2 = false, found2_k1 = false,
         found2_k2 = false, found2_k3 = false;
     MiniHBaseCluster hbase = TEST_UTIL.getHBaseCluster();
-    for (Region region: hbase.getRegionServer(0).getOnlineRegionsLocalContext()) {
+    for (HRegion region: hbase.getRegionServer(0).getOnlineRegionsLocalContext()) {
       if (region.getRegionInfo().getRegionNameAsString().startsWith(tableName.getNameAsString())) {
         CoprocessorEnvironment env;
         env = region.getCoprocessorHost().findCoprocessorEnvironment(cpName1);
@@ -464,8 +479,7 @@ public class TestClassLoading {
    * @return subset of all servers.
    */
   Map<ServerName, ServerLoad> serversForTable(String tableName) {
-    Map<ServerName, ServerLoad> serverLoadHashMap =
-        new HashMap<ServerName, ServerLoad>();
+    Map<ServerName, ServerLoad> serverLoadHashMap = new HashMap<>();
     for(Map.Entry<ServerName,ServerLoad> server:
         TEST_UTIL.getMiniHBaseCluster().getMaster().getServerManager().
             getOnlineServers().entrySet()) {
@@ -537,19 +551,6 @@ public class TestClassLoading {
         java.util.Arrays.toString(
             TEST_UTIL.getHBaseCluster().getMaster().getMasterCoprocessors());
     assertEquals(loadedMasterCoprocessorsVerify, loadedMasterCoprocessors);
-  }
-
-  @Test
-  public void testFindCoprocessors() {
-    // HBASE 12277: 
-    CoprocessorHost masterCpHost =
-                             TEST_UTIL.getHBaseCluster().getMaster().getMasterCoprocessorHost();
-
-    List<MasterObserver> masterObservers = masterCpHost.findCoprocessors(MasterObserver.class);
-
-    assertTrue(masterObservers != null && masterObservers.size() > 0);
-    assertEquals(masterCoprocessor.getSimpleName(),
-                 masterObservers.get(0).getClass().getSimpleName());
   }
 
   private void waitForTable(TableName name) throws InterruptedException, IOException {

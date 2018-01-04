@@ -17,8 +17,8 @@
  */
 package org.apache.hadoop.hbase.ipc;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceStability;
 import org.apache.hadoop.hbase.HBaseInterfaceAudience;
 
 import java.io.IOException;
@@ -65,6 +65,9 @@ public abstract class RpcScheduler {
    */
   public abstract boolean dispatch(CallRunner task) throws IOException, InterruptedException;
 
+  /** Get call queue information **/
+  public abstract CallQueueInfo getCallQueueInfo();
+
   /** Retrieves length of the general queue for metrics. */
   public abstract int getGeneralQueueLength();
 
@@ -89,4 +92,22 @@ public abstract class RpcScheduler {
    * in the period of overloade we serve last requests first); returns 0 otherwise.
    */
   public abstract long getNumLifoModeSwitches();
+
+  /** Retrieves length of the write queue for metrics when use RWQueueRpcExecutor. */
+  public abstract int getWriteQueueLength();
+
+  /** Retrieves length of the read queue for metrics when use RWQueueRpcExecutor. */
+  public abstract int getReadQueueLength();
+
+  /** Retrieves length of the scan queue for metrics when use RWQueueRpcExecutor. */
+  public abstract int getScanQueueLength();
+
+  /** Retrieves the number of active write rpc handler when use RWQueueRpcExecutor. */
+  public abstract int getActiveWriteRpcHandlerCount();
+
+  /** Retrieves the number of active write rpc handler when use RWQueueRpcExecutor. */
+  public abstract int getActiveReadRpcHandlerCount();
+
+  /** Retrieves the number of active write rpc handler when use RWQueueRpcExecutor. */
+  public abstract int getActiveScanRpcHandlerCount();
 }

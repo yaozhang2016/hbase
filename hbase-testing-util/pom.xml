@@ -21,10 +21,10 @@
       -->
     <modelVersion>4.0.0</modelVersion>
     <parent>
-        <artifactId>hbase</artifactId>
+        <artifactId>hbase-build-configuration</artifactId>
         <groupId>org.apache.hbase</groupId>
-        <version>2.0.0-SNAPSHOT</version>
-        <relativePath>..</relativePath>
+        <version>3.0.0-SNAPSHOT</version>
+        <relativePath>../hbase-build-configuration</relativePath>
     </parent>
     <artifactId>hbase-testing-util</artifactId>
     <name>Apache HBase - Testing Util</name>
@@ -80,6 +80,18 @@
         </dependency>
         <dependency>
             <groupId>org.apache.hbase</groupId>
+            <artifactId>hbase-zookeeper</artifactId>
+            <type>jar</type>
+            <scope>compile</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.hbase</groupId>
+            <artifactId>hbase-zookeeper</artifactId>
+            <type>test-jar</type>
+            <scope>compile</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.hbase</groupId>
             <artifactId>hbase-server</artifactId>
             <type>jar</type>
             <scope>compile</scope>
@@ -117,7 +129,6 @@
         <dependency>
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-log4j12</artifactId>
-            <version>${slf4j.version}</version>
         </dependency>
     </dependencies>
 
@@ -140,6 +151,12 @@
                     <groupId>org.apache.hadoop</groupId>
                     <artifactId>hadoop-common</artifactId>
                     <scope>compile</scope>
+                    <exclusions>
+                        <exclusion>
+                            <groupId>org.apache.htrace</groupId>
+                            <artifactId>htrace-core</artifactId>
+                        </exclusion>
+                    </exclusions>
                 </dependency>
                 <dependency>
                     <groupId>org.apache.hadoop</groupId>
@@ -150,16 +167,34 @@
                     <groupId>org.apache.hadoop</groupId>
                     <artifactId>hadoop-client</artifactId>
                     <scope>compile</scope>
+                    <exclusions>
+                      <exclusion>
+                        <groupId>com.google.guava</groupId>
+                        <artifactId>guava</artifactId>
+                      </exclusion>
+                    </exclusions>
                 </dependency>
                 <dependency>
                     <groupId>org.apache.hadoop</groupId>
                     <artifactId>hadoop-mapreduce-client-core</artifactId>
                     <scope>compile</scope>
+                    <exclusions>
+                      <exclusion>
+                        <groupId>com.google.guava</groupId>
+                        <artifactId>guava</artifactId>
+                      </exclusion>
+                    </exclusions>
                 </dependency>
                 <dependency>
                     <groupId>org.apache.hadoop</groupId>
                     <artifactId>hadoop-mapreduce-client-jobclient</artifactId>
                     <scope>compile</scope>
+                    <exclusions>
+                      <exclusion>
+                        <groupId>com.google.guava</groupId>
+                        <artifactId>guava</artifactId>
+                      </exclusion>
+                    </exclusions>
                 </dependency>
                 <dependency>
                     <groupId>org.apache.hadoop</groupId>
@@ -176,6 +211,16 @@
                     <groupId>org.apache.hadoop</groupId>
                     <artifactId>hadoop-minicluster</artifactId>
                     <scope>compile</scope>
+                    <exclusions>
+                      <exclusion>
+                        <groupId>org.apache.htrace</groupId>
+                        <artifactId>htrace-core</artifactId>
+                      </exclusion>
+                      <exclusion>
+                        <groupId>com.google.guava</groupId>
+                        <artifactId>guava</artifactId>
+                      </exclusion>
+                    </exclusions>
                 </dependency>
                 <dependency>
                     <groupId>org.apache.hadoop</groupId>
@@ -195,19 +240,21 @@
                     <value>3.0</value>
                 </property>
             </activation>
-            <properties>
-                <hadoop.version>3.0-SNAPSHOT</hadoop.version>
-            </properties>
             <dependencies>
                 <dependency>
                     <groupId>org.apache.hadoop</groupId>
                     <artifactId>hadoop-common</artifactId>
-                    <scope>compile</scope>
                 </dependency>
                 <dependency>
                     <groupId>org.apache.hadoop</groupId>
                     <artifactId>hadoop-minicluster</artifactId>
                     <scope>compile</scope>
+                    <exclusions>
+                        <exclusion>
+                            <groupId>org.apache.htrace</groupId>
+                            <artifactId>htrace-core</artifactId>
+                        </exclusion>
+                    </exclusions>
                 </dependency>
                 <dependency>
                     <groupId>org.apache.hadoop</groupId>

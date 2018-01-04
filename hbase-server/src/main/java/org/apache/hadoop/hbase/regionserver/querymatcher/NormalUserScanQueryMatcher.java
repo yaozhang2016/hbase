@@ -21,17 +21,17 @@ import java.io.IOException;
 
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellUtil;
+import org.apache.hadoop.hbase.PrivateCellUtil;
 import org.apache.hadoop.hbase.KeepDeletedCells;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.hbase.client.Scan;
-import org.apache.hadoop.hbase.regionserver.RegionCoprocessorHost;
 import org.apache.hadoop.hbase.regionserver.ScanInfo;
 
 /**
  * Query matcher for normal user scan.
  */
 @InterfaceAudience.Private
-public class NormalUserScanQueryMatcher extends UserScanQueryMatcher {
+public abstract class NormalUserScanQueryMatcher extends UserScanQueryMatcher {
 
   /** Keeps track of deletes */
   private final DeleteTracker deletes;
@@ -40,7 +40,7 @@ public class NormalUserScanQueryMatcher extends UserScanQueryMatcher {
   private final boolean get;
 
   /** whether time range queries can see rows "behind" a delete */
-  private final boolean seePastDeleteMarkers;
+  protected final boolean seePastDeleteMarkers;
 
   protected NormalUserScanQueryMatcher(Scan scan, ScanInfo scanInfo, ColumnTracker columns,
       boolean hasNullColumn, DeleteTracker deletes, long oldestUnexpiredTS, long now) {
@@ -48,6 +48,12 @@ public class NormalUserScanQueryMatcher extends UserScanQueryMatcher {
     this.deletes = deletes;
     this.get = scan.isGetScan();
     this.seePastDeleteMarkers = scanInfo.getKeepDeletedCells() != KeepDeletedCells.FALSE;
+  }
+
+  @Override
+  public void beforeShipped() throws IOException {
+    super.beforeShipped();
+    deletes.beforeShipped();
   }
 
   @Override
@@ -61,7 +67,7 @@ public class NormalUserScanQueryMatcher extends UserScanQueryMatcher {
     }
     long timestamp = cell.getTimestamp();
     byte typeByte = cell.getTypeByte();
-    if (CellUtil.isDelete(typeByte)) {
+    if (PrivateCellUtil.isDelete(typeByte)) {
       boolean includeDeleteMarker = seePastDeleteMarkers ? tr.withinTimeRange(timestamp)
           : tr.withinOrAfterTimeRange(timestamp);
       if (includeDeleteMarker) {
@@ -87,21 +93,48 @@ public class NormalUserScanQueryMatcher extends UserScanQueryMatcher {
   }
 
   public static NormalUserScanQueryMatcher create(Scan scan, ScanInfo scanInfo,
-      ColumnTracker columns, boolean hasNullColumn, long oldestUnexpiredTS, long now,
-      RegionCoprocessorHost regionCoprocessorHost) throws IOException {
-    DeleteTracker deletes = instantiateDeleteTracker(regionCoprocessorHost);
+      ColumnTracker columns, DeleteTracker deletes, boolean hasNullColumn, long oldestUnexpiredTS,
+      long now) throws IOException {
     if (scan.isReversed()) {
-      return new NormalUserScanQueryMatcher(scan, scanInfo, columns, hasNullColumn, deletes,
-          oldestUnexpiredTS, now) {
+      if (scan.includeStopRow()) {
+        return new NormalUserScanQueryMatcher(scan, scanInfo, columns, hasNullColumn, deletes,
+            oldestUnexpiredTS, now) {
 
-        @Override
-        protected boolean moreRowsMayExistsAfter(int cmpToStopRow) {
-          return cmpToStopRow > 0;
-        }
-      };
+          @Override
+          protected boolean moreRowsMayExistsAfter(int cmpToStopRow) {
+            return cmpToStopRow >= 0;
+          }
+        };
+      } else {
+        return new NormalUserScanQueryMatcher(scan, scanInfo, columns, hasNullColumn, deletes,
+            oldestUnexpiredTS, now) {
+
+          @Override
+          protected boolean moreRowsMayExistsAfter(int cmpToStopRow) {
+            return cmpToStopRow > 0;
+          }
+        };
+      }
     } else {
-      return new NormalUserScanQueryMatcher(scan, scanInfo, columns, hasNullColumn, deletes,
-          oldestUnexpiredTS, now);
+      if (scan.includeStopRow()) {
+        return new NormalUserScanQueryMatcher(scan, scanInfo, columns, hasNullColumn, deletes,
+            oldestUnexpiredTS, now) {
+
+          @Override
+          protected boolean moreRowsMayExistsAfter(int cmpToStopRow) {
+            return cmpToStopRow <= 0;
+          }
+        };
+      } else {
+        return new NormalUserScanQueryMatcher(scan, scanInfo, columns, hasNullColumn, deletes,
+            oldestUnexpiredTS, now) {
+
+          @Override
+          protected boolean moreRowsMayExistsAfter(int cmpToStopRow) {
+            return cmpToStopRow < 0;
+          }
+        };
+      }
     }
   }
 }

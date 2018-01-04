@@ -19,11 +19,8 @@
 package org.apache.hadoop.hbase.procedure2;
 
 import java.io.IOException;
-import java.util.ArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.HBaseCommonTestingUtility;
@@ -36,13 +33,15 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
 @Category({MasterTests.class, SmallTests.class})
 public class TestStateMachineProcedure {
-  private static final Log LOG = LogFactory.getLog(TestStateMachineProcedure.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestStateMachineProcedure.class);
 
   private static final Exception TEST_FAILURE_EXCEPTION = new Exception("test failure") {
     @Override
@@ -77,7 +76,7 @@ public class TestStateMachineProcedure {
     fs = testDir.getFileSystem(htu.getConfiguration());
 
     logDir = new Path(testDir, "proc-logs");
-    procStore = ProcedureTestingUtility.createWalStore(htu.getConfiguration(), fs, logDir);
+    procStore = ProcedureTestingUtility.createWalStore(htu.getConfiguration(), logDir);
     procExecutor = new ProcedureExecutor(htu.getConfiguration(), new TestProcEnv(), procStore);
     procStore.start(PROCEDURE_EXECUTOR_SLOTS);
     procExecutor.start(PROCEDURE_EXECUTOR_SLOTS, true);
@@ -91,6 +90,21 @@ public class TestStateMachineProcedure {
     procExecutor.stop();
     procStore.stop(false);
     fs.delete(logDir, true);
+  }
+
+  @Test
+  public void testAbortStuckProcedure() throws InterruptedException {
+    try {
+      procExecutor.getEnvironment().loop = true;
+      TestSMProcedure proc = new TestSMProcedure();
+      long procId = procExecutor.submitProcedure(proc);
+      Thread.sleep(1000 + (int) (Math.random() * 4001));
+      proc.abort(procExecutor.getEnvironment());
+      ProcedureTestingUtility.waitProcedure(procExecutor, procId);
+      assertEquals(true, proc.isFailed());
+    } finally {
+      procExecutor.getEnvironment().loop = false;
+    }
   }
 
   @Test
@@ -135,7 +149,8 @@ public class TestStateMachineProcedure {
     assertEquals(TEST_FAILURE_EXCEPTION, cause);
   }
 
-  public enum TestSMProcedureState { STEP_1, STEP_2 };
+  public enum TestSMProcedureState { STEP_1, STEP_2 }
+
   public static class TestSMProcedure
       extends StateMachineProcedure<TestProcEnv, TestSMProcedureState> {
     protected Flow executeFromState(TestProcEnv env, TestSMProcedureState state) {
@@ -143,7 +158,9 @@ public class TestStateMachineProcedure {
       env.execCount.incrementAndGet();
       switch (state) {
         case STEP_1:
-          setNextState(TestSMProcedureState.STEP_2);
+          if (!env.loop) {
+            setNextState(TestSMProcedureState.STEP_2);
+          }
           break;
         case STEP_2:
           addChildProcedure(new SimpleChildProcedure());
@@ -191,5 +208,6 @@ public class TestStateMachineProcedure {
     AtomicInteger execCount = new AtomicInteger(0);
     AtomicInteger rollbackCount = new AtomicInteger(0);
     boolean triggerChildRollback = false;
+    boolean loop = false;
   }
 }

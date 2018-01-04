@@ -45,29 +45,31 @@ import org.apache.hadoop.hbase.rest.model.NamespacesInstanceModel;
 import org.apache.hadoop.hbase.rest.model.TableListModel;
 import org.apache.hadoop.hbase.rest.model.TableModel;
 import org.apache.hadoop.hbase.rest.model.TestNamespacesInstanceModel;
-import org.apache.hadoop.hbase.rest.provider.JacksonProvider;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.testclassification.RestTests;
 import org.apache.hadoop.hbase.util.Bytes;
-import org.codehaus.jackson.map.ObjectMapper;
 
 import static org.junit.Assert.*;
 
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
+import org.junit.Ignore;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.jaxrs.json.JacksonJaxbJsonProvider;
 
 @Category({RestTests.class, MediumTests.class})
 public class TestNamespacesInstanceResource {
   private static String NAMESPACE1 = "TestNamespacesInstanceResource1";
-  private static Map<String,String> NAMESPACE1_PROPS = new HashMap<String,String>();
+  private static Map<String,String> NAMESPACE1_PROPS = new HashMap<>();
   private static String NAMESPACE2 = "TestNamespacesInstanceResource2";
-  private static Map<String,String> NAMESPACE2_PROPS = new HashMap<String,String>();
+  private static Map<String,String> NAMESPACE2_PROPS = new HashMap<>();
   private static String NAMESPACE3 = "TestNamespacesInstanceResource3";
-  private static Map<String,String> NAMESPACE3_PROPS = new HashMap<String,String>();
+  private static Map<String,String> NAMESPACE3_PROPS = new HashMap<>();
   private static String NAMESPACE4 = "TestNamespacesInstanceResource4";
-  private static Map<String,String> NAMESPACE4_PROPS = new HashMap<String,String>();
+  private static Map<String,String> NAMESPACE4_PROPS = new HashMap<>();
 
   private static final HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
   private static final HBaseRESTTestingUtility REST_TEST_UTIL =
@@ -87,8 +89,8 @@ public class TestNamespacesInstanceResource {
       REST_TEST_UTIL.getServletPort()));
     testNamespacesInstanceModel = new TestNamespacesInstanceModel();
     context = JAXBContext.newInstance(NamespacesInstanceModel.class, TableListModel.class);
-    jsonMapper = new JacksonProvider()
-    .locateMapper(NamespacesInstanceModel.class, MediaType.APPLICATION_JSON_TYPE);
+    jsonMapper = new JacksonJaxbJsonProvider()
+      .locateMapper(NamespacesInstanceModel.class, MediaType.APPLICATION_JSON_TYPE);
     NAMESPACE1_PROPS.put("key1", "value1");
     NAMESPACE2_PROPS.put("key2a", "value2a");
     NAMESPACE2_PROPS.put("key2b", "value2b");
@@ -152,7 +154,7 @@ public class TestNamespacesInstanceResource {
     Response response;
 
     // Check that doesn't exist via non-REST call.
-    Admin admin = TEST_UTIL.getHBaseAdmin();
+    Admin admin = TEST_UTIL.getAdmin();
     assertNotNull(findNamespace(admin, "default"));
     assertNotNull(findNamespace(admin, "hbase"));
 
@@ -168,7 +170,7 @@ public class TestNamespacesInstanceResource {
 
   @Test
   public void testGetNamespaceTablesAndCannotDeleteNamespace() throws IOException, JAXBException {
-    Admin admin = TEST_UTIL.getHBaseAdmin();
+    Admin admin = TEST_UTIL.getAdmin();
     String nsName = "TestNamespacesInstanceResource5";
     Response response;
 
@@ -189,7 +191,7 @@ public class TestNamespacesInstanceResource {
     table.addFamily(colDesc);
     admin.createTable(table);
 
-    Map<String, String> nsProperties = new HashMap<String,String>();
+    Map<String, String> nsProperties = new HashMap<>();
     nsProperties.put("key1", "value1");
     List<String> nsTables = Arrays.asList("table1", "table2");
 
@@ -230,7 +232,7 @@ public class TestNamespacesInstanceResource {
 
     response = client.get(namespacePath, Constants.MIMETYPE_PROTOBUF);
     assertEquals(200, response.getCode());
-    tablemodel.setTables(new ArrayList<TableModel>());
+    tablemodel.setTables(new ArrayList<>());
     tablemodel.getObjectFromMessage(response.getBody());
     checkNamespaceTables(tablemodel.getTables(), nsTables);
 
@@ -240,6 +242,7 @@ public class TestNamespacesInstanceResource {
     assertEquals(503, response.getCode());
   }
 
+  @Ignore("HBASE-19210")
   @Test
   public void testInvalidNamespacePostsAndPuts() throws IOException, JAXBException {
     String namespacePath1 = "/namespaces/" + NAMESPACE1;
@@ -251,7 +254,7 @@ public class TestNamespacesInstanceResource {
     Response response;
 
     // Check that namespaces don't exist via non-REST call.
-    Admin admin = TEST_UTIL.getHBaseAdmin();
+    Admin admin = TEST_UTIL.getAdmin();
     assertNull(findNamespace(admin, NAMESPACE1));
     assertNull(findNamespace(admin, NAMESPACE2));
     assertNull(findNamespace(admin, NAMESPACE3));
@@ -269,7 +272,7 @@ public class TestNamespacesInstanceResource {
     String jsonString = jsonMapper.writeValueAsString(model2);
     response = client.put(namespacePath2, Constants.MIMETYPE_XML, Bytes.toBytes(jsonString));
     assertEquals(400, response.getCode());
-    response = client.post(namespacePath3, Constants.MIMETYPE_PROTOBUF, toXML(model1));
+    response = client.post(namespacePath3, Constants.MIMETYPE_PROTOBUF, toXML(model3));
     assertEquals(500, response.getCode());
 
     NamespaceDescriptor nd1 = findNamespace(admin, NAMESPACE1);
@@ -289,7 +292,7 @@ public class TestNamespacesInstanceResource {
     Response response;
 
     // Check that namespaces don't exist via non-REST call.
-    Admin admin = TEST_UTIL.getHBaseAdmin();
+    Admin admin = TEST_UTIL.getAdmin();
     assertNull(findNamespace(admin, NAMESPACE1));
     assertNull(findNamespace(admin, NAMESPACE2));
 
@@ -365,7 +368,7 @@ public class TestNamespacesInstanceResource {
     Response response;
 
     // Check that namespaces don't exist via non-REST call.
-    Admin admin = TEST_UTIL.getHBaseAdmin();
+    Admin admin = TEST_UTIL.getAdmin();
     assertNull(findNamespace(admin, NAMESPACE3));
     assertNull(findNamespace(admin, NAMESPACE4));
 
@@ -406,7 +409,7 @@ public class TestNamespacesInstanceResource {
     nd4 = findNamespace(admin, NAMESPACE4);
     assertNotNull(nd3);
     assertNotNull(nd4);
-    checkNamespaceProperties(nd3, new HashMap<String,String>());
+    checkNamespaceProperties(nd3, new HashMap<>());
     checkNamespaceProperties(nd4, NAMESPACE4_PROPS);
 
     // Check cannot post tables that already exist.

@@ -20,15 +20,13 @@ package org.apache.hadoop.hbase.ipc;
 import static org.apache.hadoop.hbase.HBaseTestingUtility.fam1;
 import static org.junit.Assert.assertTrue;
 
-import com.google.common.collect.Lists;
+import org.apache.hbase.thirdparty.com.google.common.collect.Lists;
 
 import java.io.IOException;
 import java.net.Socket;
 import java.net.SocketAddress;
 import java.util.List;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.CategoryBasedTimeout;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
@@ -47,12 +45,18 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.junit.rules.ExpectedException;
+import org.junit.rules.TestName;
 import org.junit.rules.TestRule;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Category(MediumTests.class)
 public class TestRpcClientLeaks {
   @Rule public final TestRule timeout = CategoryBasedTimeout.builder().withTimeout(this.getClass()).
       withLookingForStuckThread(true).build();
+
+  @Rule
+  public TestName name = new TestName();
 
   public static class MyRpcClientImpl extends BlockingRpcClient {
     public static List<Socket> savedSockets = Lists.newArrayList();
@@ -95,20 +99,19 @@ public class TestRpcClientLeaks {
     UTIL.shutdownMiniCluster();
   }
 
-  public static final Log LOG = LogFactory.getLog(TestRpcClientLeaks.class);
+  public static final Logger LOG = LoggerFactory.getLogger(TestRpcClientLeaks.class);
 
   @Test(expected=RetriesExhaustedException.class)
   public void testSocketClosed() throws IOException, InterruptedException {
-    String tableName = "testSocketClosed";
-    TableName name = TableName.valueOf(tableName);
-    UTIL.createTable(name, fam1).close();
+    TableName tableName = TableName.valueOf(name.getMethodName());
+    UTIL.createTable(tableName, fam1).close();
 
     Configuration conf = new Configuration(UTIL.getConfiguration());
     conf.set(RpcClientFactory.CUSTOM_RPC_CLIENT_IMPL_CONF_KEY,
       MyRpcClientImpl.class.getName());
     conf.setInt(HConstants.HBASE_CLIENT_RETRIES_NUMBER, 2);
     Connection connection = ConnectionFactory.createConnection(conf);
-    Table table = connection.getTable(TableName.valueOf(tableName));
+    Table table = connection.getTable(TableName.valueOf(name.getMethodName()));
     table.get(new Get("asd".getBytes()));
     connection.close();
     for (Socket socket : MyRpcClientImpl.savedSockets) {

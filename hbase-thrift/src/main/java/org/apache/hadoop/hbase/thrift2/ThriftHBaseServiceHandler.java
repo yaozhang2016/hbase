@@ -39,17 +39,16 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hbase.DoNotRetryIOException;
 import org.apache.hadoop.hbase.HRegionLocation;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.client.RegionLocator;
 import org.apache.hadoop.hbase.client.ResultScanner;
 import org.apache.hadoop.hbase.client.Table;
@@ -71,6 +70,9 @@ import org.apache.hadoop.hbase.thrift2.generated.TScan;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.ConnectionCache;
 import org.apache.thrift.TException;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * This class is a glue object that connects Thrift RPC calls to the HBase client API primarily
@@ -81,18 +83,21 @@ import org.apache.thrift.TException;
 public class ThriftHBaseServiceHandler implements THBaseService.Iface {
 
   // TODO: Size of pool configuraple
-  private static final Log LOG = LogFactory.getLog(ThriftHBaseServiceHandler.class);
+  private static final Logger LOG = LoggerFactory.getLogger(ThriftHBaseServiceHandler.class);
 
   // nextScannerId and scannerMap are used to manage scanner state
   // TODO: Cleanup thread for Scanners, Scanner id wrap
   private final AtomicInteger nextScannerId = new AtomicInteger(0);
-  private final Map<Integer, ResultScanner> scannerMap =
-      new ConcurrentHashMap<Integer, ResultScanner>();
+  private final Map<Integer, ResultScanner> scannerMap = new ConcurrentHashMap<>();
 
   private final ConnectionCache connectionCache;
 
   static final String CLEANUP_INTERVAL = "hbase.thrift.connection.cleanup-interval";
   static final String MAX_IDLETIME = "hbase.thrift.connection.max-idletime";
+
+  private static final IOException ioe
+      = new DoNotRetryIOException("Thrift Server is in Read-only mode.");
+  private boolean isReadOnly;
 
   public static THBaseService.Iface newInstance(
       THBaseService.Iface handler, ThriftMetrics metrics) {
@@ -112,16 +117,54 @@ public class ThriftHBaseServiceHandler implements THBaseService.Iface {
     @Override
     public Object invoke(Object proxy, Method m, Object[] args) throws Throwable {
       Object result;
+      long start = now();
       try {
-        long start = now();
         result = m.invoke(handler, args);
-        int processTime = (int) (now() - start);
-        metrics.incMethodTime(m.getName(), processTime);
       } catch (InvocationTargetException e) {
+        metrics.exception(e.getCause());
         throw e.getTargetException();
       } catch (Exception e) {
+        metrics.exception(e);
         throw new RuntimeException("unexpected invocation exception: " + e.getMessage());
+      } finally {
+        long processTime = now() - start;
+        metrics.incMethodTime(m.getName(), processTime);
       }
+      return result;
+    }
+  }
+
+  private static class TIOErrorWithCause extends TIOError {
+    private Throwable cause;
+
+    public TIOErrorWithCause(Throwable cause) {
+      super();
+      this.cause = cause;
+    }
+
+    @Override
+    public Throwable getCause() {
+      return cause;
+    }
+
+    @Override
+    public boolean equals(Object other) {
+      if (super.equals(other) &&
+          other instanceof TIOErrorWithCause) {
+        Throwable otherCause = ((TIOErrorWithCause) other).getCause();
+        if (this.getCause() != null) {
+          return otherCause != null && this.getCause().equals(otherCause);
+        } else {
+          return otherCause == null;
+        }
+      }
+      return false;
+    }
+
+    @Override
+    public int hashCode() {
+      int result = super.hashCode();
+      result = 31 * result + (cause != null ? cause.hashCode() : 0);
       return result;
     }
   }
@@ -136,6 +179,7 @@ public class ThriftHBaseServiceHandler implements THBaseService.Iface {
     int maxIdleTime = conf.getInt(MAX_IDLETIME, 10 * 60 * 1000);
     connectionCache = new ConnectionCache(
       conf, userProvider, cleanInterval, maxIdleTime);
+    isReadOnly = conf.getBoolean("hbase.thrift.readonly", false);
   }
 
   private Table getTable(ByteBuffer tableName) {
@@ -163,7 +207,7 @@ public class ThriftHBaseServiceHandler implements THBaseService.Iface {
   }
 
   private TIOError getTIOError(IOException e) {
-    TIOError err = new TIOError();
+    TIOError err = new TIOErrorWithCause(e);
     err.setMessage(e.getMessage());
     return err;
   }
@@ -214,6 +258,23 @@ public class ThriftHBaseServiceHandler implements THBaseService.Iface {
   }
 
   @Override
+  public List<Boolean> existsAll(ByteBuffer table, List<TGet> gets) throws TIOError, TException {
+    Table htable = getTable(table);
+    try {
+      boolean[] exists = htable.existsAll(getsFromThrift(gets));
+      List<Boolean> result = new ArrayList<>(exists.length);
+      for (boolean exist : exists) {
+        result.add(exist);
+      }
+      return result;
+    } catch (IOException e) {
+      throw getTIOError(e);
+    } finally {
+      closeTable(htable);
+    }
+  }
+
+  @Override
   public TResult get(ByteBuffer table, TGet get) throws TIOError, TException {
     Table htable = getTable(table);
     try {
@@ -239,6 +300,7 @@ public class ThriftHBaseServiceHandler implements THBaseService.Iface {
 
   @Override
   public void put(ByteBuffer table, TPut put) throws TIOError, TException {
+    checkReadOnlyMode();
     Table htable = getTable(table);
     try {
       htable.put(putFromThrift(put));
@@ -252,11 +314,16 @@ public class ThriftHBaseServiceHandler implements THBaseService.Iface {
   @Override
   public boolean checkAndPut(ByteBuffer table, ByteBuffer row, ByteBuffer family,
       ByteBuffer qualifier, ByteBuffer value, TPut put) throws TIOError, TException {
+    checkReadOnlyMode();
     Table htable = getTable(table);
     try {
-      return htable.checkAndPut(byteBufferToByteArray(row), byteBufferToByteArray(family),
-        byteBufferToByteArray(qualifier), (value == null) ? null : byteBufferToByteArray(value),
-        putFromThrift(put));
+      Table.CheckAndMutateBuilder builder = htable.checkAndMutate(byteBufferToByteArray(row),
+          byteBufferToByteArray(family)).qualifier(byteBufferToByteArray(qualifier));
+      if (value == null) {
+        return builder.ifNotExists().thenPut(putFromThrift(put));
+      } else {
+        return builder.ifEquals(byteBufferToByteArray(value)).thenPut(putFromThrift(put));
+      }
     } catch (IOException e) {
       throw getTIOError(e);
     } finally {
@@ -266,6 +333,7 @@ public class ThriftHBaseServiceHandler implements THBaseService.Iface {
 
   @Override
   public void putMultiple(ByteBuffer table, List<TPut> puts) throws TIOError, TException {
+    checkReadOnlyMode();
     Table htable = getTable(table);
     try {
       htable.put(putsFromThrift(puts));
@@ -278,6 +346,7 @@ public class ThriftHBaseServiceHandler implements THBaseService.Iface {
 
   @Override
   public void deleteSingle(ByteBuffer table, TDelete deleteSingle) throws TIOError, TException {
+    checkReadOnlyMode();
     Table htable = getTable(table);
     try {
       htable.delete(deleteFromThrift(deleteSingle));
@@ -291,6 +360,7 @@ public class ThriftHBaseServiceHandler implements THBaseService.Iface {
   @Override
   public List<TDelete> deleteMultiple(ByteBuffer table, List<TDelete> deletes) throws TIOError,
       TException {
+    checkReadOnlyMode();
     Table htable = getTable(table);
     try {
       htable.delete(deletesFromThrift(deletes));
@@ -306,10 +376,12 @@ public class ThriftHBaseServiceHandler implements THBaseService.Iface {
   public boolean checkAndMutate(ByteBuffer table, ByteBuffer row, ByteBuffer family,
       ByteBuffer qualifier, TCompareOp compareOp, ByteBuffer value, TRowMutations rowMutations)
           throws TIOError, TException {
+    checkReadOnlyMode();
     try (final Table htable = getTable(table)) {
-      return htable.checkAndMutate(byteBufferToByteArray(row), byteBufferToByteArray(family),
-          byteBufferToByteArray(qualifier), compareOpFromThrift(compareOp),
-          byteBufferToByteArray(value), rowMutationsFromThrift(rowMutations));
+      return htable.checkAndMutate(byteBufferToByteArray(row), byteBufferToByteArray(family))
+          .qualifier(byteBufferToByteArray(qualifier))
+          .ifMatches(compareOpFromThrift(compareOp), byteBufferToByteArray(value))
+          .thenMutate(rowMutationsFromThrift(rowMutations));
     } catch (IOException e) {
       throw getTIOError(e);
     }
@@ -318,16 +390,17 @@ public class ThriftHBaseServiceHandler implements THBaseService.Iface {
   @Override
   public boolean checkAndDelete(ByteBuffer table, ByteBuffer row, ByteBuffer family,
       ByteBuffer qualifier, ByteBuffer value, TDelete deleteSingle) throws TIOError, TException {
+    checkReadOnlyMode();
     Table htable = getTable(table);
-
     try {
+      Table.CheckAndMutateBuilder mutateBuilder =
+          htable.checkAndMutate(byteBufferToByteArray(row), byteBufferToByteArray(family))
+              .qualifier(byteBufferToByteArray(qualifier));
       if (value == null) {
-        return htable.checkAndDelete(byteBufferToByteArray(row), byteBufferToByteArray(family),
-          byteBufferToByteArray(qualifier), null, deleteFromThrift(deleteSingle));
+        return mutateBuilder.ifNotExists().thenDelete(deleteFromThrift(deleteSingle));
       } else {
-        return htable.checkAndDelete(byteBufferToByteArray(row), byteBufferToByteArray(family),
-          byteBufferToByteArray(qualifier), byteBufferToByteArray(value),
-          deleteFromThrift(deleteSingle));
+        return mutateBuilder.ifEquals(byteBufferToByteArray(value))
+            .thenDelete(deleteFromThrift(deleteSingle));
       }
     } catch (IOException e) {
       throw getTIOError(e);
@@ -338,6 +411,7 @@ public class ThriftHBaseServiceHandler implements THBaseService.Iface {
 
   @Override
   public TResult increment(ByteBuffer table, TIncrement increment) throws TIOError, TException {
+    checkReadOnlyMode();
     Table htable = getTable(table);
     try {
       return resultFromHBase(htable.increment(incrementFromThrift(increment)));
@@ -350,6 +424,7 @@ public class ThriftHBaseServiceHandler implements THBaseService.Iface {
 
   @Override
   public TResult append(ByteBuffer table, TAppend append) throws TIOError, TException {
+    checkReadOnlyMode();
     Table htable = getTable(table);
     try {
       return resultFromHBase(htable.append(appendFromThrift(append)));
@@ -430,6 +505,7 @@ public class ThriftHBaseServiceHandler implements THBaseService.Iface {
 
   @Override
   public void mutateRow(ByteBuffer table, TRowMutations rowMutations) throws TIOError, TException {
+    checkReadOnlyMode();
     Table htable = getTable(table);
     try {
       htable.mutateRow(rowMutationsFromThrift(rowMutations));
@@ -483,5 +559,15 @@ public class ThriftHBaseServiceHandler implements THBaseService.Iface {
         }
       }
     }
+  }
+
+  private void checkReadOnlyMode() throws TIOError {
+    if (isReadOnly()) {
+      throw getTIOError(ioe);
+    }
+  }
+
+  private boolean isReadOnly() {
+    return isReadOnly;
   }
 }

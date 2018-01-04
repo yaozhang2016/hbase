@@ -22,11 +22,14 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.ByteBuffer;
 
+import org.apache.hadoop.hbase.ByteBufferKeyValue;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.HBaseInterfaceAudience;
+import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.KeyValueUtil;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.hadoop.hbase.nio.ByteBuff;
 import org.apache.hadoop.hbase.util.ByteBufferUtils;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * Codec that does KeyValue version 1 serialization with serializing tags also.
@@ -72,21 +75,27 @@ public class KeyValueCodecWithTags implements Codec {
       super(in);
     }
 
+    @Override
     protected Cell parseCell() throws IOException {
       // create KeyValue with tags
       return KeyValueUtil.iscreate(in, true);
     }
   }
 
-  public static class ByteBufferedKeyValueDecoder
-      extends KeyValueCodec.ByteBufferedKeyValueDecoder {
+  public static class ByteBuffKeyValueDecoder extends KeyValueCodec.ByteBuffKeyValueDecoder {
 
-    public ByteBufferedKeyValueDecoder(ByteBuffer buf) {
+    public ByteBuffKeyValueDecoder(ByteBuff buf) {
       super(buf);
     }
 
+    @Override
     protected Cell createCell(byte[] buf, int offset, int len) {
-      return new ShareableMemoryKeyValue(buf, offset, len);
+      return new KeyValue(buf, offset, len);
+    }
+
+    @Override
+    protected Cell createCell(ByteBuffer bb, int pos, int len) {
+      return new ByteBufferKeyValue(bb, pos, len);
     }
   }
 
@@ -104,7 +113,7 @@ public class KeyValueCodecWithTags implements Codec {
   }
 
   @Override
-  public Decoder getDecoder(ByteBuffer buf) {
-    return new ByteBufferedKeyValueDecoder(buf);
+  public Decoder getDecoder(ByteBuff buf) {
+    return new ByteBuffKeyValueDecoder(buf);
   }
 }

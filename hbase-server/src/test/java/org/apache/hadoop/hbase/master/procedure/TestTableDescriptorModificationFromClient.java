@@ -32,6 +32,7 @@ import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.InvalidFamilyOperationException;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Admin;
+import org.apache.hadoop.hbase.client.TableDescriptor;
 import org.apache.hadoop.hbase.master.MasterFileSystem;
 import org.apache.hadoop.hbase.testclassification.LargeTests;
 import org.apache.hadoop.hbase.testclassification.MasterTests;
@@ -83,7 +84,7 @@ public class TestTableDescriptorModificationFromClient {
 
   @Test
   public void testModifyTable() throws IOException {
-    Admin admin = TEST_UTIL.getHBaseAdmin();
+    Admin admin = TEST_UTIL.getAdmin();
     // Create a table with one family
     HTableDescriptor baseHtd = new HTableDescriptor(TABLE_NAME);
     baseHtd.addFamily(new HColumnDescriptor(FAMILY_0));
@@ -106,7 +107,7 @@ public class TestTableDescriptorModificationFromClient {
 
   @Test
   public void testAddColumn() throws IOException {
-    Admin admin = TEST_UTIL.getHBaseAdmin();
+    Admin admin = TEST_UTIL.getAdmin();
     // Create a table with two families
     HTableDescriptor baseHtd = new HTableDescriptor(TABLE_NAME);
     baseHtd.addFamily(new HColumnDescriptor(FAMILY_0));
@@ -126,7 +127,7 @@ public class TestTableDescriptorModificationFromClient {
 
   @Test
   public void testAddSameColumnFamilyTwice() throws IOException {
-    Admin admin = TEST_UTIL.getHBaseAdmin();
+    Admin admin = TEST_UTIL.getAdmin();
     // Create a table with one families
     HTableDescriptor baseHtd = new HTableDescriptor(TABLE_NAME);
     baseHtd.addFamily(new HColumnDescriptor(FAMILY_0));
@@ -155,7 +156,7 @@ public class TestTableDescriptorModificationFromClient {
 
   @Test
   public void testModifyColumnFamily() throws IOException {
-    Admin admin = TEST_UTIL.getHBaseAdmin();
+    Admin admin = TEST_UTIL.getAdmin();
 
     HColumnDescriptor cfDescriptor = new HColumnDescriptor(FAMILY_0);
     int blockSize = cfDescriptor.getBlocksize();
@@ -184,7 +185,7 @@ public class TestTableDescriptorModificationFromClient {
 
   @Test
   public void testModifyNonExistingColumnFamily() throws IOException {
-    Admin admin = TEST_UTIL.getHBaseAdmin();
+    Admin admin = TEST_UTIL.getAdmin();
 
     HColumnDescriptor cfDescriptor = new HColumnDescriptor(FAMILY_1);
     int blockSize = cfDescriptor.getBlocksize();
@@ -215,7 +216,7 @@ public class TestTableDescriptorModificationFromClient {
 
   @Test
   public void testDeleteColumn() throws IOException {
-    Admin admin = TEST_UTIL.getHBaseAdmin();
+    Admin admin = TEST_UTIL.getAdmin();
     // Create a table with two families
     HTableDescriptor baseHtd = new HTableDescriptor(TABLE_NAME);
     baseHtd.addFamily(new HColumnDescriptor(FAMILY_0));
@@ -236,7 +237,7 @@ public class TestTableDescriptorModificationFromClient {
 
   @Test
   public void testDeleteSameColumnFamilyTwice() throws IOException {
-    Admin admin = TEST_UTIL.getHBaseAdmin();
+    Admin admin = TEST_UTIL.getAdmin();
     // Create a table with two families
     HTableDescriptor baseHtd = new HTableDescriptor(TABLE_NAME);
     baseHtd.addFamily(new HColumnDescriptor(FAMILY_0));
@@ -265,7 +266,7 @@ public class TestTableDescriptorModificationFromClient {
 
   private void verifyTableDescriptor(final TableName tableName,
                                      final byte[]... families) throws IOException {
-    Admin admin = TEST_UTIL.getHBaseAdmin();
+    Admin admin = TEST_UTIL.getAdmin();
 
     // Verify descriptor from master
     HTableDescriptor htd = admin.getTableDescriptor(tableName);
@@ -274,14 +275,14 @@ public class TestTableDescriptorModificationFromClient {
     // Verify descriptor from HDFS
     MasterFileSystem mfs = TEST_UTIL.getMiniHBaseCluster().getMaster().getMasterFileSystem();
     Path tableDir = FSUtils.getTableDir(mfs.getRootDir(), tableName);
-    HTableDescriptor td =
+    TableDescriptor td =
         FSTableDescriptors.getTableDescriptorFromFs(mfs.getFileSystem(), tableDir);
     verifyTableDescriptor(td, tableName, families);
   }
 
-  private void verifyTableDescriptor(final HTableDescriptor htd,
+  private void verifyTableDescriptor(final TableDescriptor htd,
       final TableName tableName, final byte[]... families) {
-    Set<byte[]> htdFamilies = htd.getFamiliesKeys();
+    Set<byte[]> htdFamilies = htd.getColumnFamilyNames();
     assertEquals(tableName, htd.getTableName());
     assertEquals(families.length, htdFamilies.size());
     for (byte[] familyName: families) {

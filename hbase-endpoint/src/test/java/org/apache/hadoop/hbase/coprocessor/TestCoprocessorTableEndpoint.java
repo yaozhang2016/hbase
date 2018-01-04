@@ -38,11 +38,13 @@ import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 
 import com.google.protobuf.ByteString;
 import com.google.protobuf.ServiceException;
+import org.junit.rules.TestName;
 
 @Category({CoprocessorTests.class, MediumTests.class})
 public class TestCoprocessorTableEndpoint {
@@ -57,6 +59,9 @@ public class TestCoprocessorTableEndpoint {
 
   private static final HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
 
+  @Rule
+  public TestName name = new TestName();
+
   @BeforeClass
   public static void setupBeforeClass() throws Exception {
     TEST_UTIL.startMiniCluster(2);
@@ -68,8 +73,8 @@ public class TestCoprocessorTableEndpoint {
   }
 
   @Test
-  public void testCoprocessorTableEndpoint() throws Throwable {    
-    final TableName tableName = TableName.valueOf("testCoprocessorTableEndpoint");
+  public void testCoprocessorTableEndpoint() throws Throwable {
+    final TableName tableName = TableName.valueOf(name.getMethodName());
 
     HTableDescriptor desc = new HTableDescriptor(tableName);
     desc.addFamily(new HColumnDescriptor(TEST_FAMILY));
@@ -81,7 +86,7 @@ public class TestCoprocessorTableEndpoint {
 
   @Test
   public void testDynamicCoprocessorTableEndpoint() throws Throwable {    
-    final TableName tableName = TableName.valueOf("testDynamicCoprocessorTableEndpoint");
+    final TableName tableName = TableName.valueOf(name.getMethodName());
 
     HTableDescriptor desc = new HTableDescriptor(tableName);
     desc.addFamily(new HColumnDescriptor(TEST_FAMILY));
@@ -112,7 +117,7 @@ public class TestCoprocessorTableEndpoint {
       public Long call(ColumnAggregationProtos.ColumnAggregationService instance)
       throws IOException {
         CoprocessorRpcUtils.BlockingRpcCallback<ColumnAggregationProtos.SumResponse> rpcCallback =
-            new CoprocessorRpcUtils.BlockingRpcCallback<ColumnAggregationProtos.SumResponse>();
+            new CoprocessorRpcUtils.BlockingRpcCallback<>();
         ColumnAggregationProtos.SumRequest.Builder builder =
           ColumnAggregationProtos.SumRequest.newBuilder();
         builder.setFamily(ByteString.copyFrom(family));
@@ -126,7 +131,7 @@ public class TestCoprocessorTableEndpoint {
   }
 
   private static final void createTable(HTableDescriptor desc) throws Exception {
-    Admin admin = TEST_UTIL.getHBaseAdmin();
+    Admin admin = TEST_UTIL.getAdmin();
     admin.createTable(desc, new byte[][]{ROWS[rowSeperator1], ROWS[rowSeperator2]});
     TEST_UTIL.waitUntilAllRegionsAssigned(desc.getTableName());
     Table table = TEST_UTIL.getConnection().getTable(desc.getTableName());
@@ -142,7 +147,7 @@ public class TestCoprocessorTableEndpoint {
   }
 
   private static void updateTable(HTableDescriptor desc) throws Exception {
-    Admin admin = TEST_UTIL.getHBaseAdmin();
+    Admin admin = TEST_UTIL.getAdmin();
     admin.disableTable(desc.getTableName());
     admin.modifyTable(desc.getTableName(), desc);
     admin.enableTable(desc.getTableName());

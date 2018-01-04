@@ -19,13 +19,13 @@ package org.apache.hadoop.hbase.errorhandling;
 
 import static org.junit.Assert.fail;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.testclassification.MasterTests;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.mockito.Mockito;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Test the {@link TimeoutExceptionInjector} to ensure we fulfill contracts
@@ -33,7 +33,7 @@ import org.mockito.Mockito;
 @Category({MasterTests.class, SmallTests.class})
 public class TestTimeoutExceptionInjector {
 
-  private static final Log LOG = LogFactory.getLog(TestTimeoutExceptionInjector.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestTimeoutExceptionInjector.class);
 
   /**
    * Test that a manually triggered timer fires an exception.
@@ -45,7 +45,7 @@ public class TestTimeoutExceptionInjector {
     TimeoutExceptionInjector timer = new TimeoutExceptionInjector(listener, time);
     timer.start();
     timer.trigger();
-    Mockito.verify(listener, Mockito.times(1)).receive(Mockito.any(ForeignException.class));
+    Mockito.verify(listener, Mockito.times(1)).receive(Mockito.any());
   }
 
   /**
@@ -58,7 +58,7 @@ public class TestTimeoutExceptionInjector {
     TimeoutExceptionInjector timer = new TimeoutExceptionInjector(listener, time);
     timer.start();
     timer.trigger();
-    Mockito.verify(listener).receive(Mockito.any(ForeignException.class));
+    Mockito.verify(listener).receive(Mockito.any());
   }
 
   /**
@@ -98,7 +98,7 @@ public class TestTimeoutExceptionInjector {
       LOG.debug("Correctly failed timer: " + e.getMessage());
     }
     Thread.sleep(time * 2);
-    Mockito.verify(listener, Mockito.times(1)).receive(Mockito.any(ForeignException.class));
+    Mockito.verify(listener, Mockito.times(1)).receive(Mockito.any());
     Mockito.verifyNoMoreInteractions(listener);
   }
 }

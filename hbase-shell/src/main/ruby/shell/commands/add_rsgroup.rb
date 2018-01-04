@@ -22,12 +22,13 @@ module Shell
   module Commands
     class AddRsgroup < Command
       def help
-        return <<-EOF
-Create a new region server group.
+        <<-EOF
+Create a new RegionServer group.
 
 Example:
 
   hbase> add_rsgroup 'my_group'
+
 EOF
       end
 

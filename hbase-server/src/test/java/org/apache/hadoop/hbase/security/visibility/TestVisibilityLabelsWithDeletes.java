@@ -20,6 +20,7 @@ package org.apache.hadoop.hbase.security.visibility;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellScanner;
+import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HConstants;
@@ -41,13 +42,20 @@ import org.apache.hadoop.hbase.security.User;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.testclassification.SecurityTests;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.hadoop.hbase.util.DefaultEnvironmentEdge;
+import org.apache.hadoop.hbase.util.EnvironmentEdge;
+import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
+import org.apache.hadoop.hbase.util.Threads;
 import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
+import org.junit.Ignore;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.junit.rules.TestName;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.io.InterruptedIOException;
@@ -65,6 +73,7 @@ import static org.junit.Assert.assertTrue;
  */
 @Category({SecurityTests.class, MediumTests.class})
 public class TestVisibilityLabelsWithDeletes {
+  private static final Logger LOG = LoggerFactory.getLogger(TestVisibilityLabelsWithDeletes.class);
   private static final String TOPSECRET = "TOPSECRET";
   private static final String PUBLIC = "PUBLIC";
   private static final String PRIVATE = "PRIVATE";
@@ -73,11 +82,11 @@ public class TestVisibilityLabelsWithDeletes {
   public static final HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
   private static final byte[] row1 = Bytes.toBytes("row1");
   private static final byte[] row2 = Bytes.toBytes("row2");
-  private final static byte[] fam = Bytes.toBytes("info");
-  private final static byte[] qual = Bytes.toBytes("qual");
+  protected final static byte[] fam = Bytes.toBytes("info");
+  protected final static byte[] qual = Bytes.toBytes("qual");
   private final static byte[] qual1 = Bytes.toBytes("qual1");
   private final static byte[] qual2 = Bytes.toBytes("qual2");
-  private final static byte[] value = Bytes.toBytes("value");
+  protected final static byte[] value = Bytes.toBytes("value");
   private final static byte[] value1 = Bytes.toBytes("value1");
   public static Configuration conf;
 
@@ -89,7 +98,6 @@ public class TestVisibilityLabelsWithDeletes {
   public static void setupBeforeClass() throws Exception {
     // setup configuration
     conf = TEST_UTIL.getConfiguration();
-    conf.setBoolean(HConstants.DISTRIBUTED_LOG_REPLAY_KEY, false);
     VisibilityTestUtil.enableVisiblityLabels(conf);
     conf.setClass(VisibilityUtils.VISIBILITY_LABEL_GENERATOR_CLASS, SimpleScanLabelGenerator.class,
         ScanLabelGenerator.class);
@@ -111,13 +119,20 @@ public class TestVisibilityLabelsWithDeletes {
   public void tearDown() throws Exception {
   }
 
+  protected Table createTable(HColumnDescriptor fam) throws IOException {
+    TableName tableName = TableName.valueOf(TEST_NAME.getMethodName());
+    HTableDescriptor table = new HTableDescriptor(tableName);
+    table.addFamily(fam);
+    TEST_UTIL.getHBaseAdmin().createTable(table);
+    return TEST_UTIL.getConnection().getTable(tableName);
+  }
+
   @Test
   public void testVisibilityLabelsWithDeleteColumns() throws Throwable {
     setAuths();
     final TableName tableName = TableName.valueOf(TEST_NAME.getMethodName());
 
-    try (Table table = createTableAndWriteDataWithLabels(tableName,
-        SECRET + "&" + TOPSECRET, SECRET)) {
+    try (Table table = createTableAndWriteDataWithLabels(SECRET + "&" + TOPSECRET, SECRET)) {
       PrivilegedExceptionAction<Void> actiona = new PrivilegedExceptionAction<Void>() {
         @Override
         public Void run() throws Exception {
@@ -135,7 +150,7 @@ public class TestVisibilityLabelsWithDeletes {
       };
       SUPERUSER.runAs(actiona);
 
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
       Scan s = new Scan();
       s.setAuthorizations(new Authorizations(SECRET, PRIVATE, CONFIDENTIAL));
       ResultScanner scanner = table.getScanner(s);
@@ -154,8 +169,7 @@ public class TestVisibilityLabelsWithDeletes {
   public void testVisibilityLabelsWithDeleteFamily() throws Exception {
     setAuths();
     final TableName tableName = TableName.valueOf(TEST_NAME.getMethodName());
-    try (Table table = createTableAndWriteDataWithLabels(tableName, SECRET,
-        CONFIDENTIAL + "|" + TOPSECRET);) {
+    try (Table table = createTableAndWriteDataWithLabels(SECRET, CONFIDENTIAL + "|" + TOPSECRET);) {
       PrivilegedExceptionAction<Void> actiona = new PrivilegedExceptionAction<Void>() {
         @Override
         public Void run() throws Exception {
@@ -173,7 +187,7 @@ public class TestVisibilityLabelsWithDeletes {
       };
       SUPERUSER.runAs(actiona);
 
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
       Scan s = new Scan();
       s.setAuthorizations(new Authorizations(SECRET, PRIVATE, CONFIDENTIAL));
       ResultScanner scanner = table.getScanner(s);
@@ -192,7 +206,7 @@ public class TestVisibilityLabelsWithDeletes {
     setAuths();
     final TableName tableName = TableName.valueOf(TEST_NAME.getMethodName());
     long[] ts = new long[] { 123l, 125l };
-    try (Table table = createTableAndWriteDataWithLabels(tableName, ts,
+    try (Table table = createTableAndWriteDataWithLabels(ts,
         CONFIDENTIAL + "|" + TOPSECRET, SECRET)) {
       PrivilegedExceptionAction<Void> actiona = new PrivilegedExceptionAction<Void>() {
         @Override
@@ -211,7 +225,7 @@ public class TestVisibilityLabelsWithDeletes {
       };
       SUPERUSER.runAs(actiona);
 
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
       Scan s = new Scan();
       s.setAuthorizations(new Authorizations(SECRET, PRIVATE, CONFIDENTIAL));
       ResultScanner scanner = table.getScanner(s);
@@ -230,7 +244,7 @@ public class TestVisibilityLabelsWithDeletes {
     setAuths();
     final TableName tableName = TableName.valueOf(TEST_NAME.getMethodName());
     long[] ts = new long[] { 123l, 125l };
-    try (Table table = createTableAndWriteDataWithLabels(tableName, ts,
+    try (Table table = createTableAndWriteDataWithLabels(ts,
         CONFIDENTIAL + "|" + TOPSECRET, SECRET);) {
       PrivilegedExceptionAction<Void> actiona = new PrivilegedExceptionAction<Void>() {
         @Override
@@ -249,7 +263,7 @@ public class TestVisibilityLabelsWithDeletes {
       };
       SUPERUSER.runAs(actiona);
 
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
       Scan s = new Scan();
       s.setAuthorizations(new Authorizations(SECRET, PRIVATE, CONFIDENTIAL));
       ResultScanner scanner = table.getScanner(s);
@@ -268,7 +282,7 @@ public class TestVisibilityLabelsWithDeletes {
     setAuths();
     final TableName tableName = TableName.valueOf(TEST_NAME.getMethodName());
     try (Table table = doPuts(tableName)) {
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
       PrivilegedExceptionAction<Void> actiona = new PrivilegedExceptionAction<Void>() {
         @Override
         public Void run() throws Exception {
@@ -287,7 +301,7 @@ public class TestVisibilityLabelsWithDeletes {
       };
       SUPERUSER.runAs(actiona);
 
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
       Scan s = new Scan();
       s.setMaxVersions(5);
       s.setAuthorizations(new Authorizations(SECRET, PRIVATE, CONFIDENTIAL, TOPSECRET));
@@ -324,7 +338,7 @@ public class TestVisibilityLabelsWithDeletes {
     setAuths();
     final TableName tableName = TableName.valueOf(TEST_NAME.getMethodName());
     try (Table table = doPuts(tableName)) {
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
       PrivilegedExceptionAction<Void> actiona = new PrivilegedExceptionAction<Void>() {
         @Override
         public Void run() throws Exception {
@@ -374,7 +388,7 @@ public class TestVisibilityLabelsWithDeletes {
     setAuths();
     final TableName tableName = TableName.valueOf(TEST_NAME.getMethodName());
     try (Table table = doPuts(tableName)) {
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
       PrivilegedExceptionAction<Void> actiona = new PrivilegedExceptionAction<Void>() {
         @Override
         public Void run() throws Exception {
@@ -427,7 +441,7 @@ public class TestVisibilityLabelsWithDeletes {
     setAuths();
     final TableName tableName = TableName.valueOf(TEST_NAME.getMethodName());
     try (Table table = doPuts(tableName)) {
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
       PrivilegedExceptionAction<Void> actiona = new PrivilegedExceptionAction<Void>() {
         @Override
         public Void run() throws Exception {
@@ -472,7 +486,7 @@ public class TestVisibilityLabelsWithDeletes {
   @Test
   public void testDeleteColumnsWithoutAndWithVisibilityLabels() throws Exception {
     final TableName tableName = TableName.valueOf(TEST_NAME.getMethodName());
-    Admin hBaseAdmin = TEST_UTIL.getHBaseAdmin();
+    Admin hBaseAdmin = TEST_UTIL.getAdmin();
     HColumnDescriptor colDesc = new HColumnDescriptor(fam);
     HTableDescriptor desc = new HTableDescriptor(tableName);
     desc.addFamily(colDesc);
@@ -529,7 +543,7 @@ public class TestVisibilityLabelsWithDeletes {
   @Test
   public void testDeleteColumnsWithAndWithoutVisibilityLabels() throws Exception {
     final TableName tableName = TableName.valueOf(TEST_NAME.getMethodName());
-    Admin hBaseAdmin = TEST_UTIL.getHBaseAdmin();
+    Admin hBaseAdmin = TEST_UTIL.getAdmin();
     HColumnDescriptor colDesc = new HColumnDescriptor(fam);
     HTableDescriptor desc = new HTableDescriptor(tableName);
     desc.addFamily(colDesc);
@@ -586,7 +600,7 @@ public class TestVisibilityLabelsWithDeletes {
   @Test
   public void testDeleteFamiliesWithoutAndWithVisibilityLabels() throws Exception {
     final TableName tableName = TableName.valueOf(TEST_NAME.getMethodName());
-    Admin hBaseAdmin = TEST_UTIL.getHBaseAdmin();
+    Admin hBaseAdmin = TEST_UTIL.getAdmin();
     HColumnDescriptor colDesc = new HColumnDescriptor(fam);
     HTableDescriptor desc = new HTableDescriptor(tableName);
     desc.addFamily(colDesc);
@@ -643,7 +657,7 @@ public class TestVisibilityLabelsWithDeletes {
   @Test
   public void testDeleteFamiliesWithAndWithoutVisibilityLabels() throws Exception {
     final TableName tableName = TableName.valueOf(TEST_NAME.getMethodName());
-    Admin hBaseAdmin = TEST_UTIL.getHBaseAdmin();
+    Admin hBaseAdmin = TEST_UTIL.getAdmin();
     HColumnDescriptor colDesc = new HColumnDescriptor(fam);
     HTableDescriptor desc = new HTableDescriptor(tableName);
     desc.addFamily(colDesc);
@@ -700,7 +714,7 @@ public class TestVisibilityLabelsWithDeletes {
   @Test
   public void testDeletesWithoutAndWithVisibilityLabels() throws Exception {
     final TableName tableName = TableName.valueOf(TEST_NAME.getMethodName());
-    Admin hBaseAdmin = TEST_UTIL.getHBaseAdmin();
+    Admin hBaseAdmin = TEST_UTIL.getAdmin();
     HColumnDescriptor colDesc = new HColumnDescriptor(fam);
     HTableDescriptor desc = new HTableDescriptor(tableName);
     desc.addFamily(colDesc);
@@ -759,7 +773,7 @@ public class TestVisibilityLabelsWithDeletes {
   @Test
   public void testVisibilityLabelsWithDeleteFamilyWithPutsReAppearing() throws Exception {
     final TableName tableName = TableName.valueOf(TEST_NAME.getMethodName());
-    Admin hBaseAdmin = TEST_UTIL.getHBaseAdmin();
+    Admin hBaseAdmin = TEST_UTIL.getAdmin();
     HColumnDescriptor colDesc = new HColumnDescriptor(fam);
     colDesc.setMaxVersions(5);
     HTableDescriptor desc = new HTableDescriptor(tableName);
@@ -774,7 +788,7 @@ public class TestVisibilityLabelsWithDeletes {
       put.addColumn(fam, qual, value);
       put.setCellVisibility(new CellVisibility(SECRET));
       table.put(put);
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
       PrivilegedExceptionAction<Void> actiona = new PrivilegedExceptionAction<Void>() {
         @Override
         public Void run() throws Exception {
@@ -835,7 +849,7 @@ public class TestVisibilityLabelsWithDeletes {
   @Test
   public void testVisibilityLabelsWithDeleteColumnsWithPutsReAppearing() throws Exception {
     final TableName tableName = TableName.valueOf(TEST_NAME.getMethodName());
-    Admin hBaseAdmin = TEST_UTIL.getHBaseAdmin();
+    Admin hBaseAdmin = TEST_UTIL.getAdmin();
     HColumnDescriptor colDesc = new HColumnDescriptor(fam);
     colDesc.setMaxVersions(5);
     HTableDescriptor desc = new HTableDescriptor(tableName);
@@ -850,7 +864,7 @@ public class TestVisibilityLabelsWithDeletes {
       put.addColumn(fam, qual, value);
       put.setCellVisibility(new CellVisibility(SECRET));
       table.put(put);
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
       PrivilegedExceptionAction<Void> actiona = new PrivilegedExceptionAction<Void>() {
         @Override
         public Void run() throws Exception {
@@ -911,7 +925,7 @@ public class TestVisibilityLabelsWithDeletes {
   @Test
   public void testVisibilityCombinations() throws Exception {
     final TableName tableName = TableName.valueOf(TEST_NAME.getMethodName());
-    Admin hBaseAdmin = TEST_UTIL.getHBaseAdmin();
+    Admin hBaseAdmin = TEST_UTIL.getAdmin();
     HColumnDescriptor colDesc = new HColumnDescriptor(fam);
     colDesc.setMaxVersions(5);
     HTableDescriptor desc = new HTableDescriptor(tableName);
@@ -964,7 +978,7 @@ public class TestVisibilityLabelsWithDeletes {
   public void testVisibilityLabelsWithDeleteColumnWithSpecificVersionWithPutsReAppearing()
       throws Exception {
     final TableName tableName = TableName.valueOf(TEST_NAME.getMethodName());
-    Admin hBaseAdmin = TEST_UTIL.getHBaseAdmin();
+    Admin hBaseAdmin = TEST_UTIL.getAdmin();
     HColumnDescriptor colDesc = new HColumnDescriptor(fam);
     colDesc.setMaxVersions(5);
     HTableDescriptor desc = new HTableDescriptor(tableName);
@@ -1029,7 +1043,7 @@ public class TestVisibilityLabelsWithDeletes {
     setAuths();
     final TableName tableName = TableName.valueOf(TEST_NAME.getMethodName());
     try (Table table = doPuts(tableName)) {
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
       PrivilegedExceptionAction<Void> actiona = new PrivilegedExceptionAction<Void>() {
         @Override
         public Void run() throws Exception {
@@ -1081,7 +1095,7 @@ public class TestVisibilityLabelsWithDeletes {
     setAuths();
     final TableName tableName = TableName.valueOf(TEST_NAME.getMethodName());
     try (Table table = doPuts(tableName)) {
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
       PrivilegedExceptionAction<Void> actiona = new PrivilegedExceptionAction<Void>() {
         @Override
         public Void run() throws Exception {
@@ -1139,14 +1153,14 @@ public class TestVisibilityLabelsWithDeletes {
 
   private Table doPuts(TableName tableName) throws IOException, InterruptedIOException,
       RetriesExhaustedWithDetailsException, InterruptedException {
-    Admin hBaseAdmin = TEST_UTIL.getHBaseAdmin();
+    Admin hBaseAdmin = TEST_UTIL.getAdmin();
     HColumnDescriptor colDesc = new HColumnDescriptor(fam);
     colDesc.setMaxVersions(5);
     HTableDescriptor desc = new HTableDescriptor(tableName);
     desc.addFamily(colDesc);
     hBaseAdmin.createTable(desc);
 
-    List<Put> puts = new ArrayList<Put>();
+    List<Put> puts = new ArrayList<>(5);
     Put put = new Put(Bytes.toBytes("row1"));
     put.addColumn(fam, qual, 123l, value);
     put.setCellVisibility(new CellVisibility(CONFIDENTIAL));
@@ -1175,7 +1189,7 @@ public class TestVisibilityLabelsWithDeletes {
         + TOPSECRET + "&" + SECRET+")"));
     puts.add(put);
 
-    TEST_UTIL.getHBaseAdmin().flush(tableName);
+    TEST_UTIL.getAdmin().flush(tableName);
     put = new Put(Bytes.toBytes("row2"));
     put.addColumn(fam, qual, 127l, value);
     put.setCellVisibility(new CellVisibility("(" + CONFIDENTIAL + "&" + PRIVATE + ")|(" + TOPSECRET
@@ -1189,14 +1203,14 @@ public class TestVisibilityLabelsWithDeletes {
 
   private Table doPutsWithDiffCols(TableName tableName) throws IOException,
       InterruptedIOException, RetriesExhaustedWithDetailsException, InterruptedException {
-    Admin hBaseAdmin = TEST_UTIL.getHBaseAdmin();
+    Admin hBaseAdmin = TEST_UTIL.getAdmin();
     HColumnDescriptor colDesc = new HColumnDescriptor(fam);
     colDesc.setMaxVersions(5);
     HTableDescriptor desc = new HTableDescriptor(tableName);
     desc.addFamily(colDesc);
     hBaseAdmin.createTable(desc);
 
-    List<Put> puts = new ArrayList<>();
+    List<Put> puts = new ArrayList<>(5);
     Put put = new Put(Bytes.toBytes("row1"));
     put.addColumn(fam, qual, 123l, value);
     put.setCellVisibility(new CellVisibility(CONFIDENTIAL));
@@ -1231,13 +1245,13 @@ public class TestVisibilityLabelsWithDeletes {
 
   private Table doPutsWithoutVisibility(TableName tableName) throws IOException,
       InterruptedIOException, RetriesExhaustedWithDetailsException, InterruptedException {
-    Admin hBaseAdmin = TEST_UTIL.getHBaseAdmin();
+    Admin hBaseAdmin = TEST_UTIL.getAdmin();
     HColumnDescriptor colDesc = new HColumnDescriptor(fam);
     colDesc.setMaxVersions(5);
     HTableDescriptor desc = new HTableDescriptor(tableName);
     desc.addFamily(colDesc);
     hBaseAdmin.createTable(desc);
-    List<Put> puts = new ArrayList<>();
+    List<Put> puts = new ArrayList<>(5);
     Put put = new Put(Bytes.toBytes("row1"));
     put.addColumn(fam, qual, 123l, value);
     puts.add(put);
@@ -1261,7 +1275,7 @@ public class TestVisibilityLabelsWithDeletes {
     Table table = TEST_UTIL.getConnection().getTable(tableName);
     table.put(puts);
 
-    TEST_UTIL.getHBaseAdmin().flush(tableName);
+    TEST_UTIL.getAdmin().flush(tableName);
 
     put = new Put(Bytes.toBytes("row2"));
     put.addColumn(fam, qual, 127l, value);
@@ -1277,7 +1291,7 @@ public class TestVisibilityLabelsWithDeletes {
     setAuths();
     final TableName tableName = TableName.valueOf(TEST_NAME.getMethodName());
     try (Table table = doPuts(tableName)) {
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
       PrivilegedExceptionAction<Void> actiona = new PrivilegedExceptionAction<Void>() {
         @Override
         public Void run() throws Exception {
@@ -1296,7 +1310,7 @@ public class TestVisibilityLabelsWithDeletes {
       };
       SUPERUSER.runAs(actiona);
 
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
       Scan s = new Scan();
       s.setMaxVersions(5);
       s.setAuthorizations(new Authorizations(SECRET, PRIVATE, CONFIDENTIAL, TOPSECRET));
@@ -1342,7 +1356,7 @@ public class TestVisibilityLabelsWithDeletes {
     setAuths();
     final TableName tableName = TableName.valueOf(TEST_NAME.getMethodName());
     try (Table table = doPuts(tableName)) {
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
       PrivilegedExceptionAction<Void> actiona = new PrivilegedExceptionAction<Void>() {
         @Override
         public Void run() throws Exception {
@@ -1360,7 +1374,7 @@ public class TestVisibilityLabelsWithDeletes {
       };
       SUPERUSER.runAs(actiona);
 
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
       Scan s = new Scan();
       s.setMaxVersions(5);
       s.setAuthorizations(new Authorizations(SECRET, PRIVATE, CONFIDENTIAL, TOPSECRET));
@@ -1401,7 +1415,7 @@ public class TestVisibilityLabelsWithDeletes {
     setAuths();
     final TableName tableName = TableName.valueOf(TEST_NAME.getMethodName());
     try (Table table = doPuts(tableName)) {
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
       Put put = new Put(Bytes.toBytes("row1"));
       put.addColumn(fam, qual, 128l, value);
       put.setCellVisibility(new CellVisibility(TOPSECRET));
@@ -1423,7 +1437,7 @@ public class TestVisibilityLabelsWithDeletes {
       };
       SUPERUSER.runAs(actiona);
 
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
       Scan s = new Scan();
       s.setMaxVersions(5);
       s.setAuthorizations(new Authorizations(SECRET, PRIVATE, CONFIDENTIAL, TOPSECRET));
@@ -1467,7 +1481,7 @@ public class TestVisibilityLabelsWithDeletes {
       put.setCellVisibility(new CellVisibility(SECRET));
       table.put(put);
 
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
       s = new Scan();
       s.setMaxVersions(5);
       s.setAuthorizations(new Authorizations(SECRET, PRIVATE, CONFIDENTIAL, TOPSECRET));
@@ -1488,7 +1502,7 @@ public class TestVisibilityLabelsWithDeletes {
     setAuths();
     final TableName tableName = TableName.valueOf(TEST_NAME.getMethodName());
     try (Table table = doPuts(tableName)) {
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
       PrivilegedExceptionAction<Void> actiona = new PrivilegedExceptionAction<Void>() {
         @Override
         public Void run() throws Exception {
@@ -1505,13 +1519,13 @@ public class TestVisibilityLabelsWithDeletes {
         }
       };
       SUPERUSER.runAs(actiona);
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
       Put put = new Put(Bytes.toBytes("row3"));
       put.addColumn(fam, qual, 127l, value);
       put.setCellVisibility(new CellVisibility(CONFIDENTIAL + "&" + PRIVATE));
       table.put(put);
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
-      TEST_UTIL.getHBaseAdmin().majorCompact(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().majorCompact(tableName);
       // Sleep to ensure compaction happens. Need to do it in a better way
       Thread.sleep(5000);
       Scan s = new Scan();
@@ -1554,7 +1568,7 @@ public class TestVisibilityLabelsWithDeletes {
     setAuths();
     final TableName tableName = TableName.valueOf(TEST_NAME.getMethodName());
     try (Table table = doPuts(tableName)) {
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
       PrivilegedExceptionAction<Void> actiona = new PrivilegedExceptionAction<Void>() {
         @Override
         public Void run() throws Exception {
@@ -1572,7 +1586,7 @@ public class TestVisibilityLabelsWithDeletes {
       };
       SUPERUSER.runAs(actiona);
 
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
       Scan s = new Scan();
       s.setMaxVersions(5);
       s.setAuthorizations(new Authorizations(SECRET, PRIVATE, CONFIDENTIAL, TOPSECRET));
@@ -1603,7 +1617,7 @@ public class TestVisibilityLabelsWithDeletes {
     setAuths();
     final TableName tableName = TableName.valueOf(TEST_NAME.getMethodName());
     try (Table table = doPutsWithDiffCols(tableName)) {
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
       PrivilegedExceptionAction<Void> actiona = new PrivilegedExceptionAction<Void>() {
         @Override
         public Void run() throws Exception {
@@ -1621,7 +1635,7 @@ public class TestVisibilityLabelsWithDeletes {
       };
       SUPERUSER.runAs(actiona);
 
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
       Scan s = new Scan();
       s.setMaxVersions(5);
       s.setAuthorizations(new Authorizations(SECRET, PRIVATE, CONFIDENTIAL, TOPSECRET));
@@ -1659,7 +1673,7 @@ public class TestVisibilityLabelsWithDeletes {
   @Test
   public void testDeleteColumnsWithDiffColsAndTags() throws Exception {
     final TableName tableName = TableName.valueOf(TEST_NAME.getMethodName());
-    Admin hBaseAdmin = TEST_UTIL.getHBaseAdmin();
+    Admin hBaseAdmin = TEST_UTIL.getAdmin();
     HColumnDescriptor colDesc = new HColumnDescriptor(fam);
     colDesc.setMaxVersions(5);
     HTableDescriptor desc = new HTableDescriptor(tableName);
@@ -1674,7 +1688,7 @@ public class TestVisibilityLabelsWithDeletes {
       put.addColumn(fam, qual1, 126l, value);
       put.setCellVisibility(new CellVisibility(SECRET));
       table.put(put);
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
       PrivilegedExceptionAction<Void> actiona = new PrivilegedExceptionAction<Void>() {
         @Override
         public Void run() throws Exception {
@@ -1707,7 +1721,7 @@ public class TestVisibilityLabelsWithDeletes {
   @Test
   public void testDeleteColumnsWithDiffColsAndTags1() throws Exception {
     final TableName tableName = TableName.valueOf(TEST_NAME.getMethodName());
-    Admin hBaseAdmin = TEST_UTIL.getHBaseAdmin();
+    Admin hBaseAdmin = TEST_UTIL.getAdmin();
     HColumnDescriptor colDesc = new HColumnDescriptor(fam);
     colDesc.setMaxVersions(5);
     HTableDescriptor desc = new HTableDescriptor(tableName);
@@ -1722,7 +1736,7 @@ public class TestVisibilityLabelsWithDeletes {
       put.addColumn(fam, qual1, 126l, value);
       put.setCellVisibility(new CellVisibility(SECRET));
       table.put(put);
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
       PrivilegedExceptionAction<Void> actiona = new PrivilegedExceptionAction<Void>() {
         @Override
         public Void run() throws Exception {
@@ -1757,7 +1771,7 @@ public class TestVisibilityLabelsWithDeletes {
     setAuths();
     final TableName tableName = TableName.valueOf(TEST_NAME.getMethodName());
     try (Table table = doPutsWithoutVisibility(tableName)) {
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
       PrivilegedExceptionAction<Void> actiona = new PrivilegedExceptionAction<Void>() {
         @Override
         public Void run() throws Exception {
@@ -1774,7 +1788,7 @@ public class TestVisibilityLabelsWithDeletes {
       };
       SUPERUSER.runAs(actiona);
 
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
       Scan s = new Scan();
       s.setMaxVersions(5);
       s.setAuthorizations(new Authorizations(SECRET, PRIVATE, CONFIDENTIAL, TOPSECRET));
@@ -1812,7 +1826,7 @@ public class TestVisibilityLabelsWithDeletes {
         }
       };
       SUPERUSER.runAs(actiona);
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
       Scan s = new Scan();
       s.setMaxVersions(5);
       s.setAuthorizations(new Authorizations(SECRET, PRIVATE, CONFIDENTIAL, TOPSECRET));
@@ -1858,7 +1872,7 @@ public class TestVisibilityLabelsWithDeletes {
     setAuths();
     final TableName tableName = TableName.valueOf(TEST_NAME.getMethodName());
     try (Table table = doPuts(tableName)) {
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
       PrivilegedExceptionAction<Void> actiona = new PrivilegedExceptionAction<Void>() {
         @Override
         public Void run() throws Exception {
@@ -1877,7 +1891,7 @@ public class TestVisibilityLabelsWithDeletes {
       };
       SUPERUSER.runAs(actiona);
 
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
       Scan s = new Scan();
       s.setMaxVersions(5);
       s.setAuthorizations(new Authorizations(SECRET, PRIVATE, CONFIDENTIAL, TOPSECRET));
@@ -1913,7 +1927,7 @@ public class TestVisibilityLabelsWithDeletes {
     setAuths();
     final TableName tableName = TableName.valueOf(TEST_NAME.getMethodName());
     try (Table table = doPuts(tableName)) {
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
       PrivilegedExceptionAction<Void> actiona = new PrivilegedExceptionAction<Void>() {
         @Override
         public Void run() throws Exception {
@@ -1932,13 +1946,13 @@ public class TestVisibilityLabelsWithDeletes {
       };
       SUPERUSER.runAs(actiona);
 
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
       Put put = new Put(Bytes.toBytes("row3"));
       put.addColumn(fam, qual, 127l, value);
       put.setCellVisibility(new CellVisibility(CONFIDENTIAL + "&" + PRIVATE));
       table.put(put);
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
-      TEST_UTIL.getHBaseAdmin().compact(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().compact(tableName);
       Thread.sleep(5000);
       // Sleep to ensure compaction happens. Need to do it in a better way
       Scan s = new Scan();
@@ -2100,7 +2114,7 @@ public class TestVisibilityLabelsWithDeletes {
       };
       SUPERUSER.runAs(actiona);
 
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
       Scan s = new Scan();
       s.setMaxVersions(5);
       s.setAuthorizations(new Authorizations(SECRET, PRIVATE, CONFIDENTIAL, TOPSECRET));
@@ -2153,7 +2167,7 @@ public class TestVisibilityLabelsWithDeletes {
       };
       SUPERUSER.runAs(actiona);
 
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
       Scan s = new Scan();
       s.setMaxVersions(5);
       s.setAuthorizations(new Authorizations(SECRET, PRIVATE, CONFIDENTIAL, TOPSECRET));
@@ -2230,7 +2244,7 @@ public class TestVisibilityLabelsWithDeletes {
     };
     VisibilityLabelsResponse response = SUPERUSER.runAs(action);
     final TableName tableName = TableName.valueOf(TEST_NAME.getMethodName());
-    try (Table table = doPuts(tableName)){
+    try (Table table = doPuts(tableName)) {
       PrivilegedExceptionAction<Void> actiona = new PrivilegedExceptionAction<Void>() {
         @Override
         public Void run() throws Exception {
@@ -2254,7 +2268,7 @@ public class TestVisibilityLabelsWithDeletes {
       };
       SUPERUSER.runAs(actiona);
 
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
       Scan s = new Scan();
       s.setMaxVersions(5);
       s.setAuthorizations(new Authorizations(SECRET, PRIVATE, CONFIDENTIAL, TOPSECRET));
@@ -2871,7 +2885,7 @@ public class TestVisibilityLabelsWithDeletes {
     setAuths();
     final TableName tableName = TableName.valueOf(TEST_NAME.getMethodName());
     try (Table table = doPuts(tableName)){
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
       PrivilegedExceptionAction<Void> actiona = new PrivilegedExceptionAction<Void>() {
         @Override
         public Void run() throws Exception {
@@ -2888,7 +2902,7 @@ public class TestVisibilityLabelsWithDeletes {
       };
       SUPERUSER.runAs(actiona);
 
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
       Scan s = new Scan();
       s.setMaxVersions(5);
       s.setAuthorizations(new Authorizations(SECRET, PRIVATE, CONFIDENTIAL, TOPSECRET));
@@ -2912,7 +2926,7 @@ public class TestVisibilityLabelsWithDeletes {
       };
       SUPERUSER.runAs(actiona);
 
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
       s = new Scan();
       s.setMaxVersions(5);
       s.setAuthorizations(new Authorizations(SECRET, PRIVATE, CONFIDENTIAL, TOPSECRET));
@@ -2937,7 +2951,7 @@ public class TestVisibilityLabelsWithDeletes {
       };
       SUPERUSER.runAs(actiona);
 
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
       s = new Scan();
       s.setMaxVersions(5);
       s.setAuthorizations(new Authorizations(SECRET, PRIVATE, CONFIDENTIAL, TOPSECRET));
@@ -2962,7 +2976,7 @@ public class TestVisibilityLabelsWithDeletes {
       };
       SUPERUSER.runAs(actiona);
 
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
       s = new Scan();
       s.setMaxVersions(5);
       s.setAuthorizations(new Authorizations(SECRET, PRIVATE, CONFIDENTIAL, TOPSECRET));
@@ -2987,7 +3001,7 @@ public class TestVisibilityLabelsWithDeletes {
       };
       SUPERUSER.runAs(actiona);
 
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
       s = new Scan();
       s.setMaxVersions(5);
       s.setAuthorizations(new Authorizations(SECRET, PRIVATE, CONFIDENTIAL, TOPSECRET));
@@ -3012,7 +3026,7 @@ public class TestVisibilityLabelsWithDeletes {
       };
       SUPERUSER.runAs(actiona);
 
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
       s = new Scan();
       s.setMaxVersions(5);
       s.setAuthorizations(new Authorizations(SECRET, PRIVATE, CONFIDENTIAL, TOPSECRET));
@@ -3061,7 +3075,7 @@ public class TestVisibilityLabelsWithDeletes {
   public void testVisibilityExpressionWithNotEqualORCondition() throws Exception {
     setAuths();
     final TableName tableName = TableName.valueOf(TEST_NAME.getMethodName());
-    Admin hBaseAdmin = TEST_UTIL.getHBaseAdmin();
+    Admin hBaseAdmin = TEST_UTIL.getAdmin();
     HColumnDescriptor colDesc = new HColumnDescriptor(fam);
     colDesc.setMaxVersions(5);
     HTableDescriptor desc = new HTableDescriptor(tableName);
@@ -3076,7 +3090,7 @@ public class TestVisibilityLabelsWithDeletes {
       put.addColumn(fam, qual, 124l, value);
       put.setCellVisibility(new CellVisibility(CONFIDENTIAL + "|" + PRIVATE));
       table.put(put);
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
       PrivilegedExceptionAction<Void> actiona = new PrivilegedExceptionAction<Void>() {
         @Override
         public Void run() throws Exception {
@@ -3094,7 +3108,7 @@ public class TestVisibilityLabelsWithDeletes {
       };
       SUPERUSER.runAs(actiona);
 
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(tableName);
       Scan s = new Scan();
       s.setMaxVersions(5);
       s.setAuthorizations(new Authorizations(SECRET, PRIVATE, CONFIDENTIAL, TOPSECRET));
@@ -3118,7 +3132,7 @@ public class TestVisibilityLabelsWithDeletes {
   @Test
   public void testDeleteWithNoVisibilitiesForPutsAndDeletes() throws Exception {
     final TableName tableName = TableName.valueOf(TEST_NAME.getMethodName());
-    Admin hBaseAdmin = TEST_UTIL.getHBaseAdmin();
+    Admin hBaseAdmin = TEST_UTIL.getAdmin();
     HColumnDescriptor colDesc = new HColumnDescriptor(fam);
     colDesc.setMaxVersions(5);
     HTableDescriptor desc = new HTableDescriptor(tableName);
@@ -3155,7 +3169,7 @@ public class TestVisibilityLabelsWithDeletes {
   @Test
   public void testDeleteWithFamilyDeletesOfSameTsButDifferentVisibilities() throws Exception {
     final TableName tableName = TableName.valueOf(TEST_NAME.getMethodName());
-    Admin hBaseAdmin = TEST_UTIL.getHBaseAdmin();
+    Admin hBaseAdmin = TEST_UTIL.getAdmin();
     HColumnDescriptor colDesc = new HColumnDescriptor(fam);
     colDesc.setMaxVersions(5);
     HTableDescriptor desc = new HTableDescriptor(tableName);
@@ -3220,12 +3234,12 @@ public class TestVisibilityLabelsWithDeletes {
     assertEquals(0, result.rawCells().length);
   }
 
-  public static Table createTableAndWriteDataWithLabels(TableName tableName, String... labelExps)
+  public Table createTableAndWriteDataWithLabels(String... labelExps)
       throws Exception {
-    Table table = null;
-    table = TEST_UTIL.createTable(tableName, fam);
+    HColumnDescriptor cf = new HColumnDescriptor(fam);
+    Table table = createTable(cf);
     int i = 1;
-    List<Put> puts = new ArrayList<Put>();
+    List<Put> puts = new ArrayList<>(labelExps.length);
     for (String labelExp : labelExps) {
       Put put = new Put(Bytes.toBytes("row" + i));
       put.addColumn(fam, qual, HConstants.LATEST_TIMESTAMP, value);
@@ -3238,19 +3252,19 @@ public class TestVisibilityLabelsWithDeletes {
     return table;
   }
 
-  public static Table createTableAndWriteDataWithLabels(TableName tableName, long[] timestamp,
+  public Table createTableAndWriteDataWithLabels(long[] timestamp,
       String... labelExps) throws Exception {
-    Table table = null;
-    table = TEST_UTIL.createTable(tableName, fam);
+    HColumnDescriptor cf = new HColumnDescriptor(fam);
+    Table table = createTable(cf);
     int i = 1;
-    List<Put> puts = new ArrayList<Put>();
+    List<Put> puts = new ArrayList<>(labelExps.length);
     for (String labelExp : labelExps) {
       Put put = new Put(Bytes.toBytes("row" + i));
       put.addColumn(fam, qual, timestamp[i - 1], value);
       put.setCellVisibility(new CellVisibility(labelExp));
       puts.add(put);
       table.put(put);
-      TEST_UTIL.getHBaseAdmin().flush(tableName);
+      TEST_UTIL.getAdmin().flush(table.getName());
       i++;
     }
     return table;
@@ -3272,9 +3286,193 @@ public class TestVisibilityLabelsWithDeletes {
     };
     SUPERUSER.runAs(action);
   }
-  
+
   @SafeVarargs
   public static <T> List<T> createList(T... ts) {
     return new ArrayList<>(Arrays.asList(ts));
+  }
+
+
+  private enum DeleteMark {
+    ROW,
+    FAMILY,
+    FAMILY_VERSION,
+    COLUMN,
+    CELL
+  }
+
+  private static Delete addDeleteMark(Delete d, DeleteMark mark, long now) {
+    switch (mark) {
+      case ROW:
+        break;
+      case FAMILY:
+        d.addFamily(fam);
+        break;
+      case FAMILY_VERSION:
+        d.addFamilyVersion(fam, now);
+        break;
+      case COLUMN:
+        d.addColumns(fam, qual);
+        break;
+      case CELL:
+        d.addColumn(fam, qual);
+        break;
+      default:
+        break;
+    }
+    return d;
+  }
+
+  @Test
+  public void testDeleteCellWithoutVisibility() throws IOException, InterruptedException {
+    for (DeleteMark mark : DeleteMark.values()) {
+      testDeleteCellWithoutVisibility(mark);
+    }
+  }
+
+  private void testDeleteCellWithoutVisibility(DeleteMark mark) throws IOException, InterruptedException {
+    setAuths();
+    final TableName tableName = TableName.valueOf("testDeleteCellWithoutVisibility-" + mark.name());
+    Admin hBaseAdmin = TEST_UTIL.getAdmin();
+    HColumnDescriptor colDesc = new HColumnDescriptor(fam);
+    colDesc.setMaxVersions(5);
+    HTableDescriptor desc = new HTableDescriptor(tableName);
+    desc.addFamily(colDesc);
+    hBaseAdmin.createTable(desc);
+    long now = EnvironmentEdgeManager.currentTime();
+    List<Put> puts = new ArrayList<>(1);
+    Put put = new Put(row1);
+    if (mark == DeleteMark.FAMILY_VERSION) {
+      put.addColumn(fam, qual, now, value);
+    } else {
+      put.addColumn(fam, qual, value);
+    }
+
+    puts.add(put);
+    try (Table table = TEST_UTIL.getConnection().getTable(tableName)){
+      table.put(puts);
+      Result r = table.get(new Get(row1));
+      assertEquals(1, r.size());
+      assertEquals(Bytes.toString(value), Bytes.toString(CellUtil.cloneValue(r.rawCells()[0])));
+
+      Delete d = addDeleteMark(new Delete(row1), mark, now);
+      table.delete(d);
+      r = table.get(new Get(row1));
+      assertEquals(0, r.size());
+    }
+  }
+
+  @Test
+  public void testDeleteCellWithVisibility() throws IOException, InterruptedException {
+    for (DeleteMark mark : DeleteMark.values()) {
+      testDeleteCellWithVisibility(mark);
+      testDeleteCellWithVisibilityV2(mark);
+    }
+  }
+
+  private void testDeleteCellWithVisibility(DeleteMark mark) throws IOException, InterruptedException {
+    setAuths();
+    final TableName tableName = TableName.valueOf("testDeleteCellWithVisibility-" + mark.name());
+    Admin hBaseAdmin = TEST_UTIL.getAdmin();
+    HColumnDescriptor colDesc = new HColumnDescriptor(fam);
+    colDesc.setMaxVersions(5);
+    HTableDescriptor desc = new HTableDescriptor(tableName);
+    desc.addFamily(colDesc);
+    hBaseAdmin.createTable(desc);
+    long now = EnvironmentEdgeManager.currentTime();
+    List<Put> puts = new ArrayList<>(2);
+    Put put = new Put(row1);
+    if (mark == DeleteMark.FAMILY_VERSION) {
+      put.addColumn(fam, qual, now, value);
+    } else {
+      put.addColumn(fam, qual, value);
+    }
+    puts.add(put);
+    put = new Put(row1);
+    if (mark == DeleteMark.FAMILY_VERSION) {
+      put.addColumn(fam, qual, now, value1);
+    } else {
+      put.addColumn(fam, qual, value1);
+    }
+    put.setCellVisibility(new CellVisibility(PRIVATE));
+    puts.add(put);
+    try (Table table = TEST_UTIL.getConnection().getTable(tableName)) {
+      table.put(puts);
+      Result r = table.get(new Get(row1));
+      assertEquals(0, r.size());
+      r = table.get(new Get(row1).setAuthorizations(new Authorizations(PRIVATE)));
+      assertEquals(1, r.size());
+      assertEquals(Bytes.toString(value1), Bytes.toString(CellUtil.cloneValue(r.rawCells()[0])));
+
+      Delete d = addDeleteMark(new Delete(row1), mark, now);
+      table.delete(d);
+
+      r = table.get(new Get(row1));
+      assertEquals(0, r.size());
+      r = table.get(new Get(row1).setAuthorizations(new Authorizations(PRIVATE)));
+      assertEquals(1, r.size());
+      assertEquals(Bytes.toString(value1), Bytes.toString(CellUtil.cloneValue(r.rawCells()[0])));
+
+      d = addDeleteMark(new Delete(row1).setCellVisibility(new CellVisibility(PRIVATE)), mark, now);
+      table.delete(d);
+
+      r = table.get(new Get(row1));
+      assertEquals(0, r.size());
+      r = table.get(new Get(row1).setAuthorizations(new Authorizations(PRIVATE)));
+      assertEquals(0, r.size());
+    }
+  }
+
+  private void testDeleteCellWithVisibilityV2(DeleteMark mark) throws IOException, InterruptedException {
+    setAuths();
+    final TableName tableName = TableName.valueOf("testDeleteCellWithVisibilityV2-" + mark.name());
+    Admin hBaseAdmin = TEST_UTIL.getAdmin();
+    HColumnDescriptor colDesc = new HColumnDescriptor(fam);
+    colDesc.setMaxVersions(5);
+    HTableDescriptor desc = new HTableDescriptor(tableName);
+    desc.addFamily(colDesc);
+    hBaseAdmin.createTable(desc);
+    long now = EnvironmentEdgeManager.currentTime();
+    List<Put> puts = new ArrayList<>(2);
+    Put put = new Put(row1);
+    put.setCellVisibility(new CellVisibility(PRIVATE));
+    if (mark == DeleteMark.FAMILY_VERSION) {
+      put.addColumn(fam, qual, now, value);
+    } else {
+      put.addColumn(fam, qual, value);
+    }
+    puts.add(put);
+    put = new Put(row1);
+    if (mark == DeleteMark.FAMILY_VERSION) {
+      put.addColumn(fam, qual, now, value1);
+    } else {
+      put.addColumn(fam, qual, value1);
+    }
+    puts.add(put);
+    try (Table table = TEST_UTIL.getConnection().getTable(tableName)){
+      table.put(puts);
+      Result r = table.get(new Get(row1));
+      assertEquals(1, r.size());
+      assertEquals(Bytes.toString(value1), Bytes.toString(CellUtil.cloneValue(r.rawCells()[0])));
+      r = table.get(new Get(row1).setAuthorizations(new Authorizations(PRIVATE)));
+      assertEquals(1, r.size());
+      assertEquals(Bytes.toString(value1), Bytes.toString(CellUtil.cloneValue(r.rawCells()[0])));
+
+      Delete d = addDeleteMark(new Delete(row1), mark, now);
+      table.delete(d);
+
+      r = table.get(new Get(row1));
+      assertEquals(0, r.size());
+      r = table.get(new Get(row1).setAuthorizations(new Authorizations(PRIVATE)));
+      assertEquals(0, r.size());
+
+      d = addDeleteMark(new Delete(row1).setCellVisibility(new CellVisibility(PRIVATE)), mark, now);
+      table.delete(d);
+
+      r = table.get(new Get(row1));
+      assertEquals(0, r.size());
+      r = table.get(new Get(row1).setAuthorizations(new Authorizations(PRIVATE)));
+      assertEquals(0, r.size());
+    }
   }
 }

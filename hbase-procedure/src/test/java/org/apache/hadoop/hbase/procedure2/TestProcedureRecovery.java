@@ -19,19 +19,15 @@
 package org.apache.hadoop.hbase.procedure2;
 
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.CountDownLatch;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.HBaseCommonTestingUtility;
-import org.apache.hadoop.hbase.ProcedureInfo;
 import org.apache.hadoop.hbase.procedure2.store.ProcedureStore;
+import org.apache.hbase.thirdparty.com.google.protobuf.Int32Value;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.apache.hadoop.hbase.testclassification.MasterTests;
 import org.apache.hadoop.hbase.util.Bytes;
@@ -41,6 +37,8 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -48,7 +46,7 @@ import static org.junit.Assert.assertTrue;
 
 @Category({MasterTests.class, SmallTests.class})
 public class TestProcedureRecovery {
-  private static final Log LOG = LogFactory.getLog(TestProcedureRecovery.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestProcedureRecovery.class);
 
   private static final int PROCEDURE_EXECUTOR_SLOTS = 1;
 
@@ -71,7 +69,7 @@ public class TestProcedureRecovery {
 
     logDir = new Path(testDir, "proc-logs");
     procEnv = new TestProcEnv();
-    procStore = ProcedureTestingUtility.createStore(htu.getConfiguration(), fs, logDir);
+    procStore = ProcedureTestingUtility.createStore(htu.getConfiguration(), logDir);
     procExecutor = new ProcedureExecutor(htu.getConfiguration(), procEnv, procStore);
     procExecutor.testing = new ProcedureExecutor.Testing();
     procStore.start(PROCEDURE_EXECUTOR_SLOTS);
@@ -198,7 +196,7 @@ public class TestProcedureRecovery {
     long restartTs = EnvironmentEdgeManager.currentTime();
     restart();
     waitProcedure(procId);
-    ProcedureInfo result = procExecutor.getResult(procId);
+    Procedure<?> result = procExecutor.getResult(procId);
     assertTrue(result.getLastUpdate() > restartTs);
     ProcedureTestingUtility.assertProcNotFailed(result);
     assertEquals(1, Bytes.toInt(result.getResult()));
@@ -237,7 +235,7 @@ public class TestProcedureRecovery {
     assertTrue(procExecutor.isRunning());
 
     // The procedure is completed
-    ProcedureInfo result = procExecutor.getResult(procId);
+    Procedure<?> result = procExecutor.getResult(procId);
     ProcedureTestingUtility.assertProcNotFailed(result);
   }
 
@@ -284,52 +282,9 @@ public class TestProcedureRecovery {
     waitProcedure(procId);
 
     // The procedure is completed
-    ProcedureInfo result = procExecutor.getResult(procId);
+    Procedure<?> result = procExecutor.getResult(procId);
     ProcedureTestingUtility.assertIsAbortException(result);
   }
-
-  @Test(timeout=30000)
-  public void testCompletedProcWithSameNonce() throws Exception {
-    final long nonceGroup = 123;
-    final long nonce = 2222;
-    Procedure proc = new TestSingleStepProcedure();
-    // Submit a proc and wait for its completion
-    long procId = ProcedureTestingUtility.submitAndWait(procExecutor, proc, nonceGroup, nonce);
-
-    // Restart
-    restart();
-    waitProcedure(procId);
-
-    Procedure proc2 = new TestSingleStepProcedure();
-    // Submit a procedure with the same nonce and expect the same procedure would return.
-    long procId2 = ProcedureTestingUtility.submitAndWait(procExecutor, proc2, nonceGroup, nonce);
-    assertTrue(procId == procId2);
-
-    ProcedureInfo result = procExecutor.getResult(procId2);
-    ProcedureTestingUtility.assertProcNotFailed(result);
-  }
-
-  @Test(timeout=30000)
-  public void testRunningProcWithSameNonce() throws Exception {
-    final long nonceGroup = 456;
-    final long nonce = 33333;
-    Procedure proc = new TestSingleStepProcedure();
-    long procId = ProcedureTestingUtility.submitAndWait(procExecutor, proc, nonceGroup, nonce);
-
-    // Restart (use a latch to prevent the step execution until we submitted proc2)
-    CountDownLatch latch = new CountDownLatch(1);
-    procEnv.setWaitLatch(latch);
-    restart();
-    // Submit a procedure with the same nonce and expect the same procedure would return.
-    Procedure proc2 = new TestSingleStepProcedure();
-    long procId2 = procExecutor.submitProcedure(proc2, nonceGroup, nonce);
-    latch.countDown();
-    procEnv.setWaitLatch(null);
-
-    // The original proc is not completed and the new submission should have the same proc Id.
-    assertTrue(procId == procId2);
-  }
-
 
   public static class TestStateMachineProcedure
       extends StateMachineProcedure<TestProcEnv, TestStateMachineProcedure.State> {
@@ -426,17 +381,19 @@ public class TestProcedureRecovery {
     }
 
     @Override
-    protected void serializeStateData(final OutputStream stream) throws IOException {
-      super.serializeStateData(stream);
-      stream.write(Bytes.toBytes(iResult));
+    protected void serializeStateData(ProcedureStateSerializer serializer)
+        throws IOException {
+      super.serializeStateData(serializer);
+      Int32Value.Builder builder = Int32Value.newBuilder().setValue(iResult);
+      serializer.serialize(builder.build());
     }
 
     @Override
-    protected void deserializeStateData(final InputStream stream) throws IOException {
-      super.deserializeStateData(stream);
-      byte[] data = new byte[4];
-      stream.read(data);
-      iResult = Bytes.toInt(data);
+    protected void deserializeStateData(ProcedureStateSerializer serializer)
+        throws IOException {
+      super.deserializeStateData(serializer);
+      Int32Value value = serializer.deserialize(Int32Value.class);
+      iResult = value.getValue();
     }
   }
 
@@ -445,7 +402,7 @@ public class TestProcedureRecovery {
     long procId = procExecutor.submitProcedure(new TestStateMachineProcedure(true));
     // Wait the completion
     ProcedureTestingUtility.waitProcedure(procExecutor, procId);
-    ProcedureInfo result = procExecutor.getResult(procId);
+    Procedure<?> result = procExecutor.getResult(procId);
     ProcedureTestingUtility.assertProcNotFailed(result);
     assertEquals(19, Bytes.toInt(result.getResult()));
     assertEquals(4, procExecutor.getLastProcId());
@@ -484,7 +441,7 @@ public class TestProcedureRecovery {
     assertTrue(procExecutor.isRunning());
 
     // The procedure is completed
-    ProcedureInfo result = procExecutor.getResult(procId);
+    Procedure<?> result = procExecutor.getResult(procId);
     ProcedureTestingUtility.assertProcNotFailed(result);
     assertEquals(26, Bytes.toInt(result.getResult()));
   }
@@ -538,7 +495,7 @@ public class TestProcedureRecovery {
     assertTrue(procExecutor.isRunning());
 
     // The procedure is completed
-    ProcedureInfo result = procExecutor.getResult(procId);
+    Procedure<?> result = procExecutor.getResult(procId);
     ProcedureTestingUtility.assertIsAbortException(result);
   }
 

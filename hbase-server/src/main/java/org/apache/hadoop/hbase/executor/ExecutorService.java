@@ -32,15 +32,15 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.hbase.monitoring.ThreadMonitoring;
 
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.collect.Lists;
-import com.google.common.collect.Maps;
-import com.google.common.util.concurrent.ThreadFactoryBuilder;
+import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
+import org.apache.hbase.thirdparty.com.google.common.collect.Lists;
+import org.apache.hbase.thirdparty.com.google.common.collect.Maps;
+import org.apache.hbase.thirdparty.com.google.common.util.concurrent.ThreadFactoryBuilder;
 
 /**
  * This is a generic executor service. This component abstracts a
@@ -56,11 +56,10 @@ import com.google.common.util.concurrent.ThreadFactoryBuilder;
  */
 @InterfaceAudience.Private
 public class ExecutorService {
-  private static final Log LOG = LogFactory.getLog(ExecutorService.class);
+  private static final Logger LOG = LoggerFactory.getLogger(ExecutorService.class);
 
   // hold the all the executors created in a map addressable by their names
-  private final ConcurrentHashMap<String, Executor> executorMap =
-    new ConcurrentHashMap<String, Executor>();
+  private final ConcurrentHashMap<String, Executor> executorMap = new ConcurrentHashMap<>();
 
   // Name of the server hosting this executor service.
   private final String servername;
@@ -164,7 +163,7 @@ public class ExecutorService {
     // the thread pool executor that services the requests
     final TrackingThreadPoolExecutor threadPoolExecutor;
     // work queue to use - unbounded queue
-    final BlockingQueue<Runnable> q = new LinkedBlockingQueue<Runnable>();
+    final BlockingQueue<Runnable> q = new LinkedBlockingQueue<>();
     private final String name;
     private static final AtomicLong seqids = new AtomicLong(0);
     private final long id;
@@ -179,6 +178,7 @@ public class ExecutorService {
       // name the threads for this threadpool
       ThreadFactoryBuilder tfb = new ThreadFactoryBuilder();
       tfb.setNameFormat(this.name + "-%d");
+      // TODO: Should these executors be daemon threads?
       this.threadPoolExecutor.setThreadFactory(tfb.build());
     }
 

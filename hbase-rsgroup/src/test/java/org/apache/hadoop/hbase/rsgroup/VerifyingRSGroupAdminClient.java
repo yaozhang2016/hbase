@@ -1,6 +1,4 @@
 /**
- * Copyright The Apache Software Foundation
- *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -19,43 +17,44 @@
  */
 package org.apache.hadoop.hbase.rsgroup;
 
-import com.google.common.collect.Maps;
-import com.google.common.collect.Sets;
-import com.google.common.net.HostAndPort;
-import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.hbase.TableName;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.client.ConnectionFactory;
-import org.apache.hadoop.hbase.client.Result;
-import org.apache.hadoop.hbase.client.Scan;
-import org.apache.hadoop.hbase.client.Table;
-import org.apache.hadoop.hbase.exceptions.DeserializationException;
-import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.protobuf.generated.RSGroupProtos;
-import org.apache.hadoop.hbase.zookeeper.ZKUtil;
-import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher;
-import org.apache.zookeeper.KeeperException;
-import org.junit.Assert;
-
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.client.ConnectionFactory;
+import org.apache.hadoop.hbase.client.Result;
+import org.apache.hadoop.hbase.client.Scan;
+import org.apache.hadoop.hbase.client.Table;
+import org.apache.hadoop.hbase.exceptions.DeserializationException;
+import org.apache.hadoop.hbase.net.Address;
+import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.protobuf.generated.RSGroupProtos;
+import org.apache.hadoop.hbase.zookeeper.ZKUtil;
+import org.apache.hadoop.hbase.zookeeper.ZKWatcher;
+import org.apache.hadoop.hbase.zookeeper.ZNodePaths;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.apache.zookeeper.KeeperException;
+import org.junit.Assert;
+
+import org.apache.hbase.thirdparty.com.google.common.collect.Maps;
+import org.apache.hbase.thirdparty.com.google.common.collect.Sets;
+
 @InterfaceAudience.Private
-public class VerifyingRSGroupAdminClient extends RSGroupAdmin {
+public class VerifyingRSGroupAdminClient implements RSGroupAdmin {
   private Table table;
-  private ZooKeeperWatcher zkw;
-  private RSGroupSerDe serDe;
+  private ZKWatcher zkw;
   private RSGroupAdmin wrapped;
 
   public VerifyingRSGroupAdminClient(RSGroupAdmin RSGroupAdmin, Configuration conf)
       throws IOException {
     wrapped = RSGroupAdmin;
-    table = ConnectionFactory.createConnection(conf).getTable(RSGroupInfoManager.RSGROUP_TABLE_NAME);
-    zkw = new ZooKeeperWatcher(conf, this.getClass().getSimpleName(), null);
-    serDe = new RSGroupSerDe();
+    table = ConnectionFactory.createConnection(conf)
+            .getTable(RSGroupInfoManager.RSGROUP_TABLE_NAME);
+    zkw = new ZKWatcher(conf, this.getClass().getSimpleName(), null);
   }
 
   @Override
@@ -75,7 +74,7 @@ public class VerifyingRSGroupAdminClient extends RSGroupAdmin {
   }
 
   @Override
-  public void moveServers(Set<HostAndPort> servers, String targetGroup) throws IOException {
+  public void moveServers(Set<Address> servers, String targetGroup) throws IOException {
     wrapped.moveServers(servers, targetGroup);
     verify();
   }
@@ -93,8 +92,8 @@ public class VerifyingRSGroupAdminClient extends RSGroupAdmin {
   }
 
   @Override
-  public boolean balanceRSGroup(String name) throws IOException {
-    return wrapped.balanceRSGroup(name);
+  public boolean balanceRSGroup(String groupName) throws IOException {
+    return wrapped.balanceRSGroup(groupName);
   }
 
   @Override
@@ -103,8 +102,21 @@ public class VerifyingRSGroupAdminClient extends RSGroupAdmin {
   }
 
   @Override
-  public RSGroupInfo getRSGroupOfServer(HostAndPort hostPort) throws IOException {
+  public RSGroupInfo getRSGroupOfServer(Address hostPort) throws IOException {
     return wrapped.getRSGroupOfServer(hostPort);
+  }
+
+  @Override
+  public void moveServersAndTables(Set<Address> servers, Set<TableName> tables, String targetGroup)
+          throws IOException {
+    wrapped.moveServersAndTables(servers, tables, targetGroup);
+    verify();
+  }
+
+  @Override
+  public void removeServers(Set<Address> servers) throws IOException {
+    wrapped.removeServers(servers);
+    verify();
   }
 
   public void verify() throws IOException {
@@ -117,19 +129,19 @@ public class VerifyingRSGroupAdminClient extends RSGroupAdmin {
               result.getValue(
                   RSGroupInfoManager.META_FAMILY_BYTES,
                   RSGroupInfoManager.META_QUALIFIER_BYTES));
-      groupMap.put(proto.getName(), RSGroupSerDe.toGroupInfo(proto));
+      groupMap.put(proto.getName(), RSGroupProtobufUtil.toGroupInfo(proto));
     }
     Assert.assertEquals(Sets.newHashSet(groupMap.values()),
         Sets.newHashSet(wrapped.listRSGroups()));
     try {
-      String groupBasePath = ZKUtil.joinZNode(zkw.znodePaths.baseZNode, "rsgroup");
+      String groupBasePath = ZNodePaths.joinZNode(zkw.znodePaths.baseZNode, "rsgroup");
       for(String znode: ZKUtil.listChildrenNoWatch(zkw, groupBasePath)) {
-        byte[] data = ZKUtil.getData(zkw, ZKUtil.joinZNode(groupBasePath, znode));
+        byte[] data = ZKUtil.getData(zkw, ZNodePaths.joinZNode(groupBasePath, znode));
         if(data.length > 0) {
           ProtobufUtil.expectPBMagicPrefix(data);
           ByteArrayInputStream bis = new ByteArrayInputStream(
               data, ProtobufUtil.lengthOfPBMagic(), data.length);
-          zList.add(RSGroupSerDe.toGroupInfo(RSGroupProtos.RSGroupInfo.parseFrom(bis)));
+          zList.add(RSGroupProtobufUtil.toGroupInfo(RSGroupProtos.RSGroupInfo.parseFrom(bis)));
         }
       }
       Assert.assertEquals(zList.size(), groupMap.size());
@@ -143,9 +155,5 @@ public class VerifyingRSGroupAdminClient extends RSGroupAdmin {
     } catch (InterruptedException e) {
       throw new IOException("ZK verification failed", e);
     }
-  }
-
-  @Override
-  public void close() throws IOException {
   }
 }

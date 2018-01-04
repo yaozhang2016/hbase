@@ -18,9 +18,9 @@
  */
 package org.apache.hadoop.hbase.master;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.hadoop.hbase.util.Pair;
@@ -42,7 +42,7 @@ import java.util.Set;
  */
 @InterfaceAudience.Private
 public class DeadServer {
-  private static final Log LOG = LogFactory.getLog(DeadServer.class);
+  private static final Logger LOG = LoggerFactory.getLogger(DeadServer.class);
 
   /**
    * Set of known dead servers.  On znode expiration, servers are added here.
@@ -51,7 +51,7 @@ public class DeadServer {
    * and it's server logs are recovered, it will be told to call server startup
    * because by then, its regions have probably been reassigned.
    */
-  private final Map<ServerName, Long> deadServers = new HashMap<ServerName, Long>();
+  private final Map<ServerName, Long> deadServers = new HashMap<>();
 
   /**
    * Number of dead servers currently being processed
@@ -61,7 +61,7 @@ public class DeadServer {
   /**
    * Whether a dead server is being processed currently.
    */
-  private boolean processing = false;
+  private volatile boolean processing = false;
 
   /**
    * A dead server that comes back alive has a different start code. The new start code should be
@@ -75,7 +75,7 @@ public class DeadServer {
     Iterator<ServerName> it = deadServers.keySet().iterator();
     while (it.hasNext()) {
       ServerName sn = it.next();
-      if (ServerName.isSameHostnameAndPort(sn, newServerName)) {
+      if (ServerName.isSameAddress(sn, newServerName)) {
         it.remove();
         return true;
       }
@@ -102,7 +102,7 @@ public class DeadServer {
   public synchronized boolean areDeadServersInProgress() { return processing; }
 
   public synchronized Set<ServerName> copyServerNames() {
-    Set<ServerName> clone = new HashSet<ServerName>(deadServers.size());
+    Set<ServerName> clone = new HashSet<>(deadServers.size());
     clone.addAll(deadServers.keySet());
     return clone;
   }
@@ -123,22 +123,17 @@ public class DeadServer {
    * @param sn ServerName for the dead server.
    */
   public synchronized void notifyServer(ServerName sn) {
-    if (LOG.isDebugEnabled()) { LOG.debug("Started processing " + sn); }
+    if (LOG.isTraceEnabled()) { LOG.trace("Started processing " + sn); }
     processing = true;
     numProcessing++;
   }
 
   public synchronized void finish(ServerName sn) {
     numProcessing--;
-    if (LOG.isDebugEnabled()) LOG.debug("Finished " + sn + "; numProcessing=" + numProcessing);
+    if (LOG.isTraceEnabled()) LOG.trace("Finished " + sn + "; numProcessing=" + numProcessing);
 
     assert numProcessing >= 0: "Number of dead servers in processing should always be non-negative";
 
-    if (numProcessing < 0) {
-      LOG.error("Number of dead servers in processing = " + numProcessing
-          + ". Something went wrong, this should always be non-negative.");
-      numProcessing = 0;
-    }
     if (numProcessing == 0) { processing = false; }
   }
 
@@ -154,7 +149,7 @@ public class DeadServer {
     Iterator<ServerName> it = deadServers.keySet().iterator();
     while (it.hasNext()) {
       ServerName sn = it.next();
-      if (ServerName.isSameHostnameAndPort(sn, newServerName)) {
+      if (ServerName.isSameAddress(sn, newServerName)) {
         it.remove();
       }
     }
@@ -177,11 +172,11 @@ public class DeadServer {
    * @return a sorted array list, by death time, lowest values first.
    */
   public synchronized List<Pair<ServerName, Long>> copyDeadServersSince(long ts){
-    List<Pair<ServerName, Long>> res =  new ArrayList<Pair<ServerName, Long>>(size());
+    List<Pair<ServerName, Long>> res =  new ArrayList<>(size());
 
     for (Map.Entry<ServerName, Long> entry:deadServers.entrySet()){
       if (entry.getValue() >= ts){
-        res.add(new Pair<ServerName, Long>(entry.getKey(), entry.getValue()));
+        res.add(new Pair<>(entry.getKey(), entry.getValue()));
       }
     }
 
@@ -207,4 +202,17 @@ public class DeadServer {
       return o1.getSecond().compareTo(o2.getSecond());
     }
   };
+
+  /**
+   * remove the specified dead server
+   * @param deadServerName the dead server name
+   * @return true if this server was removed
+   */
+
+  public synchronized boolean removeDeadServer(final ServerName deadServerName) {
+    if (deadServers.remove(deadServerName) == null) {
+      return false;
+    }
+    return true;
+  }
 }

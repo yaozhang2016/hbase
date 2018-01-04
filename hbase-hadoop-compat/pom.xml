@@ -21,10 +21,10 @@
     -->
     <modelVersion>4.0.0</modelVersion>
     <parent>
-        <artifactId>hbase</artifactId>
+        <artifactId>hbase-build-configuration</artifactId>
         <groupId>org.apache.hbase</groupId>
-        <version>2.0.0-SNAPSHOT</version>
-        <relativePath>..</relativePath>
+        <version>3.0.0-SNAPSHOT</version>
+        <relativePath>../hbase-build-configuration</relativePath>
     </parent>
 
     <artifactId>hbase-hadoop-compat</artifactId>
@@ -33,6 +33,7 @@
         Interfaces to be implemented in order to smooth
         over hadoop version differences
     </description>
+<!--REMOVE-->
 
     <build>
       <plugins>
@@ -46,34 +47,32 @@
       <plugin>
         <!--Make it so assembly:single does nothing in here-->
         <artifactId>maven-assembly-plugin</artifactId>
-        <version>${maven.assembly.version}</version>
         <configuration>
           <skipAssembly>true</skipAssembly>
         </configuration>
       </plugin>
-            <plugin>
-                <artifactId>maven-surefire-plugin</artifactId>
-                <!-- Always skip the second part executions, since we only run
-          simple unit tests in this module -->
-                <executions>
-                    <execution>
-                        <id>secondPartTestsExecution</id>
-                        <phase>test</phase>
-                        <goals>
-                            <goal>test</goal>
-                        </goals>
-                        <configuration>
-                            <skip>true</skip>
-                        </configuration>
-                    </execution>
-                </executions>
-            </plugin>
         <!-- Make a jar and put the sources in the jar -->
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-source-plugin</artifactId>
         </plugin>
-        </plugins>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-checkstyle-plugin</artifactId>
+          <executions>
+            <execution>
+              <id>checkstyle</id>
+              <phase>validate</phase>
+              <goals>
+                <goal>check</goal>
+              </goals>
+              <configuration>
+                <failOnViolation>true</failOnViolation>
+              </configuration>
+            </execution>
+          </executions>
+        </plugin>
+      </plugins>
       <pluginManagement>
         <plugins>
           <!--This plugin's configuration is used to store Eclipse m2e settings
@@ -81,23 +80,9 @@
           <plugin>
             <groupId>org.eclipse.m2e</groupId>
             <artifactId>lifecycle-mapping</artifactId>
-            <version>1.0.0</version>
             <configuration>
               <lifecycleMappingMetadata>
                 <pluginExecutions>
-                  <pluginExecution>
-                    <pluginExecutionFilter>
-                      <groupId>org.apache.maven.plugins</groupId>
-                      <artifactId>maven-compiler-plugin</artifactId>
-                      <versionRange>[3.2,)</versionRange>
-                      <goals>
-                        <goal>compile</goal>
-                      </goals>
-                    </pluginExecutionFilter>
-                    <action>
-                      <ignore></ignore>
-                    </action>
-                  </pluginExecution>
                 </pluginExecutions>
               </lifecycleMappingMetadata>
             </configuration>
@@ -113,14 +98,23 @@
         <type>test-jar</type>
         <scope>test</scope>
       </dependency>
+      <dependency>
+        <groupId>org.apache.hbase.thirdparty</groupId>
+        <artifactId>hbase-shaded-miscellaneous</artifactId>
+      </dependency>
       <!-- General dependencies -->
       <dependency>
-        <groupId>commons-logging</groupId>
-        <artifactId>commons-logging</artifactId>
+        <groupId>org.slf4j</groupId>
+        <artifactId>slf4j-api</artifactId>
       </dependency>
       <dependency>
-        <groupId>org.apache.commons</groupId>
-        <artifactId>commons-math</artifactId>
+        <groupId>org.apache.hbase</groupId>
+        <artifactId>hbase-metrics-api</artifactId>
+      </dependency>
+      <dependency>
+        <groupId>junit</groupId>
+        <artifactId>junit</artifactId>
+        <scope>test</scope>
       </dependency>
     </dependencies>
 
@@ -135,6 +129,7 @@
             </activation>
             <properties>
                 <surefire.skipFirstPart>true</surefire.skipFirstPart>
+                <surefire.skipSecondPart>true</surefire.skipSecondPart>
             </properties>
         </profile>
     </profiles>

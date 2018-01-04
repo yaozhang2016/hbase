@@ -31,14 +31,14 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Random;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellComparator;
+import org.apache.hadoop.hbase.CellComparatorImpl;
+import org.apache.hadoop.hbase.HBaseCommonTestingUtility;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.KeyValue;
@@ -60,6 +60,8 @@ import org.junit.experimental.categories.Category;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 import org.junit.runners.Parameterized.Parameters;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Testing writing a version 3 {@link HFile}.
@@ -68,7 +70,7 @@ import org.junit.runners.Parameterized.Parameters;
 @Category({IOTests.class, SmallTests.class})
 public class TestHFileWriterV3 {
 
-  private static final Log LOG = LogFactory.getLog(TestHFileWriterV3.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestHFileWriterV3.class);
 
   private static final HBaseTestingUtility TEST_UTIL =
       new HBaseTestingUtility();
@@ -81,7 +83,7 @@ public class TestHFileWriterV3 {
   }
   @Parameters
   public static Collection<Object[]> parameters() {
-    return HBaseTestingUtility.BOOLEAN_PARAMETERIZED;
+    return HBaseCommonTestingUtility.BOOLEAN_PARAMETERIZED;
   }
 
   @Before
@@ -124,11 +126,11 @@ public class TestHFileWriterV3 {
     HFile.Writer writer = new HFile.WriterFactory(conf, new CacheConfig(conf))
             .withPath(fs, hfilePath)
             .withFileContext(context)
-            .withComparator(CellComparator.COMPARATOR)
+            .withComparator(CellComparatorImpl.COMPARATOR)
             .create();
 
     Random rand = new Random(9713312); // Just a fixed seed.
-    List<KeyValue> keyValues = new ArrayList<KeyValue>(entryCount);
+    List<KeyValue> keyValues = new ArrayList<>(entryCount);
 
     for (int i = 0; i < entryCount; ++i) {
       byte[] keyBytes = RandomKeyValueUtil.randomOrderedKey(rand, i);
@@ -137,7 +139,7 @@ public class TestHFileWriterV3 {
       byte[] valueBytes = RandomKeyValueUtil.randomValue(rand);
       KeyValue keyValue = null;
       if (useTags) {
-        ArrayList<Tag> tags = new ArrayList<Tag>();
+        ArrayList<Tag> tags = new ArrayList<>();
         for (int j = 0; j < 1 + rand.nextInt(4); j++) {
           byte[] tagBytes = new byte[16];
           rand.nextBytes(tagBytes);
@@ -218,7 +220,7 @@ public class TestHFileWriterV3 {
     fsdis.seek(0);
     long curBlockPos = 0;
     while (curBlockPos <= trailer.getLastDataBlockOffset()) {
-      HFileBlock block = blockReader.readBlockData(curBlockPos, -1, false)
+      HFileBlock block = blockReader.readBlockData(curBlockPos, -1, false, false)
         .unpack(context, blockReader);
       assertEquals(BlockType.DATA, block.getBlockType());
       ByteBuff buf = block.getBufferWithoutHeader();
@@ -279,7 +281,7 @@ public class TestHFileWriterV3 {
     while (fsdis.getPos() < trailer.getLoadOnOpenDataOffset()) {
       LOG.info("Current offset: " + fsdis.getPos() + ", scanning until " +
           trailer.getLoadOnOpenDataOffset());
-      HFileBlock block = blockReader.readBlockData(curBlockPos, -1, false)
+      HFileBlock block = blockReader.readBlockData(curBlockPos, -1, false, false)
         .unpack(context, blockReader);
       assertEquals(BlockType.META, block.getBlockType());
       Text t = new Text();

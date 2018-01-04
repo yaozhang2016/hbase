@@ -23,9 +23,9 @@ import java.io.InterruptedIOException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
 
-import com.google.common.annotations.VisibleForTesting;
+import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
 
 /**
  * Allows multiple concurrent clients to lock on a numeric id with a minimal
@@ -46,7 +46,7 @@ public class IdLock {
   public static class Entry {
     private final long id;
     private int numWaiters;
-    private boolean isLocked = true;
+    private boolean locked = true;
 
     private Entry(long id) {
       this.id = id;
@@ -54,12 +54,11 @@ public class IdLock {
 
     public String toString() {
       return "id=" + id + ", numWaiter=" + numWaiters + ", isLocked="
-          + isLocked;
+          + locked;
     }
   }
 
-  private ConcurrentMap<Long, Entry> map =
-      new ConcurrentHashMap<Long, Entry>();
+  private ConcurrentMap<Long, Entry> map = new ConcurrentHashMap<>();
 
   /**
    * Blocks until the lock corresponding to the given id is acquired.
@@ -74,9 +73,9 @@ public class IdLock {
     Entry existing;
     while ((existing = map.putIfAbsent(entry.id, entry)) != null) {
       synchronized (existing) {
-        if (existing.isLocked) {
+        if (existing.locked) {
           ++existing.numWaiters;  // Add ourselves to waiters.
-          while (existing.isLocked) {
+          while (existing.locked) {
             try {
               existing.wait();
             } catch (InterruptedException e) {
@@ -87,7 +86,7 @@ public class IdLock {
           }
 
           --existing.numWaiters;  // Remove ourselves from waiters.
-          existing.isLocked = true;
+          existing.locked = true;
           return existing;
         }
         // If the entry is not locked, it might already be deleted from the
@@ -107,7 +106,7 @@ public class IdLock {
    */
   public void releaseLockEntry(Entry entry) {
     synchronized (entry) {
-      entry.isLocked = false;
+      entry.locked = false;
       if (entry.numWaiters > 0) {
         entry.notify();
       } else {
@@ -118,7 +117,7 @@ public class IdLock {
 
   /** For testing */
   void assertMapEmpty() {
-    assert map.size() == 0;
+    assert map.isEmpty();
   }
 
   @VisibleForTesting

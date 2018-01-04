@@ -17,20 +17,21 @@
  */
 package org.apache.hadoop.hbase.procedure2;
 
-import com.google.common.base.Preconditions;
-
 import java.io.IOException;
+import java.io.InputStream;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Modifier;
-
 import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.ProcedureInfo;
-import org.apache.hadoop.hbase.ProcedureState;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.shaded.com.google.protobuf.ByteString;
-import org.apache.hadoop.hbase.shaded.com.google.protobuf.UnsafeByteOperations;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.apache.hbase.thirdparty.com.google.common.base.Preconditions;
+import org.apache.hbase.thirdparty.com.google.protobuf.Any;
+import org.apache.hbase.thirdparty.com.google.protobuf.Internal;
+import org.apache.hbase.thirdparty.com.google.protobuf.InvalidProtocolBufferException;
+import org.apache.hbase.thirdparty.com.google.protobuf.Message;
+import org.apache.hbase.thirdparty.com.google.protobuf.Parser;
+import org.apache.hbase.thirdparty.com.google.protobuf.UnsafeByteOperations;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.LockServiceProtos;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ProcedureProtos;
-import org.apache.hadoop.hbase.util.ForeignExceptionUtil;
 import org.apache.hadoop.hbase.util.NonceKey;
 
 /**
@@ -85,6 +86,69 @@ public final class ProcedureUtil {
   // ==========================================================================
 
   /**
+   * A serializer for our Procedures. Instead of the previous serializer, it
+   * uses the stateMessage list to store the internal state of the Procedures.
+   */
+  private static class StateSerializer implements ProcedureStateSerializer {
+    private final ProcedureProtos.Procedure.Builder builder;
+    private int deserializeIndex;
+
+    public StateSerializer(ProcedureProtos.Procedure.Builder builder) {
+      this.builder = builder;
+    }
+
+    @Override
+    public void serialize(Message message) throws IOException {
+      Any packedMessage = Any.pack(message);
+      builder.addStateMessage(packedMessage);
+    }
+
+    @Override
+    public <M extends Message> M deserialize(Class<M> clazz)
+        throws IOException {
+      if (deserializeIndex >= builder.getStateMessageCount()) {
+        throw new IOException("Invalid state message index: " + deserializeIndex);
+      }
+
+      try {
+        Any packedMessage = builder.getStateMessage(deserializeIndex++);
+        return packedMessage.unpack(clazz);
+      } catch (InvalidProtocolBufferException e) {
+        throw e.unwrapIOException();
+      }
+    }
+  }
+
+  /**
+   * A serializer (deserializer) for those Procedures which were serialized
+   * before this patch. It deserializes the old, binary stateData field.
+   */
+  private static class CompatStateSerializer implements ProcedureStateSerializer {
+    private InputStream inputStream;
+
+    public CompatStateSerializer(InputStream inputStream) {
+      this.inputStream = inputStream;
+    }
+
+    @Override
+    public void serialize(Message message) throws IOException {
+      throw new UnsupportedOperationException();
+    }
+
+    @SuppressWarnings("unchecked")
+    @Override
+    public <M extends Message> M deserialize(Class<M> clazz)
+        throws IOException {
+      Parser<M> parser = (Parser<M>) Internal.getDefaultInstance(clazz).getParserForType();
+      try {
+        return parser.parseDelimitedFrom(inputStream);
+      } catch (InvalidProtocolBufferException e) {
+        throw e.unwrapIOException();
+      }
+    }
+  }
+
+  /**
    * Helper to convert the procedure to protobuf.
    * Used by ProcedureStore implementations.
    */
@@ -97,7 +161,7 @@ public final class ProcedureUtil {
       .setClassName(proc.getClass().getName())
       .setProcId(proc.getProcId())
       .setState(proc.getState())
-      .setStartTime(proc.getStartTime())
+      .setSubmittedTime(proc.getSubmittedTime())
       .setLastUpdate(proc.getLastUpdate());
 
     if (proc.hasParent()) {
@@ -130,15 +194,8 @@ public final class ProcedureUtil {
       builder.setResult(UnsafeByteOperations.unsafeWrap(result));
     }
 
-    final ByteString.Output stateStream = ByteString.newOutput();
-    try {
-      proc.serializeStateData(stateStream);
-      if (stateStream.size() > 0) {
-        builder.setStateData(stateStream.toByteString());
-      }
-    } finally {
-      stateStream.close();
-    }
+    ProcedureStateSerializer serializer = new StateSerializer(builder);
+    proc.serializeStateData(serializer);
 
     if (proc.getNonceKey() != null) {
       builder.setNonceGroup(proc.getNonceKey().getNonceGroup());
@@ -164,7 +221,7 @@ public final class ProcedureUtil {
     // set fields
     proc.setProcId(proto.getProcId());
     proc.setState(proto.getState());
-    proc.setStartTime(proto.getStartTime());
+    proc.setSubmittedTime(proto.getSubmittedTime());
     proc.setLastUpdate(proto.getLastUpdate());
 
     if (proto.hasParentId()) {
@@ -184,7 +241,7 @@ public final class ProcedureUtil {
     }
 
     if (proto.hasException()) {
-      assert proc.getState() == ProcedureProtos.ProcedureState.FINISHED ||
+      assert proc.getState() == ProcedureProtos.ProcedureState.FAILED ||
              proc.getState() == ProcedureProtos.ProcedureState.ROLLEDBACK :
              "The procedure must be failed (waiting to rollback) or rolledback";
       proc.setFailure(RemoteProcedureException.fromProto(proto.getException()));
@@ -198,87 +255,62 @@ public final class ProcedureUtil {
       proc.setNonceKey(new NonceKey(proto.getNonceGroup(), proto.getNonce()));
     }
 
-    // we want to call deserialize even when the stream is empty, mainly for testing.
-    proc.deserializeStateData(proto.getStateData().newInput());
+    ProcedureStateSerializer serializer = null;
+
+    if (proto.getStateMessageCount() > 0) {
+      serializer = new StateSerializer(proto.toBuilder());
+    } else if (proto.hasStateData()) {
+      InputStream inputStream = proto.getStateData().newInput();
+      serializer = new CompatStateSerializer(inputStream);
+    }
+
+    if (serializer != null) {
+      proc.deserializeStateData(serializer);
+    }
 
     return proc;
   }
 
   // ==========================================================================
-  //  convert to and from ProcedureInfo object
+  //  convert from LockedResource object
   // ==========================================================================
 
-  /**
-   * @return Convert the current {@link ProcedureInfo} into a Protocol Buffers Procedure
-   * instance.
-   */
-  public static ProcedureProtos.Procedure convertToProtoProcedure(final ProcedureInfo procInfo) {
-    final ProcedureProtos.Procedure.Builder builder = ProcedureProtos.Procedure.newBuilder();
+  public static LockServiceProtos.LockedResourceType convertToProtoResourceType(
+      LockedResourceType resourceType) {
+    return LockServiceProtos.LockedResourceType.valueOf(resourceType.name());
+  }
 
-    builder.setClassName(procInfo.getProcName());
-    builder.setProcId(procInfo.getProcId());
-    builder.setStartTime(procInfo.getStartTime());
-    builder.setState(ProcedureProtos.ProcedureState.valueOf(procInfo.getProcState().name()));
-    builder.setLastUpdate(procInfo.getLastUpdate());
+  public static LockServiceProtos.LockType convertToProtoLockType(LockType lockType) {
+    return LockServiceProtos.LockType.valueOf(lockType.name());
+  }
 
-    if (procInfo.hasParentId()) {
-      builder.setParentId(procInfo.getParentId());
+  public static LockServiceProtos.LockedResource convertToProtoLockedResource(
+      LockedResource lockedResource) throws IOException
+  {
+    LockServiceProtos.LockedResource.Builder builder =
+        LockServiceProtos.LockedResource.newBuilder();
+
+    builder
+        .setResourceType(convertToProtoResourceType(lockedResource.getResourceType()))
+        .setResourceName(lockedResource.getResourceName())
+        .setLockType(convertToProtoLockType(lockedResource.getLockType()));
+
+    Procedure<?> exclusiveLockOwnerProcedure = lockedResource.getExclusiveLockOwnerProcedure();
+
+    if (exclusiveLockOwnerProcedure != null) {
+      ProcedureProtos.Procedure exclusiveLockOwnerProcedureProto =
+          convertToProtoProcedure(exclusiveLockOwnerProcedure);
+      builder.setExclusiveLockOwnerProcedure(exclusiveLockOwnerProcedureProto);
     }
 
-    if (procInfo.hasOwner()) {
-      builder.setOwner(procInfo.getProcOwner());
-    }
+    builder.setSharedLockCount(lockedResource.getSharedLockCount());
 
-    if (procInfo.isFailed()) {
-      builder.setException(ForeignExceptionUtil.toProtoForeignException(procInfo.getException()));
-    }
-
-    if (procInfo.hasResultData()) {
-      builder.setResult(UnsafeByteOperations.unsafeWrap(procInfo.getResult()));
+    for (Procedure<?> waitingProcedure : lockedResource.getWaitingProcedures()) {
+      ProcedureProtos.Procedure waitingProcedureProto =
+          convertToProtoProcedure(waitingProcedure);
+      builder.addWaitingProcedures(waitingProcedureProto);
     }
 
     return builder.build();
-  }
-
-  /**
-   * Helper to convert the protobuf object.
-   * @return Convert the current Protocol Buffers Procedure to {@link ProcedureInfo}
-   * instance.
-   */
-  public static ProcedureInfo convertToProcedureInfo(final ProcedureProtos.Procedure procProto) {
-    NonceKey nonceKey = null;
-    if (procProto.getNonce() != HConstants.NO_NONCE) {
-      nonceKey = new NonceKey(procProto.getNonceGroup(), procProto.getNonce());
-    }
-
-    return new ProcedureInfo(procProto.getProcId(), procProto.getClassName(),
-        procProto.hasOwner() ? procProto.getOwner() : null,
-        convertToProcedureState(procProto.getState()),
-        procProto.hasParentId() ? procProto.getParentId() : -1, nonceKey,
-        procProto.hasException() ?
-          ForeignExceptionUtil.toIOException(procProto.getException()) : null,
-        procProto.getLastUpdate(), procProto.getStartTime(),
-        procProto.hasResult() ? procProto.getResult().toByteArray() : null);
-  }
-
-  public static ProcedureState convertToProcedureState(ProcedureProtos.ProcedureState state) {
-    return ProcedureState.valueOf(state.name());
-  }
-
-  public static ProcedureInfo convertToProcedureInfo(final Procedure proc) {
-    return convertToProcedureInfo(proc, null);
-  }
-
-  /**
-   * Helper to create the ProcedureInfo from Procedure.
-   */
-  public static ProcedureInfo convertToProcedureInfo(final Procedure proc,
-      final NonceKey nonceKey) {
-    final RemoteProcedureException exception = proc.hasException() ? proc.getException() : null;
-    return new ProcedureInfo(proc.getProcId(), proc.toStringClass(), proc.getOwner(),
-        convertToProcedureState(proc.getState()),
-        proc.hasParent() ? proc.getParentProcId() : -1, nonceKey,
-        exception != null ? exception.unwrapRemoteIOException() : null,
-        proc.getLastUpdate(), proc.getStartTime(), proc.getResult());
   }
 }

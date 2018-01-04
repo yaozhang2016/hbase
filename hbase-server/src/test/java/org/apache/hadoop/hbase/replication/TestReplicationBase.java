@@ -18,11 +18,11 @@
  */
 package org.apache.hadoop.hbase.replication;
 
+import java.util.Arrays;
+import java.util.List;
 import java.util.NavigableMap;
 import java.util.TreeMap;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
@@ -36,10 +36,15 @@ import org.apache.hadoop.hbase.client.ConnectionFactory;
 import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.client.replication.ReplicationAdmin;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.hadoop.hbase.wal.AbstractFSWALProvider;
 import org.apache.hadoop.hbase.zookeeper.MiniZooKeeperCluster;
-import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher;
+import org.apache.hadoop.hbase.zookeeper.ZKWatcher;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
+import org.junit.runners.Parameterized.Parameter;
+import org.junit.runners.Parameterized.Parameters;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * This class is only a base for other integration-level replication tests.
@@ -53,16 +58,17 @@ public class TestReplicationBase {
     ((Log4JLogger) ReplicationSource.LOG).getLogger().setLevel(Level.ALL);
   }*/
 
-  private static final Log LOG = LogFactory.getLog(TestReplicationBase.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestReplicationBase.class);
 
   protected static Configuration conf1 = HBaseConfiguration.create();
   protected static Configuration conf2;
   protected static Configuration CONF_WITH_LOCALFS;
 
-  protected static ZooKeeperWatcher zkw1;
-  protected static ZooKeeperWatcher zkw2;
+  protected static ZKWatcher zkw1;
+  protected static ZKWatcher zkw2;
 
   protected static ReplicationAdmin admin;
+  protected static Admin hbaseAdmin;
 
   protected static Table htable1;
   protected static Table htable2;
@@ -80,6 +86,14 @@ public class TestReplicationBase {
   protected static final byte[] famName = Bytes.toBytes("f");
   protected static final byte[] row = Bytes.toBytes("row");
   protected static final byte[] noRepfamName = Bytes.toBytes("norep");
+
+  @Parameter
+  public static boolean seperateOldWALs;
+
+  @Parameters
+  public static List<Boolean> params() {
+    return Arrays.asList(false, true);
+  }
 
   /**
    * @throws java.lang.Exception
@@ -103,14 +117,18 @@ public class TestReplicationBase {
     conf1.setLong("replication.sleep.before.failover", 2000);
     conf1.setInt("replication.source.maxretriesmultiplier", 10);
     conf1.setFloat("replication.source.ratio", 1.0f);
+    conf1.setBoolean("replication.source.eof.autorecovery", true);
+
+    // Parameter config
+    conf1.setBoolean(AbstractFSWALProvider.SEPARATE_OLDLOGDIR, seperateOldWALs);
 
     utility1 = new HBaseTestingUtility(conf1);
     utility1.startMiniZKCluster();
     MiniZooKeeperCluster miniZK = utility1.getZkCluster();
     // Have to reget conf1 in case zk cluster location different
     // than default
-    conf1 = utility1.getConfiguration();  
-    zkw1 = new ZooKeeperWatcher(conf1, "cluster1", null, true);
+    conf1 = utility1.getConfiguration();
+    zkw1 = new ZKWatcher(conf1, "cluster1", null, true);
     admin = new ReplicationAdmin(conf1);
     LOG.info("Setup first Zk");
 
@@ -122,18 +140,19 @@ public class TestReplicationBase {
 
     utility2 = new HBaseTestingUtility(conf2);
     utility2.setZkCluster(miniZK);
-    zkw2 = new ZooKeeperWatcher(conf2, "cluster2", null, true);
-
-    ReplicationPeerConfig rpc = new ReplicationPeerConfig();
-    rpc.setClusterKey(utility2.getClusterKey());
-    admin.addPeer("2", rpc, null);
-
+    zkw2 = new ZKWatcher(conf2, "cluster2", null, true);
     LOG.info("Setup second Zk");
+
     CONF_WITH_LOCALFS = HBaseConfiguration.create(conf1);
     utility1.startMiniCluster(2);
     // Have a bunch of slave servers, because inter-cluster shipping logic uses number of sinks
     // as a component in deciding maximum number of parallel batches to send to the peer cluster.
     utility2.startMiniCluster(4);
+
+    ReplicationPeerConfig rpc = new ReplicationPeerConfig();
+    rpc.setClusterKey(utility2.getClusterKey());
+    hbaseAdmin = ConnectionFactory.createConnection(conf1).getAdmin();
+    hbaseAdmin.addReplicationPeer("2", rpc);
 
     HTableDescriptor table = new HTableDescriptor(tableName);
     HColumnDescriptor fam = new HColumnDescriptor(famName);
@@ -142,8 +161,7 @@ public class TestReplicationBase {
     table.addFamily(fam);
     fam = new HColumnDescriptor(noRepfamName);
     table.addFamily(fam);
-    scopes = new TreeMap<byte[], Integer>(
-        Bytes.BYTES_COMPARATOR);
+    scopes = new TreeMap<>(Bytes.BYTES_COMPARATOR);
     for(HColumnDescriptor f : table.getColumnFamilies()) {
       scopes.put(f.getName(), f.getScope());
     }
@@ -158,7 +176,6 @@ public class TestReplicationBase {
     utility1.waitUntilAllRegionsAssigned(tableName);
     utility2.waitUntilAllRegionsAssigned(tableName);
     htable1 = connection1.getTable(tableName);
-    htable1.setWriteBufferSize(1024);
     htable2 = connection2.getTable(tableName);
   }
 

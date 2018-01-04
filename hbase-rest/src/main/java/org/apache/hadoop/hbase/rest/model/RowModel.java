@@ -30,12 +30,12 @@ import javax.xml.bind.annotation.XmlAttribute;
 import javax.xml.bind.annotation.XmlElement;
 import javax.xml.bind.annotation.XmlRootElement;
 
-import org.apache.commons.lang.builder.EqualsBuilder;
-import org.apache.commons.lang.builder.HashCodeBuilder;
-import org.apache.commons.lang.builder.ToStringBuilder;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import org.apache.commons.lang3.builder.EqualsBuilder;
+import org.apache.commons.lang3.builder.HashCodeBuilder;
+import org.apache.commons.lang3.builder.ToStringBuilder;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.hbase.rest.ProtobufMessageHandler;
-import org.codehaus.jackson.annotate.JsonProperty;
 
 /**
  * Representation of a row. A row is a related set of cells, grouped by common
@@ -64,7 +64,7 @@ public class RowModel implements ProtobufMessageHandler, Serializable {
 
   @JsonProperty("Cell")
   @XmlElement(name="Cell")
-  private List<CellModel> cells = new ArrayList<CellModel>();
+  private List<CellModel> cells = new ArrayList<>();
 
 
   /**
@@ -86,7 +86,7 @@ public class RowModel implements ProtobufMessageHandler, Serializable {
    */
   public RowModel(final byte[] key) {
     this.key = key;
-    cells = new ArrayList<CellModel>();
+    cells = new ArrayList<>();
   }
 
   /**

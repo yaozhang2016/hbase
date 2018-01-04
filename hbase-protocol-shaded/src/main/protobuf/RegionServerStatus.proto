@@ -15,6 +15,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+syntax = "proto2";
 
 // This file contains protocol buffers that are used for RegionServerStatusProtocol.
 package hbase.pb;
@@ -26,7 +27,6 @@ option java_generate_equals_and_hash = true;
 option optimize_for = SPEED;
 
 import "HBase.proto";
-import "Master.proto";
 import "ClusterStatus.proto";
 
 message RegionServerStartupRequest {
@@ -105,11 +105,13 @@ message RegionStateTransition {
     READY_TO_SPLIT = 3;
     READY_TO_MERGE = 4;
 
-    SPLIT_PONR = 5;
-    MERGE_PONR = 6;
 
+    /** We used to have PONR enums for split and merge in here occupying
+     positions 5 and 6 but they have since been removed. Do not reuse these
+     indices */
     SPLIT = 7;
     MERGED = 8;
+
     SPLIT_REVERTED = 9;
     MERGE_REVERTED = 10;
   }
@@ -127,18 +129,21 @@ message ReportRegionStateTransitionResponse {
   optional string error_message = 1;
 }
 
-/**
- * Splits the specified region.
- */
-message SplitTableRegionRequest {
-  required RegionInfo region_info = 1;
-  required bytes split_row = 2;
-  optional uint64 nonce_group = 3 [default = 0];
-  optional uint64 nonce = 4 [default = 0];
+
+message RegionSpaceUse {
+  optional RegionInfo region_info = 1; // A region identifier
+  optional uint64 region_size = 2; // The size in bytes of the region
 }
 
-message SplitTableRegionResponse {
-  optional uint64 proc_id = 1;
+/**
+ * Reports filesystem usage for regions.
+ */
+message RegionSpaceUseReportRequest {
+  repeated RegionSpaceUse space_use = 1;
+}
+
+message RegionSpaceUseReportResponse {
+
 }
 
 service RegionServerStatusService {
@@ -172,14 +177,8 @@ service RegionServerStatusService {
     returns(ReportRegionStateTransitionResponse);
 
   /**
-   * Split region
+   * Reports Region filesystem space use
    */
-  rpc SplitRegion(SplitTableRegionRequest)
-    returns(SplitTableRegionResponse);
-
-  /**
-   * Get procedure result
-   */
-  rpc getProcedureResult(GetProcedureResultRequest)
-    returns(GetProcedureResultResponse);
+  rpc ReportRegionSpaceUse(RegionSpaceUseReportRequest)
+    returns(RegionSpaceUseReportResponse);
 }

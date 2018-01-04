@@ -29,10 +29,7 @@ import java.util.NavigableMap;
 import java.util.Random;
 import java.util.Set;
 import java.util.TreeMap;
-import java.util.concurrent.atomic.AtomicLong;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
@@ -47,7 +44,6 @@ import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.regionserver.MultiVersionConcurrencyControl;
 // imports for things that haven't moved from regionserver.wal yet.
-import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.testclassification.RegionServerTests;
 import org.apache.hadoop.hbase.util.Bytes;
@@ -60,10 +56,12 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.junit.rules.TestName;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Category({RegionServerTests.class, MediumTests.class})
 public class TestFSHLogProvider {
-  private static final Log LOG = LogFactory.getLog(TestFSHLogProvider.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestFSHLogProvider.class);
 
   protected static Configuration conf;
   protected static FileSystem fs;
@@ -168,9 +166,9 @@ public class TestFSHLogProvider {
    * used by TestDefaultWALProviderWithHLogKey
    * @param scopes
    */
-  WALKey getWalKey(final byte[] info, final TableName tableName, final long timestamp,
+  WALKeyImpl getWalKey(final byte[] info, final TableName tableName, final long timestamp,
       NavigableMap<byte[], Integer> scopes) {
-    return new WALKey(info, tableName, timestamp, mvcc, scopes);
+    return new WALKeyImpl(info, tableName, timestamp, mvcc, scopes);
   }
 
   /**
@@ -187,19 +185,19 @@ public class TestFSHLogProvider {
 
   @Test
   public void testLogCleaning() throws Exception {
-    LOG.info("testLogCleaning");
+    LOG.info(currentTest.getMethodName());
     final HTableDescriptor htd =
-        new HTableDescriptor(TableName.valueOf("testLogCleaning")).addFamily(new HColumnDescriptor(
+        new HTableDescriptor(TableName.valueOf(currentTest.getMethodName())).addFamily(new HColumnDescriptor(
             "row"));
     final HTableDescriptor htd2 =
-        new HTableDescriptor(TableName.valueOf("testLogCleaning2"))
+        new HTableDescriptor(TableName.valueOf(currentTest.getMethodName() + "2"))
             .addFamily(new HColumnDescriptor("row"));
-    NavigableMap<byte[], Integer> scopes1 = new TreeMap<byte[], Integer>(
+    NavigableMap<byte[], Integer> scopes1 = new TreeMap<>(
         Bytes.BYTES_COMPARATOR);
     for(byte[] fam : htd.getFamiliesKeys()) {
       scopes1.put(fam, 0);
     }
-    NavigableMap<byte[], Integer> scopes2 = new TreeMap<byte[], Integer>(
+    NavigableMap<byte[], Integer> scopes2 = new TreeMap<>(
         Bytes.BYTES_COMPARATOR);
     for(byte[] fam : htd2.getFamiliesKeys()) {
       scopes2.put(fam, 0);
@@ -207,7 +205,6 @@ public class TestFSHLogProvider {
     final Configuration localConf = new Configuration(conf);
     localConf.set(WALFactory.WAL_PROVIDER, FSHLogProvider.class.getName());
     final WALFactory wals = new WALFactory(localConf, null, currentTest.getMethodName());
-    final AtomicLong sequenceId = new AtomicLong(1);
     try {
       HRegionInfo hri = new HRegionInfo(htd.getTableName(),
           HConstants.EMPTY_START_ROW, HConstants.EMPTY_END_ROW);
@@ -272,17 +269,17 @@ public class TestFSHLogProvider {
    */
   @Test
   public void testWALArchiving() throws IOException {
-    LOG.debug("testWALArchiving");
+    LOG.debug(currentTest.getMethodName());
     HTableDescriptor table1 =
-        new HTableDescriptor(TableName.valueOf("t1")).addFamily(new HColumnDescriptor("row"));
+        new HTableDescriptor(TableName.valueOf(currentTest.getMethodName() + "1")).addFamily(new HColumnDescriptor("row"));
     HTableDescriptor table2 =
-        new HTableDescriptor(TableName.valueOf("t2")).addFamily(new HColumnDescriptor("row"));
-    NavigableMap<byte[], Integer> scopes1 = new TreeMap<byte[], Integer>(
+        new HTableDescriptor(TableName.valueOf(currentTest.getMethodName() + "2")).addFamily(new HColumnDescriptor("row"));
+    NavigableMap<byte[], Integer> scopes1 = new TreeMap<>(
         Bytes.BYTES_COMPARATOR);
     for(byte[] fam : table1.getFamiliesKeys()) {
       scopes1.put(fam, 0);
     }
-    NavigableMap<byte[], Integer> scopes2 = new TreeMap<byte[], Integer>(
+    NavigableMap<byte[], Integer> scopes2 = new TreeMap<>(
         Bytes.BYTES_COMPARATOR);
     for(byte[] fam : table2.getFamiliesKeys()) {
       scopes2.put(fam, 0);
@@ -372,7 +369,7 @@ public class TestFSHLogProvider {
     localConf.set(WALFactory.WAL_PROVIDER, FSHLogProvider.class.getName());
     final WALFactory wals = new WALFactory(localConf, null, currentTest.getMethodName());
     try {
-      final Set<WAL> seen = new HashSet<WAL>(1);
+      final Set<WAL> seen = new HashSet<>(1);
       final Random random = new Random();
       assertTrue("first attempt to add WAL from default provider should work.",
           seen.add(wals.getWAL(Bytes.toBytes(random.nextInt()), null)));

@@ -18,19 +18,21 @@
 package org.apache.hadoop.hbase.regionserver;
 
 import static org.apache.hadoop.hbase.HConstants.REPLICATION_SCOPE_LOCAL;
+import static org.apache.hadoop.hbase.regionserver.HStoreFile.MAJOR_COMPACTION_KEY;
+import static org.apache.hadoop.hbase.util.CollectionUtils.computeIfAbsent;
 
 import java.io.EOFException;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.lang.reflect.Constructor;
+import java.nio.ByteBuffer;
 import java.text.ParseException;
 import java.util.AbstractList;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -39,6 +41,7 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.NavigableMap;
 import java.util.NavigableSet;
+import java.util.Optional;
 import java.util.RandomAccess;
 import java.util.Set;
 import java.util.TreeMap;
@@ -64,93 +67,100 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReadWriteLock;
-import java.util.concurrent.locks.ReentrantLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.function.Function;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.LocatedFileStatus;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.Cell;
+import org.apache.hadoop.hbase.CellBuilderType;
 import org.apache.hadoop.hbase.CellComparator;
+import org.apache.hadoop.hbase.CellComparatorImpl;
 import org.apache.hadoop.hbase.CellScanner;
 import org.apache.hadoop.hbase.CellUtil;
+import org.apache.hadoop.hbase.CompareOperator;
 import org.apache.hadoop.hbase.CompoundConfiguration;
 import org.apache.hadoop.hbase.DoNotRetryIOException;
 import org.apache.hadoop.hbase.DroppedSnapshotException;
-import org.apache.hadoop.hbase.HColumnDescriptor;
+import org.apache.hadoop.hbase.ExtendedCellBuilderFactory;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HConstants.OperationStatusCode;
 import org.apache.hadoop.hbase.HDFSBlocksDistribution;
-import org.apache.hadoop.hbase.HRegionInfo;
-import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.KeyValueUtil;
 import org.apache.hadoop.hbase.NamespaceDescriptor;
 import org.apache.hadoop.hbase.NotServingRegionException;
+import org.apache.hadoop.hbase.PrivateCellUtil;
 import org.apache.hadoop.hbase.RegionTooBusyException;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.Tag;
 import org.apache.hadoop.hbase.TagUtil;
 import org.apache.hadoop.hbase.UnknownScannerException;
-import org.apache.hadoop.hbase.backup.HFileArchiver;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.client.Append;
+import org.apache.hadoop.hbase.client.ColumnFamilyDescriptor;
+import org.apache.hadoop.hbase.client.CompactionState;
 import org.apache.hadoop.hbase.client.Delete;
 import org.apache.hadoop.hbase.client.Durability;
 import org.apache.hadoop.hbase.client.Get;
 import org.apache.hadoop.hbase.client.Increment;
 import org.apache.hadoop.hbase.client.IsolationLevel;
 import org.apache.hadoop.hbase.client.Mutation;
+import org.apache.hadoop.hbase.client.PackagePrivateFieldAccessor;
 import org.apache.hadoop.hbase.client.Put;
+import org.apache.hadoop.hbase.client.RegionInfo;
 import org.apache.hadoop.hbase.client.RegionReplicaUtil;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.RowMutations;
 import org.apache.hadoop.hbase.client.Scan;
+import org.apache.hadoop.hbase.client.TableDescriptor;
+import org.apache.hadoop.hbase.client.TableDescriptorBuilder;
 import org.apache.hadoop.hbase.conf.ConfigurationManager;
 import org.apache.hadoop.hbase.conf.PropagatingConfigurationObserver;
 import org.apache.hadoop.hbase.coprocessor.RegionObserver.MutationType;
 import org.apache.hadoop.hbase.errorhandling.ForeignExceptionSnare;
 import org.apache.hadoop.hbase.exceptions.FailedSanityCheckException;
-import org.apache.hadoop.hbase.exceptions.RegionInRecoveryException;
+import org.apache.hadoop.hbase.exceptions.TimeoutIOException;
 import org.apache.hadoop.hbase.exceptions.UnknownProtocolException;
 import org.apache.hadoop.hbase.filter.ByteArrayComparable;
-import org.apache.hadoop.hbase.filter.CompareFilter.CompareOp;
 import org.apache.hadoop.hbase.filter.FilterWrapper;
 import org.apache.hadoop.hbase.filter.IncompatibleFilterException;
+import org.apache.hadoop.hbase.io.HFileLink;
 import org.apache.hadoop.hbase.io.HeapSize;
 import org.apache.hadoop.hbase.io.TimeRange;
 import org.apache.hadoop.hbase.io.hfile.HFile;
 import org.apache.hadoop.hbase.ipc.CallerDisconnectedException;
 import org.apache.hadoop.hbase.ipc.CoprocessorRpcUtils;
-import org.apache.hadoop.hbase.ipc.RpcCallContext;
+import org.apache.hadoop.hbase.ipc.RpcCall;
 import org.apache.hadoop.hbase.ipc.RpcServer;
-import org.apache.hadoop.hbase.mob.MobUtils;
 import org.apache.hadoop.hbase.monitoring.MonitoredTask;
 import org.apache.hadoop.hbase.monitoring.TaskMonitor;
 import org.apache.hadoop.hbase.regionserver.MultiVersionConcurrencyControl.WriteEntry;
 import org.apache.hadoop.hbase.regionserver.ScannerContext.LimitScope;
 import org.apache.hadoop.hbase.regionserver.ScannerContext.NextState;
 import org.apache.hadoop.hbase.regionserver.compactions.CompactionContext;
+import org.apache.hadoop.hbase.regionserver.compactions.CompactionLifeCycleTracker;
 import org.apache.hadoop.hbase.regionserver.throttle.CompactionThroughputControllerFactory;
 import org.apache.hadoop.hbase.regionserver.throttle.NoLimitThroughputController;
 import org.apache.hadoop.hbase.regionserver.throttle.ThroughputController;
-import org.apache.hadoop.hbase.regionserver.wal.HLogKey;
-import org.apache.hadoop.hbase.regionserver.wal.ReplayHLogKey;
-import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
 import org.apache.hadoop.hbase.regionserver.wal.WALUtil;
 import org.apache.hadoop.hbase.security.User;
-import org.apache.hadoop.hbase.shaded.com.google.protobuf.TextFormat;
-import org.apache.hadoop.hbase.shaded.com.google.protobuf.UnsafeByteOperations;
+import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
+import org.apache.hbase.thirdparty.com.google.common.base.Preconditions;
+import org.apache.hbase.thirdparty.com.google.common.collect.Lists;
+import org.apache.hbase.thirdparty.com.google.common.collect.Maps;
+import org.apache.hbase.thirdparty.com.google.common.io.Closeables;
+import org.apache.hbase.thirdparty.com.google.protobuf.Service;
+import org.apache.hbase.thirdparty.com.google.protobuf.TextFormat;
+import org.apache.hbase.thirdparty.com.google.protobuf.UnsafeByteOperations;
 import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos.GetRegionInfoResponse.CompactionState;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos.CoprocessorServiceCall;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ClusterStatusProtos.RegionLoad;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ClusterStatusProtos.StoreSequenceId;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos.SnapshotDescription;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.SnapshotProtos.SnapshotDescription;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.WALProtos;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.WALProtos.CompactionDescriptor;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.WALProtos.FlushDescriptor;
@@ -161,46 +171,65 @@ import org.apache.hadoop.hbase.shaded.protobuf.generated.WALProtos.RegionEventDe
 import org.apache.hadoop.hbase.shaded.protobuf.generated.WALProtos.StoreDescriptor;
 import org.apache.hadoop.hbase.snapshot.SnapshotDescriptionUtils;
 import org.apache.hadoop.hbase.snapshot.SnapshotManifest;
+import org.apache.hadoop.hbase.trace.TraceUtil;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.CancelableProgressable;
 import org.apache.hadoop.hbase.util.ClassSize;
+import org.apache.hadoop.hbase.util.CollectionUtils;
 import org.apache.hadoop.hbase.util.CompressionTest;
 import org.apache.hadoop.hbase.util.EncryptionTest;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.hadoop.hbase.util.FSUtils;
 import org.apache.hadoop.hbase.util.HashedBytes;
+import org.apache.hadoop.hbase.util.NonceKey;
 import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.hbase.util.ServerRegionReplicaUtil;
 import org.apache.hadoop.hbase.util.Threads;
 import org.apache.hadoop.hbase.wal.WAL;
+import org.apache.hadoop.hbase.wal.WALEdit;
 import org.apache.hadoop.hbase.wal.WALFactory;
 import org.apache.hadoop.hbase.wal.WALKey;
+import org.apache.hadoop.hbase.wal.WALKeyImpl;
 import org.apache.hadoop.hbase.wal.WALSplitter;
 import org.apache.hadoop.hbase.wal.WALSplitter.MutationReplay;
 import org.apache.hadoop.io.MultipleIOException;
 import org.apache.hadoop.util.StringUtils;
-import org.apache.htrace.Trace;
-import org.apache.htrace.TraceScope;
+import org.apache.htrace.core.TraceScope;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Optional;
-import com.google.common.base.Preconditions;
-import com.google.common.collect.Lists;
-import com.google.common.collect.Maps;
-import com.google.common.io.Closeables;
+import edu.umd.cs.findbugs.annotations.Nullable;
 
-
+/**
+ * Regions store data for a certain region of a table.  It stores all columns
+ * for each row. A given table consists of one or more Regions.
+ *
+ * <p>An Region is defined by its table and its key extent.
+ *
+ * <p>Locking at the Region level serves only one purpose: preventing the
+ * region from being closed (and consequently split) while other operations
+ * are ongoing. Each row level operation obtains both a row lock and a region
+ * read lock for the duration of the operation. While a scanner is being
+ * constructed, getScanner holds a read lock. If the scanner is successfully
+ * constructed, it holds a read lock until it is closed. A close takes out a
+ * write lock and consequently will block for ongoing operations and will block
+ * new operations from starting while the close is in progress.
+ */
 @SuppressWarnings("deprecation")
 @InterfaceAudience.Private
 public class HRegion implements HeapSize, PropagatingConfigurationObserver, Region {
-  private static final Log LOG = LogFactory.getLog(HRegion.class);
+  private static final Logger LOG = LoggerFactory.getLogger(HRegion.class);
 
   public static final String LOAD_CFS_ON_DEMAND_CONFIG_KEY =
     "hbase.hregion.scan.loadColumnFamiliesOnDemand";
 
-  /** Config key for using mvcc pre-assign feature for put */
-  public static final String HREGION_MVCC_PRE_ASSIGN = "hbase.hregion.mvcc.preassign";
-  public static final boolean DEFAULT_HREGION_MVCC_PRE_ASSIGN = true;
+  public static final String HBASE_MAX_CELL_SIZE_KEY = "hbase.server.keyvalue.maxsize";
+  public static final int DEFAULT_MAX_CELL_SIZE = 10485760;
+
+  public static final String HBASE_REGIONSERVER_MINIBATCH_SIZE =
+      "hbase.regionserver.minibatch.size";
+  public static final int DEFAULT_HBASE_REGIONSERVER_MINIBATCH_SIZE = 20000;
 
   /**
    * This is the global default value for durability. All tables/mutations not
@@ -238,9 +267,6 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
   protected volatile long lastReplayedOpenRegionSeqId = -1L;
   protected volatile long lastReplayedCompactionSeqId = -1L;
 
-  // collects Map(s) of Store to sequence Id when handleFileNotFound() is involved
-  protected List<Map> storeSeqIds = new ArrayList<>();
-
   //////////////////////////////////////////////////////////////////////////////
   // Members
   //////////////////////////////////////////////////////////////////////////////
@@ -251,10 +277,10 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
   // - reference count of (reentrant) locks held by the thread
   // - the row itself
   private final ConcurrentHashMap<HashedBytes, RowLockContext> lockedRows =
-      new ConcurrentHashMap<HashedBytes, RowLockContext>();
+      new ConcurrentHashMap<>();
 
-  protected final Map<byte[], Store> stores = new ConcurrentSkipListMap<byte[], Store>(
-      Bytes.BYTES_RAWCOMPARATOR);
+  protected final Map<byte[], HStore> stores =
+      new ConcurrentSkipListMap<>(Bytes.BYTES_RAWCOMPARATOR);
 
   // TODO: account for each registered handler in HeapSize computation
   private Map<String, com.google.protobuf.Service> coprocessorServiceHandlers = Maps.newHashMap();
@@ -271,25 +297,28 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
   final LongAdder checkAndMutateChecksFailed = new LongAdder();
 
   // Number of requests
+  // Count rows for scan
   final LongAdder readRequestsCount = new LongAdder();
   final LongAdder filteredReadRequestsCount = new LongAdder();
+  // Count rows for multi row mutations
   final LongAdder writeRequestsCount = new LongAdder();
 
   // Number of requests blocked by memstore size.
   private final LongAdder blockedRequestsCount = new LongAdder();
 
   // Compaction LongAdders
-  final AtomicLong compactionsFinished = new AtomicLong(0L);
-  final AtomicLong compactionsFailed = new AtomicLong(0L);
-  final AtomicLong compactionNumFilesCompacted = new AtomicLong(0L);
-  final AtomicLong compactionNumBytesCompacted = new AtomicLong(0L);
+  final LongAdder compactionsFinished = new LongAdder();
+  final LongAdder compactionsFailed = new LongAdder();
+  final LongAdder compactionNumFilesCompacted = new LongAdder();
+  final LongAdder compactionNumBytesCompacted = new LongAdder();
+  final LongAdder compactionsQueued = new LongAdder();
+  final LongAdder flushesQueued = new LongAdder();
 
   private final WAL wal;
   private final HRegionFileSystem fs;
   protected final Configuration conf;
   private final Configuration baseConf;
   private final int rowLockWaitDuration;
-  private CompactedHFilesDischarger compactedFileDischarger;
   static final int DEFAULT_ROWLOCK_WAIT_DURATION = 30000;
 
   // The internal wait duration to acquire a lock before read/update
@@ -309,6 +338,13 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
   // Max busy wait duration. There is no point to wait longer than the RPC
   // purge timeout, when a RPC call will be terminated by the RPC engine.
   final long maxBusyWaitDuration;
+
+  // Max cell size. If nonzero, the maximum allowed size for any given cell
+  // in bytes
+  final long maxCellSize;
+
+  // Number of mutations for minibatch processing.
+  private final int miniBatchSize;
 
   // negative number indicates infinite timeout
   static final long DEFAULT_ROW_PROCESSOR_TIMEOUT = 60 * 1000L;
@@ -336,20 +372,15 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
   // the maxSeqId up to which the store was flushed. And, skip the edits which
   // are equal to or lower than maxSeqId for each store.
   // The following map is populated when opening the region
-  Map<byte[], Long> maxSeqIdInStores = new TreeMap<byte[], Long>(Bytes.BYTES_COMPARATOR);
+  Map<byte[], Long> maxSeqIdInStores = new TreeMap<>(Bytes.BYTES_COMPARATOR);
 
   /** Saved state from replaying prepare flush cache */
   private PrepareFlushResult prepareFlushResult = null;
 
-  /**
-   * Config setting for whether to allow writes when a region is in recovering or not.
-   */
-  private boolean disallowWritesInRecovering = false;
-
-  // When a region is in recovering state, it can only accept writes not reads
-  private volatile boolean recovering = false;
-
   private volatile Optional<ConfigurationManager> configurationManager;
+
+  // Used for testing.
+  private volatile Long timeoutForWriteLock = null;
 
   /**
    * @return The smallest mvcc readPoint across all the scanners in this
@@ -503,36 +534,36 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
   /** A result object from prepare flush cache stage */
   @VisibleForTesting
   static class PrepareFlushResult {
-    final FlushResult result; // indicating a failure result from prepare
+    final FlushResultImpl result; // indicating a failure result from prepare
     final TreeMap<byte[], StoreFlushContext> storeFlushCtxs;
     final TreeMap<byte[], List<Path>> committedFiles;
-    final TreeMap<byte[], MemstoreSize> storeFlushableSize;
+    final TreeMap<byte[], MemStoreSize> storeFlushableSize;
     final long startTime;
     final long flushOpSeqId;
     final long flushedSeqId;
-    final MemstoreSize totalFlushableSize;
+    final MemStoreSizing totalFlushableSize;
 
     /** Constructs an early exit case */
-    PrepareFlushResult(FlushResult result, long flushSeqId) {
-      this(result, null, null, null, Math.max(0, flushSeqId), 0, 0, new MemstoreSize());
+    PrepareFlushResult(FlushResultImpl result, long flushSeqId) {
+      this(result, null, null, null, Math.max(0, flushSeqId), 0, 0, MemStoreSizing.DUD);
     }
 
     /** Constructs a successful prepare flush result */
     PrepareFlushResult(
       TreeMap<byte[], StoreFlushContext> storeFlushCtxs,
       TreeMap<byte[], List<Path>> committedFiles,
-      TreeMap<byte[], MemstoreSize> storeFlushableSize, long startTime, long flushSeqId,
-      long flushedSeqId, MemstoreSize totalFlushableSize) {
+      TreeMap<byte[], MemStoreSize> storeFlushableSize, long startTime, long flushSeqId,
+      long flushedSeqId, MemStoreSizing totalFlushableSize) {
       this(null, storeFlushCtxs, committedFiles, storeFlushableSize, startTime,
         flushSeqId, flushedSeqId, totalFlushableSize);
     }
 
     private PrepareFlushResult(
-      FlushResult result,
+        FlushResultImpl result,
       TreeMap<byte[], StoreFlushContext> storeFlushCtxs,
       TreeMap<byte[], List<Path>> committedFiles,
-      TreeMap<byte[], MemstoreSize> storeFlushableSize, long startTime, long flushSeqId,
-      long flushedSeqId, MemstoreSize totalFlushableSize) {
+      TreeMap<byte[], MemStoreSize> storeFlushableSize, long startTime, long flushSeqId,
+      long flushedSeqId, MemStoreSizing totalFlushableSize) {
       this.result = result;
       this.storeFlushCtxs = storeFlushCtxs;
       this.committedFiles = committedFiles;
@@ -548,6 +579,57 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     }
   }
 
+  /**
+   * A class that tracks exceptions that have been observed in one batch. Not thread safe.
+   */
+  static class ObservedExceptionsInBatch {
+    private boolean wrongRegion = false;
+    private boolean failedSanityCheck = false;
+    private boolean wrongFamily = false;
+
+    /**
+     * @return If a {@link WrongRegionException} has been observed.
+     */
+    boolean hasSeenWrongRegion() {
+      return wrongRegion;
+    }
+
+    /**
+     * Records that a {@link WrongRegionException} has been observed.
+     */
+    void sawWrongRegion() {
+      wrongRegion = true;
+    }
+
+    /**
+     * @return If a {@link FailedSanityCheckException} has been observed.
+     */
+    boolean hasSeenFailedSanityCheck() {
+      return failedSanityCheck;
+    }
+
+    /**
+     * Records that a {@link FailedSanityCheckException} has been observed.
+     */
+    void sawFailedSanityCheck() {
+      failedSanityCheck = true;
+    }
+
+    /**
+     * @return If a {@link NoSuchColumnFamilyException} has been observed.
+     */
+    boolean hasSeenNoSuchFamily() {
+      return wrongFamily;
+    }
+
+    /**
+     * Records that a {@link NoSuchColumnFamilyException} has been observed.
+     */
+    void sawNoSuchFamily() {
+      wrongFamily = true;
+    }
+  }
+
   final WriteState writestate = new WriteState();
 
   long memstoreFlushSize;
@@ -555,8 +637,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
   final long rowProcessorTimeout;
 
   // Last flush time for each Store. Useful when we are flushing for each column
-  private final ConcurrentMap<Store, Long> lastStoreFlushTimeMap =
-      new ConcurrentHashMap<Store, Long>();
+  private final ConcurrentMap<HStore, Long> lastStoreFlushTimeMap = new ConcurrentHashMap<>();
 
   final RegionServerServices rsServices;
   private RegionServerAccounting rsAccounting;
@@ -564,7 +645,6 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
   // flushPerChanges is to prevent too many changes in memstore
   private long flushPerChanges;
   private long blockingMemStoreSize;
-  final long threadWakeFrequency;
   // Used to guard closes
   final ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
 
@@ -578,21 +658,18 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
   // Coprocessor host
   private RegionCoprocessorHost coprocessorHost;
 
-  private HTableDescriptor htableDescriptor = null;
+  private TableDescriptor htableDescriptor = null;
   private RegionSplitPolicy splitPolicy;
   private FlushPolicy flushPolicy;
 
   private final MetricsRegion metricsRegion;
   private final MetricsRegionWrapperImpl metricsRegionWrapper;
-  private final Durability durability;
+  private final Durability regionDurability;
   private final boolean regionStatsEnabled;
   // Stores the replication scope of the various column families of the table
   // that has non-default scope
-  private final NavigableMap<byte[], Integer> replicationScope = new TreeMap<byte[], Integer>(
+  private final NavigableMap<byte[], Integer> replicationScope = new TreeMap<>(
       Bytes.BYTES_COMPARATOR);
-  // flag and lock for MVCC preassign
-  private final boolean mvccPreAssign;
-  private final ReentrantLock preAssignMvccLock;
 
   /**
    * HRegion constructor. This constructor should only be used for testing and
@@ -609,7 +686,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
    * the supplied path.
    * @param fs is the filesystem.
    * @param confParam is global configuration settings.
-   * @param regionInfo - HRegionInfo that describes the region
+   * @param regionInfo - RegionInfo that describes the region
    * is new), then read them from the supplied path.
    * @param htd the table descriptor
    * @param rsServices reference to {@link RegionServerServices} or null
@@ -618,8 +695,8 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
   @Deprecated
   @VisibleForTesting
   public HRegion(final Path tableDir, final WAL wal, final FileSystem fs,
-      final Configuration confParam, final HRegionInfo regionInfo,
-      final HTableDescriptor htd, final RegionServerServices rsServices) {
+      final Configuration confParam, final RegionInfo regionInfo,
+      final TableDescriptor htd, final RegionServerServices rsServices) {
     this(new HRegionFileSystem(confParam, fs, tableDir, regionInfo),
       wal, confParam, htd, rsServices);
   }
@@ -641,7 +718,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
    * @param rsServices reference to {@link RegionServerServices} or null
    */
   public HRegion(final HRegionFileSystem fs, final WAL wal, final Configuration confParam,
-      final HTableDescriptor htd, final RegionServerServices rsServices) {
+      final TableDescriptor htd, final RegionServerServices rsServices) {
     if (htd == null) {
       throw new IllegalArgumentException("Need table descriptor");
     }
@@ -657,7 +734,6 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     this.baseConf = confParam;
     this.conf = new CompoundConfiguration()
       .add(confParam)
-      .addStringMap(htd.getConfiguration())
       .addBytesMap(htd.getValues());
     this.flushCheckInterval = conf.getInt(MEMSTORE_PERIODIC_FLUSH_INTERVAL,
         DEFAULT_CACHE_FLUSH_INTERVAL);
@@ -671,10 +747,10 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
 
     this.isLoadingCfsOnDemandDefault = conf.getBoolean(LOAD_CFS_ON_DEMAND_CONFIG_KEY, true);
     this.htableDescriptor = htd;
-    Set<byte[]> families = this.htableDescriptor.getFamiliesKeys();
+    Set<byte[]> families = this.htableDescriptor.getColumnFamilyNames();
     for (byte[] family : families) {
       if (!replicationScope.containsKey(family)) {
-        int scope = htd.getFamily(family).getScope();
+        int scope = htd.getColumnFamily(family).getScope();
         // Only store those families that has NON-DEFAULT scope
         if (scope != REPLICATION_SCOPE_LOCAL) {
           // Do a copy before storing it here.
@@ -683,9 +759,8 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
       }
     }
     this.rsServices = rsServices;
-    this.threadWakeFrequency = conf.getLong(HConstants.THREAD_WAKE_FREQUENCY, 10 * 1000);
     setHTableSpecificConf();
-    this.scannerReadPoints = new ConcurrentHashMap<RegionScanner, Long>();
+    this.scannerReadPoints = new ConcurrentHashMap<>();
 
     this.busyWaitDuration = conf.getLong(
       "hbase.busy.wait.duration", DEFAULT_BUSY_WAIT_DURATION);
@@ -714,9 +789,8 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
      */
     this.rowProcessorTimeout = conf.getLong(
         "hbase.hregion.row.processor.timeout", DEFAULT_ROW_PROCESSOR_TIMEOUT);
-    this.durability = htd.getDurability() == Durability.USE_DEFAULT
-        ? DEFAULT_DURABILITY
-        : htd.getDurability();
+    this.regionDurability = htd.getDurability() == Durability.USE_DEFAULT ?
+        DEFAULT_DURABILITY : htd.getDurability();
     if (rsServices != null) {
       this.rsAccounting = this.rsServices.getRegionServerAccounting();
       // don't initialize coprocessors if not running within a regionserver
@@ -724,13 +798,6 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
       this.coprocessorHost = new RegionCoprocessorHost(this, rsServices, conf);
       this.metricsRegionWrapper = new MetricsRegionWrapperImpl(this);
       this.metricsRegion = new MetricsRegion(this.metricsRegionWrapper);
-
-      Map<String, Region> recoveringRegions = rsServices.getRecoveringRegions();
-      String encodedName = getRegionInfo().getEncodedName();
-      if (recoveringRegions != null && recoveringRegions.containsKey(encodedName)) {
-        this.recovering = true;
-        recoveringRegions.put(encodedName, this);
-      }
     } else {
       this.metricsRegionWrapper = null;
       this.metricsRegion = null;
@@ -740,11 +807,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
       LOG.debug("Instantiated " + this);
     }
 
-    // by default, we allow writes against a region when it's in recovering
-    this.disallowWritesInRecovering =
-        conf.getBoolean(HConstants.DISALLOW_WRITES_IN_RECOVERING,
-          HConstants.DEFAULT_DISALLOW_WRITES_IN_RECOVERING_CONFIG);
-    configurationManager = Optional.absent();
+    configurationManager = Optional.empty();
 
     // disable stats tracking system tables, but check the config for everything else
     this.regionStatsEnabled = htd.getTableName().getNamespaceAsString().equals(
@@ -753,13 +816,9 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
           conf.getBoolean(HConstants.ENABLE_CLIENT_BACKPRESSURE,
               HConstants.DEFAULT_ENABLE_CLIENT_BACKPRESSURE);
 
-    // get mvcc pre-assign flag and lock
-    this.mvccPreAssign = conf.getBoolean(HREGION_MVCC_PRE_ASSIGN, DEFAULT_HREGION_MVCC_PRE_ASSIGN);
-    if (this.mvccPreAssign) {
-      this.preAssignMvccLock = new ReentrantLock();
-    } else {
-      this.preAssignMvccLock = null;
-    }
+    this.maxCellSize = conf.getLong(HBASE_MAX_CELL_SIZE_KEY, DEFAULT_MAX_CELL_SIZE);
+    this.miniBatchSize = conf.getInt(HBASE_REGIONSERVER_MINIBATCH_SIZE,
+        DEFAULT_HBASE_REGIONSERVER_MINIBATCH_SIZE);
   }
 
   void setHTableSpecificConf() {
@@ -768,7 +827,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
 
     if (flushSize <= 0) {
       flushSize = conf.getLong(HConstants.HREGION_MEMSTORE_FLUSH_SIZE,
-        HTableDescriptor.DEFAULT_MEMSTORE_FLUSH_SIZE);
+        TableDescriptorBuilder.DEFAULT_MEMSTORE_FLUSH_SIZE);
     }
     this.memstoreFlushSize = flushSize;
     this.blockingMemStoreSize = this.memstoreFlushSize *
@@ -799,8 +858,8 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
   private long initialize(final CancelableProgressable reporter) throws IOException {
 
     //Refuse to open the region if there is no column family in the table
-    if (htableDescriptor.getColumnFamilies().length == 0) {
-      throw new DoNotRetryIOException("Table " + htableDescriptor.getNameAsString() +
+    if (htableDescriptor.getColumnFamilyCount() == 0) {
+      throw new DoNotRetryIOException("Table " + htableDescriptor.getTableName().getNameAsString()+
           " should have at least one column family.");
     }
 
@@ -827,19 +886,34 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     }
 
     // Write HRI to a file in case we need to recover hbase:meta
-    status.setStatus("Writing region info on filesystem");
-    fs.checkRegionInfoOnFilesystem();
+    // Only the primary replica should write .regioninfo
+    if (this.getRegionInfo().getReplicaId() == RegionInfo.DEFAULT_REPLICA_ID) {
+      status.setStatus("Writing region info on filesystem");
+      fs.checkRegionInfoOnFilesystem();
+    } else {
+      if (LOG.isDebugEnabled()) {
+        LOG.debug("Skipping creation of .regioninfo file for " + this.getRegionInfo());
+      }
+    }
 
     // Initialize all the HStores
     status.setStatus("Initializing all the Stores");
     long maxSeqId = initializeStores(reporter, status);
     this.mvcc.advanceTo(maxSeqId);
     if (ServerRegionReplicaUtil.shouldReplayRecoveredEdits(this)) {
-      // Recover any edits if available.
-      maxSeqId = Math.max(maxSeqId,
-        replayRecoveredEditsIfAny(this.fs.getRegionDir(), maxSeqIdInStores, reporter, status));
-      // Make sure mvcc is up to max.
-      this.mvcc.advanceTo(maxSeqId);
+      Collection<HStore> stores = this.stores.values();
+      try {
+        // update the stores that we are replaying
+        stores.forEach(HStore::startReplayingFromWAL);
+        // Recover any edits if available.
+        maxSeqId = Math.max(maxSeqId,
+          replayRecoveredEditsIfAny(this.fs.getRegionDir(), maxSeqIdInStores, reporter, status));
+        // Make sure mvcc is up to max.
+        this.mvcc.advanceTo(maxSeqId);
+      } finally {
+        // update the stores that we are done replaying
+        stores.forEach(HStore::stopReplayingFromWAL);
+      }
     }
     this.lastReplayedOpenRegionSeqId = maxSeqId;
 
@@ -869,20 +943,16 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     this.flushPolicy = FlushPolicyFactory.create(this, conf);
 
     long lastFlushTime = EnvironmentEdgeManager.currentTime();
-    for (Store store: stores.values()) {
+    for (HStore store: stores.values()) {
       this.lastStoreFlushTimeMap.put(store, lastFlushTime);
     }
 
     // Use maximum of log sequenceid or that which was found in stores
     // (particularly if no recovered edits, seqid will be -1).
     long nextSeqid = maxSeqId;
-
-    // In distributedLogReplay mode, we don't know the last change sequence number because region
-    // is opened before recovery completes. So we add a safety bumper to avoid new sequence number
-    // overlaps used sequence numbers
     if (this.writestate.writesEnabled) {
-      nextSeqid = WALSplitter.writeRegionSequenceIdFile(this.fs.getFileSystem(), this.fs
-          .getRegionDir(), nextSeqid, (this.recovering ? (this.flushPerChanges + 10000000) : 1));
+      nextSeqid = WALSplitter.writeRegionSequenceIdFile(this.fs.getFileSystem(),
+          this.fs.getRegionDir(), nextSeqid, 1);
     } else {
       nextSeqid++;
     }
@@ -910,23 +980,21 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
    * @return Highest sequenceId found out in a Store.
    * @throws IOException
    */
-  private long initializeStores(final CancelableProgressable reporter, MonitoredTask status)
-  throws IOException {
+  private long initializeStores(CancelableProgressable reporter, MonitoredTask status)
+      throws IOException {
     // Load in all the HStores.
-
     long maxSeqId = -1;
     // initialized to -1 so that we pick up MemstoreTS from column families
     long maxMemstoreTS = -1;
 
-    if (!htableDescriptor.getFamilies().isEmpty()) {
+    if (htableDescriptor.getColumnFamilyCount() != 0) {
       // initialize the thread pool for opening stores in parallel.
       ThreadPoolExecutor storeOpenerThreadPool =
         getStoreOpenAndCloseThreadPool("StoreOpener-" + this.getRegionInfo().getShortNameToLog());
-      CompletionService<HStore> completionService =
-        new ExecutorCompletionService<HStore>(storeOpenerThreadPool);
+      CompletionService<HStore> completionService = new ExecutorCompletionService<>(storeOpenerThreadPool);
 
       // initialize each store in parallel
-      for (final HColumnDescriptor family : htableDescriptor.getFamilies()) {
+      for (final ColumnFamilyDescriptor family : htableDescriptor.getColumnFamilies()) {
         status.setStatus("Instantiating store for column family " + family);
         completionService.submit(new Callable<HStore>() {
           @Override
@@ -938,29 +1006,30 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
       boolean allStoresOpened = false;
       boolean hasSloppyStores = false;
       try {
-        for (int i = 0; i < htableDescriptor.getFamilies().size(); i++) {
+        for (int i = 0; i < htableDescriptor.getColumnFamilyCount(); i++) {
           Future<HStore> future = completionService.take();
           HStore store = future.get();
-          this.stores.put(store.getFamily().getName(), store);
-          if (store.isSloppyMemstore()) {
+          this.stores.put(store.getColumnFamilyDescriptor().getName(), store);
+          if (store.isSloppyMemStore()) {
             hasSloppyStores = true;
           }
 
-          long storeMaxSequenceId = store.getMaxSequenceId();
+          long storeMaxSequenceId = store.getMaxSequenceId().orElse(0L);
           maxSeqIdInStores.put(store.getColumnFamilyName().getBytes(),
               storeMaxSequenceId);
           if (maxSeqId == -1 || storeMaxSequenceId > maxSeqId) {
             maxSeqId = storeMaxSequenceId;
           }
-          long maxStoreMemstoreTS = store.getMaxMemstoreTS();
+          long maxStoreMemstoreTS = store.getMaxMemStoreTS().orElse(0L);
           if (maxStoreMemstoreTS > maxMemstoreTS) {
             maxMemstoreTS = maxStoreMemstoreTS;
           }
         }
         allStoresOpened = true;
         if(hasSloppyStores) {
-          htableDescriptor.setFlushPolicyClassName(FlushNonSloppyStoresFirstPolicy.class
-              .getName());
+          htableDescriptor = TableDescriptorBuilder.newBuilder(htableDescriptor)
+                  .setFlushPolicyClassName(FlushNonSloppyStoresFirstPolicy.class.getName())
+                  .build();
           LOG.info("Setting FlushNonSloppyStoresFirstPolicy for the region=" + this);
         }
       } catch (InterruptedException e) {
@@ -972,11 +1041,11 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
         if (!allStoresOpened) {
           // something went wrong, close all opened stores
           LOG.error("Could not initialize all stores for the region=" + this);
-          for (Store store : this.stores.values()) {
+          for (HStore store : this.stores.values()) {
             try {
               store.close();
             } catch (IOException e) {
-              LOG.warn(e.getMessage());
+              LOG.warn("close store failed", e);
             }
           }
         }
@@ -1000,16 +1069,17 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
    * @return Map of StoreFiles by column family
    */
   private NavigableMap<byte[], List<Path>> getStoreFiles() {
-    NavigableMap<byte[], List<Path>> allStoreFiles =
-      new TreeMap<byte[], List<Path>>(Bytes.BYTES_COMPARATOR);
-    for (Store store: getStores()) {
-      Collection<StoreFile> storeFiles = store.getStorefiles();
-      if (storeFiles == null) continue;
-      List<Path> storeFileNames = new ArrayList<Path>();
-      for (StoreFile storeFile: storeFiles) {
+    NavigableMap<byte[], List<Path>> allStoreFiles = new TreeMap<>(Bytes.BYTES_COMPARATOR);
+    for (HStore store : stores.values()) {
+      Collection<HStoreFile> storeFiles = store.getStorefiles();
+      if (storeFiles == null) {
+        continue;
+      }
+      List<Path> storeFileNames = new ArrayList<>();
+      for (HStoreFile storeFile : storeFiles) {
         storeFileNames.add(storeFile.getPath());
       }
-      allStoreFiles.put(store.getFamily().getName(), storeFileNames);
+      allStoreFiles.put(store.getColumnFamilyDescriptor().getName(), storeFileNames);
     }
     return allStoreFiles;
   }
@@ -1044,10 +1114,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
    * @return True if this region has references.
    */
   public boolean hasReferences() {
-    for (Store store : this.stores.values()) {
-      if (store.hasReferences()) return true;
-    }
-    return false;
+    return stores.values().stream().anyMatch(HStore::hasReferences);
   }
 
   public void blockUpdates() {
@@ -1058,34 +1125,24 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     this.updatesLock.writeLock().unlock();
   }
 
-  @Override
   public HDFSBlocksDistribution getHDFSBlocksDistribution() {
-    HDFSBlocksDistribution hdfsBlocksDistribution =
-      new HDFSBlocksDistribution();
-    synchronized (this.stores) {
-      for (Store store : this.stores.values()) {
-        Collection<StoreFile> storeFiles = store.getStorefiles();
-        if (storeFiles == null) continue;
-        for (StoreFile sf : storeFiles) {
-          HDFSBlocksDistribution storeFileBlocksDistribution =
-            sf.getHDFSBlockDistribution();
-          hdfsBlocksDistribution.add(storeFileBlocksDistribution);
-        }
-      }
-    }
+    HDFSBlocksDistribution hdfsBlocksDistribution = new HDFSBlocksDistribution();
+    stores.values().stream().filter(s -> s.getStorefiles() != null)
+        .flatMap(s -> s.getStorefiles().stream()).map(HStoreFile::getHDFSBlockDistribution)
+        .forEachOrdered(hdfsBlocksDistribution::add);
     return hdfsBlocksDistribution;
   }
 
   /**
    * This is a helper function to compute HDFS block distribution on demand
    * @param conf configuration
-   * @param tableDescriptor HTableDescriptor of the table
+   * @param tableDescriptor TableDescriptor of the table
    * @param regionInfo encoded name of the region
    * @return The HDFS blocks distribution for the given region.
    * @throws IOException
    */
-  public static HDFSBlocksDistribution computeHDFSBlocksDistribution(final Configuration conf,
-      final HTableDescriptor tableDescriptor, final HRegionInfo regionInfo) throws IOException {
+  public static HDFSBlocksDistribution computeHDFSBlocksDistribution(Configuration conf,
+      TableDescriptor tableDescriptor, RegionInfo regionInfo) throws IOException {
     Path tablePath = FSUtils.getTableDir(FSUtils.getRootDir(conf), tableDescriptor.getTableName());
     return computeHDFSBlocksDistribution(conf, tableDescriptor, regionInfo, tablePath);
   }
@@ -1093,27 +1150,41 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
   /**
    * This is a helper function to compute HDFS block distribution on demand
    * @param conf configuration
-   * @param tableDescriptor HTableDescriptor of the table
+   * @param tableDescriptor TableDescriptor of the table
    * @param regionInfo encoded name of the region
    * @param tablePath the table directory
    * @return The HDFS blocks distribution for the given region.
    * @throws IOException
    */
-  public static HDFSBlocksDistribution computeHDFSBlocksDistribution(final Configuration conf,
-      final HTableDescriptor tableDescriptor, final HRegionInfo regionInfo,  Path tablePath)
-      throws IOException {
+  public static HDFSBlocksDistribution computeHDFSBlocksDistribution(Configuration conf,
+      TableDescriptor tableDescriptor, RegionInfo regionInfo, Path tablePath) throws IOException {
     HDFSBlocksDistribution hdfsBlocksDistribution = new HDFSBlocksDistribution();
     FileSystem fs = tablePath.getFileSystem(conf);
 
     HRegionFileSystem regionFs = new HRegionFileSystem(conf, fs, tablePath, regionInfo);
-    for (HColumnDescriptor family: tableDescriptor.getFamilies()) {
-      Collection<StoreFileInfo> storeFiles = regionFs.getStoreFiles(family.getNameAsString());
-      if (storeFiles == null) continue;
-      for (StoreFileInfo storeFileInfo : storeFiles) {
-        try {
-          hdfsBlocksDistribution.add(storeFileInfo.computeHDFSBlocksDistribution(fs));
-        } catch (IOException ioe) {
-          LOG.warn("Error getting hdfs block distribution for " + storeFileInfo);
+    for (ColumnFamilyDescriptor family : tableDescriptor.getColumnFamilies()) {
+      List<LocatedFileStatus> locatedFileStatusList = HRegionFileSystem
+          .getStoreFilesLocatedStatus(regionFs, family.getNameAsString(), true);
+      if (locatedFileStatusList == null) {
+        continue;
+      }
+
+      for (LocatedFileStatus status : locatedFileStatusList) {
+        Path p = status.getPath();
+        if (StoreFileInfo.isReference(p) || HFileLink.isHFileLink(p)) {
+          // Only construct StoreFileInfo object if its not a hfile, save obj
+          // creation
+          StoreFileInfo storeFileInfo = new StoreFileInfo(conf, fs, status);
+          hdfsBlocksDistribution.add(storeFileInfo
+              .computeHDFSBlocksDistribution(fs));
+        } else if (StoreFileInfo.isHFile(p)) {
+          // If its a HFile, then lets just add to the block distribution
+          // lets not create more objects here, not even another HDFSBlocksDistribution
+          FSUtils.addToHDFSBlocksDistribution(hdfsBlocksDistribution,
+              status.getBlockLocations());
+        } else {
+          throw new IOException("path=" + p
+              + " doesn't look like a valid StoreFile");
         }
       }
     }
@@ -1125,24 +1196,24 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
    * store
    * @return the size of memstore in this region
    */
-  public long addAndGetMemstoreSize(MemstoreSize memstoreSize) {
+  public long addAndGetMemStoreSize(MemStoreSize memstoreSize) {
     if (this.rsAccounting != null) {
-      rsAccounting.incGlobalMemstoreSize(memstoreSize);
+      rsAccounting.incGlobalMemStoreSize(memstoreSize);
     }
     long size = this.memstoreDataSize.addAndGet(memstoreSize.getDataSize());
-    checkNegativeMemstoreDataSize(size, memstoreSize.getDataSize());
+    checkNegativeMemStoreDataSize(size, memstoreSize.getDataSize());
     return size;
   }
 
-  public void decrMemstoreSize(MemstoreSize memstoreSize) {
+  public void decrMemStoreSize(MemStoreSize memstoreSize) {
     if (this.rsAccounting != null) {
-      rsAccounting.decGlobalMemstoreSize(memstoreSize);
+      rsAccounting.decGlobalMemStoreSize(memstoreSize);
     }
     long size = this.memstoreDataSize.addAndGet(-memstoreSize.getDataSize());
-    checkNegativeMemstoreDataSize(size, -memstoreSize.getDataSize());
+    checkNegativeMemStoreDataSize(size, -memstoreSize.getDataSize());
   }
 
-  private void checkNegativeMemstoreDataSize(long memstoreDataSize, long delta) {
+  private void checkNegativeMemStoreDataSize(long memstoreDataSize, long delta) {
     // This is extremely bad if we make memstoreSize negative. Log as much info on the offending
     // caller as possible. (memStoreSize might be a negative value already -- freeing memory)
     if (memstoreDataSize < 0) {
@@ -1153,7 +1224,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
   }
 
   @Override
-  public HRegionInfo getRegionInfo() {
+  public RegionInfo getRegionInfo() {
     return this.fs.getRegionInfo();
   }
 
@@ -1171,11 +1242,6 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
   }
 
   @Override
-  public void updateReadRequestsCount(long i) {
-    readRequestsCount.add(i);
-  }
-
-  @Override
   public long getFilteredReadRequestsCount() {
     return filteredReadRequestsCount.sum();
   }
@@ -1186,16 +1252,11 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
   }
 
   @Override
-  public void updateWriteRequestsCount(long i) {
-    writeRequestsCount.add(i);
-  }
-
-  @Override
-  public long getMemstoreSize() {
+  public long getMemStoreSize() {
     return memstoreDataSize.get();
   }
 
-  @Override
+  /** @return store services for this region, to access services required by store level needs */
   public RegionServicesForStores getRegionServicesForStores() {
     return regionServicesForStores;
   }
@@ -1225,7 +1286,9 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     return checkAndMutateChecksFailed.sum();
   }
 
-  @Override
+  // TODO Needs to check whether we should expose our metrics system to CPs. If CPs themselves doing
+  // the op and bypassing the core, this might be needed? Should be stop supporting the bypass
+  // feature?
   public MetricsRegion getMetrics() {
     return metricsRegion;
   }
@@ -1245,85 +1308,25 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     return this.writestate.isReadOnly();
   }
 
-  /**
-   * Reset recovering state of current region
-   */
-  public void setRecovering(boolean newState) {
-    boolean wasRecovering = this.recovering;
-    // Before we flip the recovering switch (enabling reads) we should write the region open
-    // event to WAL if needed
-    if (wal != null && getRegionServerServices() != null && !writestate.readOnly
-        && wasRecovering && !newState) {
-
-      // force a flush only if region replication is set up for this region. Otherwise no need.
-      boolean forceFlush = getTableDesc().getRegionReplication() > 1;
-
-      MonitoredTask status = TaskMonitor.get().createStatus("Recovering region " + this);
-
-      try {
-        // force a flush first
-        if (forceFlush) {
-          status.setStatus("Flushing region " + this + " because recovery is finished");
-          internalFlushcache(status);
-        }
-
-        status.setStatus("Writing region open event marker to WAL because recovery is finished");
-        try {
-          long seqId = openSeqNum;
-          // obtain a new seqId because we possibly have writes and flushes on top of openSeqNum
-          if (wal != null) {
-            seqId = getNextSequenceId(wal);
-          }
-          writeRegionOpenMarker(wal, seqId);
-        } catch (IOException e) {
-          // We cannot rethrow this exception since we are being called from the zk thread. The
-          // region has already opened. In this case we log the error, but continue
-          LOG.warn(getRegionInfo().getEncodedName() + " : was not able to write region opening "
-              + "event to WAL, continuing", e);
-        }
-      } catch (IOException ioe) {
-        // Distributed log replay semantics does not necessarily require a flush, since the replayed
-        // data is already written again in the WAL. So failed flush should be fine.
-        LOG.warn(getRegionInfo().getEncodedName() + " : was not able to flush "
-            + "event to WAL, continuing", ioe);
-      } finally {
-        status.cleanup();
-      }
-    }
-
-    this.recovering = newState;
-    if (wasRecovering && !recovering) {
-      // Call only when wal replay is over.
-      coprocessorHost.postLogReplay();
-    }
-  }
-
-  @Override
-  public boolean isRecovering() {
-    return this.recovering;
-  }
-
   @Override
   public boolean isAvailable() {
     return !isClosed() && !isClosing();
   }
 
-  /** @return true if region is splittable */
+  @Override
   public boolean isSplittable() {
     return isAvailable() && !hasReferences();
   }
 
-  /**
-   * @return true if region is mergeable
-   */
+  @Override
   public boolean isMergeable() {
     if (!isAvailable()) {
-      LOG.debug("Region " + getRegionInfo().getRegionNameAsString()
+      LOG.debug("Region " + this
           + " is not mergeable because it is closing or closed");
       return false;
     }
     if (hasReferences()) {
-      LOG.debug("Region " + getRegionInfo().getRegionNameAsString()
+      LOG.debug("Region " + this
           + " is not mergeable because it has references");
       return false;
     }
@@ -1347,7 +1350,9 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     return maxFlushedSeqId;
   }
 
-  @Override
+  /**
+   * @return readpoint considering given IsolationLevel. Pass {@code null} for default
+   */
   public long getReadPoint(IsolationLevel isolationLevel) {
     if (isolationLevel != null && isolationLevel == IsolationLevel.READ_UNCOMMITTED) {
       // This scan can read even uncommitted transactions
@@ -1356,12 +1361,6 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     return mvcc.getReadPoint();
   }
 
-  @Override
-  public long getReadpoint(IsolationLevel isolationLevel) {
-    return getReadPoint(isolationLevel);
-  }
-
-  @Override
   public boolean isLoadingCfsOnDemandDefault() {
     return this.isLoadingCfsOnDemandDefault;
   }
@@ -1374,7 +1373,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
    * time-sensitive thread.
    *
    * @return Vector of all the storage files that the HRegion's component
-   * HStores make use of.  It's a list of all HStoreFile objects. Returns empty
+   * HStores make use of.  It's a list of all StoreFile objects. Returns empty
    * vector if already closed and null if judged that it should not close.
    *
    * @throws IOException e
@@ -1382,7 +1381,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
    * because a Snapshot was not properly persisted. The region is put in closing mode, and the
    * caller MUST abort after this.
    */
-  public Map<byte[], List<StoreFile>> close() throws IOException {
+  public Map<byte[], List<HStoreFile>> close() throws IOException {
     return close(false);
   }
 
@@ -1415,7 +1414,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
    *
    * @param abort true if server is aborting (only during testing)
    * @return Vector of all the storage files that the HRegion's component
-   * HStores make use of.  It's a list of HStoreFile objects.  Can be null if
+   * HStores make use of.  It's a list of StoreFile objects.  Can be null if
    * we are not to close at this time or we are already closed.
    *
    * @throws IOException e
@@ -1423,7 +1422,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
    * because a Snapshot was not properly persisted. The region is put in closing mode, and the
    * caller MUST abort after this.
    */
-  public Map<byte[], List<StoreFile>> close(final boolean abort) throws IOException {
+  public Map<byte[], List<HStoreFile>> close(boolean abort) throws IOException {
     // Only allow one thread to close at a time. Serialize them so dual
     // threads attempting to close will run up against each other.
     MonitoredTask status = TaskMonitor.get().createStatus(
@@ -1448,9 +1447,20 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     this.closing.set(closing);
   }
 
+  /**
+   * The {@link HRegion#doClose} will block forever if someone tries proving the dead lock via the unit test.
+   * Instead of blocking, the {@link HRegion#doClose} will throw exception if you set the timeout.
+   * @param timeoutForWriteLock the second time to wait for the write lock in {@link HRegion#doClose}
+   */
+  @VisibleForTesting
+  public void setTimeoutForWriteLock(long timeoutForWriteLock) {
+    assert timeoutForWriteLock >= 0;
+    this.timeoutForWriteLock = timeoutForWriteLock;
+  }
+
   @edu.umd.cs.findbugs.annotations.SuppressWarnings(value="UL_UNRELEASED_LOCK_EXCEPTION_PATH",
       justification="I think FindBugs is confused")
-  private Map<byte[], List<StoreFile>> doClose(final boolean abort, MonitoredTask status)
+  private Map<byte[], List<HStoreFile>> doClose(boolean abort, MonitoredTask status)
       throws IOException {
     if (isClosed()) {
       LOG.warn("Region " + this + " already closed");
@@ -1461,7 +1471,6 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
       status.setStatus("Running coprocessor pre-close hooks");
       this.coprocessorHost.preClose(abort);
     }
-
     status.setStatus("Disabling compacts and flushes for region");
     boolean canFlush = true;
     synchronized (writestate) {
@@ -1477,7 +1486,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     // the close flag?
     if (!abort && worthPreFlushing() && canFlush) {
       status.setStatus("Pre-flushing region before close");
-      LOG.info("Running close preflush of " + getRegionInfo().getRegionNameAsString());
+      LOG.info("Running close preflush of " + this);
       try {
         internalFlushcache(status);
       } catch (IOException ioe) {
@@ -1486,8 +1495,20 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
       }
     }
 
-    // block waiting for the lock for closing
-    lock.writeLock().lock(); // FindBugs: Complains UL_UNRELEASED_LOCK_EXCEPTION_PATH but seems fine
+    if (timeoutForWriteLock == null
+        || timeoutForWriteLock == Long.MAX_VALUE) {
+      // block waiting for the lock for closing
+      lock.writeLock().lock(); // FindBugs: Complains UL_UNRELEASED_LOCK_EXCEPTION_PATH but seems fine
+    } else {
+      try {
+        boolean succeed = lock.writeLock().tryLock(timeoutForWriteLock, TimeUnit.SECONDS);
+        if (!succeed) {
+          throw new IOException("Failed to get write lock when closing region");
+        }
+      } catch (InterruptedException e) {
+        throw (InterruptedIOException) new InterruptedIOException().initCause(e);
+      }
+    }
     this.closing.set(true);
     status.setStatus("Disabling writes for close");
     try {
@@ -1534,44 +1555,42 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
         }
       }
 
-      Map<byte[], List<StoreFile>> result =
-        new TreeMap<byte[], List<StoreFile>>(Bytes.BYTES_COMPARATOR);
+      Map<byte[], List<HStoreFile>> result = new TreeMap<>(Bytes.BYTES_COMPARATOR);
       if (!stores.isEmpty()) {
         // initialize the thread pool for closing stores in parallel.
         ThreadPoolExecutor storeCloserThreadPool =
           getStoreOpenAndCloseThreadPool("StoreCloserThread-" +
             getRegionInfo().getRegionNameAsString());
-        CompletionService<Pair<byte[], Collection<StoreFile>>> completionService =
-          new ExecutorCompletionService<Pair<byte[], Collection<StoreFile>>>(storeCloserThreadPool);
+        CompletionService<Pair<byte[], Collection<HStoreFile>>> completionService =
+          new ExecutorCompletionService<>(storeCloserThreadPool);
 
         // close each store in parallel
-        for (final Store store : stores.values()) {
-          MemstoreSize flushableSize = store.getSizeToFlush();
+        for (HStore store : stores.values()) {
+          MemStoreSize flushableSize = store.getFlushableSize();
           if (!(abort || flushableSize.getDataSize() == 0 || writestate.readOnly)) {
             if (getRegionServerServices() != null) {
               getRegionServerServices().abort("Assertion failed while closing store "
                 + getRegionInfo().getRegionNameAsString() + " " + store
                 + ". flushableSize expected=0, actual= " + flushableSize
-                + ". Current memstoreSize=" + getMemstoreSize() + ". Maybe a coprocessor "
+                + ". Current memstoreSize=" + getMemStoreSize() + ". Maybe a coprocessor "
                 + "operation failed and left the memstore in a partially updated state.", null);
             }
           }
           completionService
-              .submit(new Callable<Pair<byte[], Collection<StoreFile>>>() {
+              .submit(new Callable<Pair<byte[], Collection<HStoreFile>>>() {
                 @Override
-                public Pair<byte[], Collection<StoreFile>> call() throws IOException {
-                  return new Pair<byte[], Collection<StoreFile>>(
-                    store.getFamily().getName(), store.close());
+                public Pair<byte[], Collection<HStoreFile>> call() throws IOException {
+                  return new Pair<>(store.getColumnFamilyDescriptor().getName(), store.close());
                 }
               });
         }
         try {
           for (int i = 0; i < stores.size(); i++) {
-            Future<Pair<byte[], Collection<StoreFile>>> future = completionService.take();
-            Pair<byte[], Collection<StoreFile>> storeFiles = future.get();
-            List<StoreFile> familyFiles = result.get(storeFiles.getFirst());
+            Future<Pair<byte[], Collection<HStoreFile>>> future = completionService.take();
+            Pair<byte[], Collection<HStoreFile>> storeFiles = future.get();
+            List<HStoreFile> familyFiles = result.get(storeFiles.getFirst());
             if (familyFiles == null) {
-              familyFiles = new ArrayList<StoreFile>();
+              familyFiles = new ArrayList<>();
               result.put(storeFiles.getFirst(), familyFiles);
             }
             familyFiles.addAll(storeFiles.getSecond());
@@ -1596,7 +1615,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
 
       this.closed.set(true);
       if (!canFlush) {
-        this.decrMemstoreSize(new MemstoreSize(memstoreDataSize.get(), getMemstoreHeapOverhead()));
+        this.decrMemStoreSize(new MemStoreSizing(memstoreDataSize.get(), getMemStoreHeapSize()));
       } else if (memstoreDataSize.get() != 0) {
         LOG.error("Memstore size is " + memstoreDataSize.get());
       }
@@ -1608,11 +1627,8 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
         this.metricsRegion.close();
       }
       if (this.metricsRegionWrapper != null) {
-        Closeables.closeQuietly(this.metricsRegionWrapper);
+        Closeables.close(this.metricsRegionWrapper, true);
       }
-      // stop the Compacted hfile discharger
-      if (this.compactedFileDischarger != null) this.compactedFileDischarger.cancel(true);
-
       status.markComplete("Closed");
       LOG.info("Closed " + this);
       return result;
@@ -1621,15 +1637,13 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     }
   }
 
-  private long getMemstoreHeapOverhead() {
-    long overhead = 0;
-    for (Store s : this.stores.values()) {
-      overhead += s.getSizeOfMemStore().getHeapOverhead();
-    }
-    return overhead;
+  private long getMemStoreHeapSize() {
+    return stores.values().stream().mapToLong(s -> s.getMemStoreSize().getHeapSize()).sum();
   }
 
-  @Override
+  /** Wait for all current flushes and compactions of the region to complete */
+  // TODO HBASE-18906. Check the usage (if any) in Phoenix and expose this or give alternate way for
+  // Phoenix needs.
   public void waitForFlushesAndCompactions() {
     synchronized (writestate) {
       if (this.writestate.readOnly) {
@@ -1648,6 +1662,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
             // essentially ignore and propagate the interrupt back up
             LOG.warn("Interrupted while waiting");
             interrupted = true;
+            break;
           }
         }
       } finally {
@@ -1658,9 +1673,54 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     }
   }
 
+  /**
+   * Wait for all current flushes of the region to complete
+   */
+  public void waitForFlushes() {
+    waitForFlushes(0);// Unbound wait
+  }
+
+  @Override
+  public boolean waitForFlushes(long timeout) {
+    synchronized (writestate) {
+      if (this.writestate.readOnly) {
+        // we should not wait for replayed flushed if we are read only (for example in case the
+        // region is a secondary replica).
+        return true;
+      }
+      if (!writestate.flushing) return true;
+      long start = System.currentTimeMillis();
+      long duration = 0;
+      boolean interrupted = false;
+      LOG.debug("waiting for cache flush to complete for region " + this);
+      try {
+        while (writestate.flushing) {
+          if (timeout > 0 && duration >= timeout) break;
+          try {
+            long toWait = timeout == 0 ? 0 : (timeout - duration);
+            writestate.wait(toWait);
+          } catch (InterruptedException iex) {
+            // essentially ignore and propagate the interrupt back up
+            LOG.warn("Interrupted while waiting");
+            interrupted = true;
+            break;
+          } finally {
+            duration = System.currentTimeMillis() - start;
+          }
+        }
+      } finally {
+        if (interrupted) {
+          Thread.currentThread().interrupt();
+        }
+      }
+      LOG.debug("Waited " + duration + " ms for flush to complete");
+      return !(writestate.flushing);
+    }
+  }
+
   protected ThreadPoolExecutor getStoreOpenAndCloseThreadPool(
       final String threadNamePrefix) {
-    int numStores = Math.max(1, this.htableDescriptor.getFamilies().size());
+    int numStores = Math.max(1, this.htableDescriptor.getColumnFamilyCount());
     int maxThreads = Math.min(numStores,
         conf.getInt(HConstants.HSTORE_OPEN_AND_CLOSE_THREADS_MAX,
             HConstants.DEFAULT_HSTORE_OPEN_AND_CLOSE_THREADS_MAX));
@@ -1669,7 +1729,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
 
   protected ThreadPoolExecutor getStoreFileOpenAndCloseThreadPool(
       final String threadNamePrefix) {
-    int numStores = Math.max(1, this.htableDescriptor.getFamilies().size());
+    int numStores = Math.max(1, this.htableDescriptor.getColumnFamilyCount());
     int maxThreads = Math.max(1,
         conf.getInt(HConstants.HSTORE_OPEN_AND_CLOSE_THREADS_MAX,
             HConstants.DEFAULT_HSTORE_OPEN_AND_CLOSE_THREADS_MAX)
@@ -1703,8 +1763,13 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
   //////////////////////////////////////////////////////////////////////////////
 
   @Override
-  public HTableDescriptor getTableDesc() {
+  public TableDescriptor getTableDescriptor() {
     return this.htableDescriptor;
+  }
+
+  @VisibleForTesting
+  void setTableDescriptor(TableDescriptor desc) {
+    htableDescriptor = desc;
   }
 
   /** @return WAL in use for this region */
@@ -1748,17 +1813,25 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
   @Override
   public long getOldestHfileTs(boolean majorCompactionOnly) throws IOException {
     long result = Long.MAX_VALUE;
-    for (Store store : getStores()) {
-      Collection<StoreFile> storeFiles = store.getStorefiles();
-      if (storeFiles == null) continue;
-      for (StoreFile file : storeFiles) {
+    for (HStore store : stores.values()) {
+      Collection<HStoreFile> storeFiles = store.getStorefiles();
+      if (storeFiles == null) {
+        continue;
+      }
+      for (HStoreFile file : storeFiles) {
         StoreFileReader sfReader = file.getReader();
-        if (sfReader == null) continue;
+        if (sfReader == null) {
+          continue;
+        }
         HFile.Reader reader = sfReader.getHFileReader();
-        if (reader == null) continue;
+        if (reader == null) {
+          continue;
+        }
         if (majorCompactionOnly) {
-          byte[] val = reader.loadFileInfo().get(StoreFile.MAJOR_COMPACTION_KEY);
-          if (val == null || !Bytes.toBoolean(val)) continue;
+          byte[] val = reader.loadFileInfo().get(MAJOR_COMPACTION_KEY);
+          if (val == null || !Bytes.toBoolean(val)) {
+            continue;
+          }
         }
         result = Math.min(result, reader.getFileContext().getFileCreateTime());
       }
@@ -1771,7 +1844,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     byte[] encodedRegionName = this.getRegionInfo().getEncodedNameAsBytes();
     regionLoadBldr.clearStoreCompleteSequenceId();
     for (byte[] familyName : this.stores.keySet()) {
-      long earliest = this.wal.getEarliestMemstoreSeqNum(encodedRegionName, familyName);
+      long earliest = this.wal.getEarliestMemStoreSeqNum(encodedRegionName, familyName);
       // Subtract - 1 to go earlier than the current oldest, unflushed edit in memstore; this will
       // give us a sequence id that is for sure flushed. We want edit replay to start after this
       // sequence id in this region. If NO_SEQNUM, use the regions maximum flush id.
@@ -1788,41 +1861,33 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
   // These methods are meant to be called periodically by the HRegionServer for
   // upkeep.
   //////////////////////////////////////////////////////////////////////////////
-
-  /** @return returns size of largest HStore. */
-  public long getLargestHStoreSize() {
-    long size = 0;
-    for (Store h : stores.values()) {
-      long storeSize = h.getSize();
-      if (storeSize > size) {
-        size = storeSize;
-      }
-    }
-    return size;
-  }
-
-  /*
+  /**
    * Do preparation for pending compaction.
    * @throws IOException
    */
   protected void doRegionCompactionPrep() throws IOException {
   }
 
-  @Override
-  public void triggerMajorCompaction() throws IOException {
-    for (Store s : getStores()) {
-      s.triggerMajorCompaction();
-    }
-  }
-
-  @Override
-  public void compact(final boolean majorCompaction) throws IOException {
+  /**
+   * Synchronously compact all stores in the region.
+   * <p>This operation could block for a long time, so don't call it from a
+   * time-sensitive thread.
+   * <p>Note that no locks are taken to prevent possible conflicts between
+   * compaction and splitting activities. The regionserver does not normally compact
+   * and split in parallel. However by calling this method you may introduce
+   * unexpected and unhandled concurrency. Don't do this unless you know what
+   * you are doing.
+   *
+   * @param majorCompaction True to force a major compaction regardless of thresholds
+   * @throws IOException
+   */
+  public void compact(boolean majorCompaction) throws IOException {
     if (majorCompaction) {
-      triggerMajorCompaction();
+      stores.values().forEach(HStore::triggerMajorCompaction);
     }
-    for (Store s : getStores()) {
-      CompactionContext compaction = s.requestCompaction();
-      if (compaction != null) {
+    for (HStore s : stores.values()) {
+      Optional<CompactionContext> compaction = s.requestCompaction();
+      if (compaction.isPresent()) {
         ThroughputController controller = null;
         if (rsServices != null) {
           controller = CompactionThroughputControllerFactory.create(rsServices, conf);
@@ -1830,43 +1895,41 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
         if (controller == null) {
           controller = NoLimitThroughputController.INSTANCE;
         }
-        compact(compaction, s, controller, null);
+        compact(compaction.get(), s, controller, null);
       }
     }
   }
 
   /**
-   * This is a helper function that compact all the stores synchronously
+   * This is a helper function that compact all the stores synchronously.
+   * <p>
    * It is used by utilities and testing
-   *
-   * @throws IOException e
-   */
-  public void compactStores() throws IOException {
-    for (Store s : getStores()) {
-      CompactionContext compaction = s.requestCompaction();
-      if (compaction != null) {
-        compact(compaction, s, NoLimitThroughputController.INSTANCE, null);
-      }
-    }
-  }
-
-  /**
-   * This is a helper function that compact the given store
-   * It is used by utilities and testing
-   *
-   * @throws IOException e
    */
   @VisibleForTesting
-  void compactStore(byte[] family, ThroughputController throughputController)
-      throws IOException {
-    Store s = getStore(family);
-    CompactionContext compaction = s.requestCompaction();
-    if (compaction != null) {
-      compact(compaction, s, throughputController, null);
+  public void compactStores() throws IOException {
+    for (HStore s : stores.values()) {
+      Optional<CompactionContext> compaction = s.requestCompaction();
+      if (compaction.isPresent()) {
+        compact(compaction.get(), s, NoLimitThroughputController.INSTANCE, null);
+      }
     }
   }
 
-  /*
+  /**
+   * This is a helper function that compact the given store.
+   * <p>
+   * It is used by utilities and testing
+   */
+  @VisibleForTesting
+  void compactStore(byte[] family, ThroughputController throughputController) throws IOException {
+    HStore s = getStore(family);
+    Optional<CompactionContext> compaction = s.requestCompaction();
+    if (compaction.isPresent()) {
+      compact(compaction.get(), s, throughputController, null);
+    }
+  }
+
+  /**
    * Called by compaction thread and after region is opened to compact the
    * HStores if necessary.
    *
@@ -1881,12 +1944,12 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
    * @param throughputController
    * @return whether the compaction completed
    */
-  public boolean compact(CompactionContext compaction, Store store,
+  public boolean compact(CompactionContext compaction, HStore store,
       ThroughputController throughputController) throws IOException {
     return compact(compaction, store, throughputController, null);
   }
 
-  public boolean compact(CompactionContext compaction, Store store,
+  public boolean compact(CompactionContext compaction, HStore store,
       ThroughputController throughputController, User user) throws IOException {
     assert compaction != null && compaction.hasSelection();
     assert !compaction.getRequest().getFiles().isEmpty();
@@ -2033,9 +2096,49 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     }
   }
 
-  @Override
+  /**
+   * Flush the cache.
+   *
+   * <p>When this method is called the cache will be flushed unless:
+   * <ol>
+   *   <li>the cache is empty</li>
+   *   <li>the region is closed.</li>
+   *   <li>a flush is already in progress</li>
+   *   <li>writes are disabled</li>
+   * </ol>
+   *
+   * <p>This method may block for some time, so it should not be called from a
+   * time-sensitive thread.
+   * @param force whether we want to force a flush of all stores
+   * @return FlushResult indicating whether the flush was successful or not and if
+   * the region needs compacting
+   *
+   * @throws IOException general io exceptions
+   * because a snapshot was not properly persisted.
+   */
+  // TODO HBASE-18905. We might have to expose a requestFlush API for CPs
   public FlushResult flush(boolean force) throws IOException {
-    return flushcache(force, false);
+    return flushcache(force, false, FlushLifeCycleTracker.DUMMY);
+  }
+
+  public interface FlushResult {
+    enum Result {
+      FLUSHED_NO_COMPACTION_NEEDED,
+      FLUSHED_COMPACTION_NEEDED,
+      // Special case where a flush didn't run because there's nothing in the memstores. Used when
+      // bulk loading to know when we can still load even if a flush didn't happen.
+      CANNOT_FLUSH_MEMSTORE_EMPTY,
+      CANNOT_FLUSH
+    }
+
+    /** @return the detailed result code */
+    Result getResult();
+
+    /** @return true if the memstores were flushed, else false */
+    boolean isFlushSucceeded();
+
+    /** @return True if the flush requested a compaction, else false */
+    boolean isCompactionNeeded();
   }
 
   /**
@@ -2053,6 +2156,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
    * time-sensitive thread.
    * @param forceFlushAllStores whether we want to flush all stores
    * @param writeFlushRequestWalMarker whether to write the flush request marker to WAL
+   * @param tracker used to track the life cycle of this flush
    * @return whether the flush is success and whether the region needs compacting
    *
    * @throws IOException general io exceptions
@@ -2060,8 +2164,8 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
    * because a Snapshot was not properly persisted. The region is put in closing mode, and the
    * caller MUST abort after this.
    */
-  public FlushResult flushcache(boolean forceFlushAllStores, boolean writeFlushRequestWalMarker)
-      throws IOException {
+  public FlushResultImpl flushcache(boolean forceFlushAllStores, boolean writeFlushRequestWalMarker,
+      FlushLifeCycleTracker tracker) throws IOException {
     // fail-fast instead of waiting on the lock
     if (this.closing.get()) {
       String msg = "Skipping flush on " + this + " because closing";
@@ -2081,7 +2185,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
       }
       if (coprocessorHost != null) {
         status.setStatus("Running coprocessor pre-flush hooks");
-        coprocessorHost.preFlush();
+        coprocessorHost.preFlush(tracker);
       }
       // TODO: this should be managed within memstore with the snapshot, updated only after flush
       // successful
@@ -2107,14 +2211,18 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
       }
 
       try {
-        Collection<Store> specificStoresToFlush =
+        Collection<HStore> specificStoresToFlush =
             forceFlushAllStores ? stores.values() : flushPolicy.selectStoresToFlush();
-        FlushResult fs = internalFlushcache(specificStoresToFlush,
-          status, writeFlushRequestWalMarker);
+        FlushResultImpl fs =
+            internalFlushcache(specificStoresToFlush, status, writeFlushRequestWalMarker, tracker);
 
         if (coprocessorHost != null) {
           status.setStatus("Running post-flush coprocessor hooks");
-          coprocessorHost.postFlush();
+          coprocessorHost.postFlush(tracker);
+        }
+
+        if(fs.isFlushSucceeded()) {
+          flushesQueued.reset();
         }
 
         status.markComplete("Flush successful");
@@ -2139,9 +2247,9 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
    * that you always flush all stores). Otherwise the method will always
    * returns true which will make a lot of flush requests.
    */
-  boolean shouldFlushStore(Store store) {
-    long earliest = this.wal.getEarliestMemstoreSeqNum(getRegionInfo().getEncodedNameAsBytes(),
-      store.getFamily().getName()) - 1;
+  boolean shouldFlushStore(HStore store) {
+    long earliest = this.wal.getEarliestMemStoreSeqNum(getRegionInfo().getEncodedNameAsBytes(),
+      store.getColumnFamilyDescriptor().getName()) - 1;
     if (earliest > 0 && earliest + flushPerChanges < mvcc.getReadPoint()) {
       if (LOG.isDebugEnabled()) {
         LOG.debug("Flush column family " + store.getColumnFamilyName() + " of " +
@@ -2168,7 +2276,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
   /**
    * Should the memstore be flushed now
    */
-  boolean shouldFlush(final StringBuffer whyFlush) {
+  boolean shouldFlush(final StringBuilder whyFlush) {
     whyFlush.setLength(0);
     // This is a rough measure.
     if (this.maxFlushedSeqId > 0
@@ -2177,8 +2285,8 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
       return true;
     }
     long modifiedFlushCheckInterval = flushCheckInterval;
-    if (getRegionInfo().isSystemTable() &&
-        getRegionInfo().getReplicaId() == HRegionInfo.DEFAULT_REPLICA_ID) {
+    if (getRegionInfo().getTable().isSystemTable() &&
+        getRegionInfo().getReplicaId() == RegionInfo.DEFAULT_REPLICA_ID) {
       modifiedFlushCheckInterval = SYSTEM_CACHE_FLUSH_INTERVAL;
     }
     if (modifiedFlushCheckInterval <= 0) { //disabled
@@ -2191,7 +2299,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     }
     //since we didn't flush in the recent past, flush now if certain conditions
     //are met. Return true on first such memstore hit.
-    for (Store s : getStores()) {
+    for (HStore s : stores.values()) {
       if (s.timeOfOldestEdit() < now - modifiedFlushCheckInterval) {
         // we have an old enough edit in the memstore, flush
         whyFlush.append(s.toString() + " has an old edit so flush to free WALs");
@@ -2203,39 +2311,33 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
 
   /**
    * Flushing all stores.
-   *
-   * @see #internalFlushcache(Collection, MonitoredTask, boolean)
+   * @see #internalFlushcache(Collection, MonitoredTask, boolean, FlushLifeCycleTracker)
    */
-  private FlushResult internalFlushcache(MonitoredTask status)
-      throws IOException {
-    return internalFlushcache(stores.values(), status, false);
+  private FlushResult internalFlushcache(MonitoredTask status) throws IOException {
+    return internalFlushcache(stores.values(), status, false, FlushLifeCycleTracker.DUMMY);
   }
 
   /**
    * Flushing given stores.
-   *
-   * @see #internalFlushcache(WAL, long, Collection, MonitoredTask, boolean)
+   * @see #internalFlushcache(WAL, long, Collection, MonitoredTask, boolean, FlushLifeCycleTracker)
    */
-  private FlushResult internalFlushcache(final Collection<Store> storesToFlush,
-      MonitoredTask status, boolean writeFlushWalMarker) throws IOException {
-    return internalFlushcache(this.wal, HConstants.NO_SEQNUM, storesToFlush,
-        status, writeFlushWalMarker);
+  private FlushResultImpl internalFlushcache(Collection<HStore> storesToFlush, MonitoredTask status,
+      boolean writeFlushWalMarker, FlushLifeCycleTracker tracker) throws IOException {
+    return internalFlushcache(this.wal, HConstants.NO_SEQNUM, storesToFlush, status,
+      writeFlushWalMarker, tracker);
   }
 
   /**
-   * Flush the memstore. Flushing the memstore is a little tricky. We have a lot
-   * of updates in the memstore, all of which have also been written to the wal.
-   * We need to write those updates in the memstore out to disk, while being
-   * able to process reads/writes as much as possible during the flush
-   * operation.
+   * Flush the memstore. Flushing the memstore is a little tricky. We have a lot of updates in the
+   * memstore, all of which have also been written to the wal. We need to write those updates in the
+   * memstore out to disk, while being able to process reads/writes as much as possible during the
+   * flush operation.
    * <p>
-   * This method may block for some time. Every time you call it, we up the
-   * regions sequence id even if we don't flush; i.e. the returned region id
-   * will be at least one larger than the last edit applied to this region. The
-   * returned id does not refer to an actual edit. The returned id can be used
-   * for say installing a bulk loaded file just ahead of the last hfile that was
-   * the result of this flush, etc.
-   *
+   * This method may block for some time. Every time you call it, we up the regions sequence id even
+   * if we don't flush; i.e. the returned region id will be at least one larger than the last edit
+   * applied to this region. The returned id does not refer to an actual edit. The returned id can
+   * be used for say installing a bulk loaded file just ahead of the last hfile that was the result
+   * of this flush, etc.
    * @param wal Null if we're NOT to go via wal.
    * @param myseqid The seqid to use if <code>wal</code> is null writing out flush file.
    * @param storesToFlush The list of stores to flush.
@@ -2243,11 +2345,11 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
    * @throws IOException general io exceptions
    * @throws DroppedSnapshotException Thrown when replay of WAL is required.
    */
-  protected FlushResult internalFlushcache(final WAL wal, final long myseqid,
-      final Collection<Store> storesToFlush, MonitoredTask status, boolean writeFlushWalMarker)
-          throws IOException {
-    PrepareFlushResult result
-      = internalPrepareFlushCache(wal, myseqid, storesToFlush, status, writeFlushWalMarker);
+  protected FlushResultImpl internalFlushcache(WAL wal, long myseqid,
+      Collection<HStore> storesToFlush, MonitoredTask status, boolean writeFlushWalMarker,
+      FlushLifeCycleTracker tracker) throws IOException {
+    PrepareFlushResult result =
+        internalPrepareFlushCache(wal, myseqid, storesToFlush, status, writeFlushWalMarker, tracker);
     if (result.result == null) {
       return internalFlushCacheAndCommit(wal, status, result, storesToFlush);
     } else {
@@ -2257,9 +2359,9 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
 
   @edu.umd.cs.findbugs.annotations.SuppressWarnings(value="DLS_DEAD_LOCAL_STORE",
       justification="FindBugs seems confused about trxId")
-  protected PrepareFlushResult internalPrepareFlushCache(final WAL wal, final long myseqid,
-      final Collection<Store> storesToFlush, MonitoredTask status, boolean writeFlushWalMarker)
-  throws IOException {
+  protected PrepareFlushResult internalPrepareFlushCache(WAL wal, long myseqid,
+      Collection<HStore> storesToFlush, MonitoredTask status, boolean writeFlushWalMarker,
+      FlushLifeCycleTracker tracker) throws IOException {
     if (this.rsServices != null && this.rsServices.isAborted()) {
       // Don't flush when server aborting, it's unsafe
       throw new IOException("Aborting flush because server is aborted...");
@@ -2281,13 +2383,12 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
           // edits in the WAL sub-system. Up the sequence number so the resulting flush id is for
           // sure just beyond the last appended region edit and not associated with any edit
           // (useful as marker when bulk loading, etc.).
-          FlushResult flushResult = null;
           if (wal != null) {
             writeEntry = mvcc.begin();
             long flushOpSeqId = writeEntry.getWriteNumber();
-            flushResult = new FlushResultImpl(FlushResult.Result.CANNOT_FLUSH_MEMSTORE_EMPTY,
-              flushOpSeqId, "Nothing to flush",
-            writeFlushRequestMarkerToWAL(wal, writeFlushWalMarker));
+            FlushResultImpl flushResult =
+                new FlushResultImpl(FlushResult.Result.CANNOT_FLUSH_MEMSTORE_EMPTY, flushOpSeqId,
+                    "Nothing to flush", writeFlushRequestMarkerToWAL(wal, writeFlushWalMarker));
             mvcc.completeAndWait(writeEntry);
             // Set to null so we don't complete it again down in finally block.
             writeEntry = null;
@@ -2318,19 +2419,17 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     // block waiting for the lock for internal flush
     this.updatesLock.writeLock().lock();
     status.setStatus("Preparing flush snapshotting stores in " + getRegionInfo().getEncodedName());
-    MemstoreSize totalSizeOfFlushableStores = new MemstoreSize();
+    MemStoreSizing totalSizeOfFlushableStores = new MemStoreSizing();
 
-    Set<byte[]> flushedFamilyNames = new HashSet<byte[]>();
-    for (Store store: storesToFlush) {
-      flushedFamilyNames.add(store.getFamily().getName());
+    Map<byte[], Long> flushedFamilyNamesToSeq = new HashMap<>();
+    for (HStore store : storesToFlush) {
+      flushedFamilyNamesToSeq.put(store.getColumnFamilyDescriptor().getName(),
+        store.preFlushSeqIDEstimation());
     }
 
-    TreeMap<byte[], StoreFlushContext> storeFlushCtxs
-      = new TreeMap<byte[], StoreFlushContext>(Bytes.BYTES_COMPARATOR);
-    TreeMap<byte[], List<Path>> committedFiles = new TreeMap<byte[], List<Path>>(
-        Bytes.BYTES_COMPARATOR);
-    TreeMap<byte[], MemstoreSize> storeFlushableSize
-        = new TreeMap<byte[], MemstoreSize>(Bytes.BYTES_COMPARATOR);
+    TreeMap<byte[], StoreFlushContext> storeFlushCtxs = new TreeMap<>(Bytes.BYTES_COMPARATOR);
+    TreeMap<byte[], List<Path>> committedFiles = new TreeMap<>(Bytes.BYTES_COMPARATOR);
+    TreeMap<byte[], MemStoreSize> storeFlushableSize = new TreeMap<>(Bytes.BYTES_COMPARATOR);
     // The sequence id of this flush operation which is used to log FlushMarker and pass to
     // createFlushContext to use as the store file's sequence id. It can be in advance of edits
     // still in the memstore, edits that are in other column families yet to be flushed.
@@ -2342,7 +2441,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     try {
       if (wal != null) {
         Long earliestUnflushedSequenceIdForTheRegion =
-            wal.startCacheFlush(encodedRegionName, flushedFamilyNames);
+            wal.startCacheFlush(encodedRegionName, flushedFamilyNamesToSeq);
         if (earliestUnflushedSequenceIdForTheRegion == null) {
           // This should never happen. This is how startCacheFlush signals flush cannot proceed.
           String msg = this.getRegionInfo().getEncodedName() + " flush aborted; WAL closing.";
@@ -2361,12 +2460,11 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
         flushedSeqId = flushOpSeqId = myseqid;
       }
 
-      for (Store s : storesToFlush) {
-        MemstoreSize flushableSize = s.getSizeToFlush();
-        totalSizeOfFlushableStores.incMemstoreSize(flushableSize);
-        storeFlushCtxs.put(s.getFamily().getName(), s.createFlushContext(flushOpSeqId));
-        committedFiles.put(s.getFamily().getName(), null); // for writing stores to WAL
-        storeFlushableSize.put(s.getFamily().getName(), flushableSize);
+      for (HStore s : storesToFlush) {
+        storeFlushCtxs.put(s.getColumnFamilyDescriptor().getName(),
+          s.createFlushContext(flushOpSeqId, tracker));
+        // for writing stores to WAL
+        committedFiles.put(s.getColumnFamilyDescriptor().getName(), null);
       }
 
       // write the snapshot start to WAL
@@ -2379,9 +2477,11 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
       }
 
       // Prepare flush (take a snapshot)
-      for (StoreFlushContext flush : storeFlushCtxs.values()) {
-        flush.prepare();
-      }
+      storeFlushCtxs.forEach((name, flush) -> {
+        MemStoreSize snapshotSize = flush.prepare();
+        totalSizeOfFlushableStores.incMemStoreSize(snapshotSize);
+        storeFlushableSize.put(name, snapshotSize);
+      });
     } catch (IOException ex) {
       doAbortFlushToWAL(wal, flushOpSeqId, committedFiles);
       throw ex;
@@ -2399,7 +2499,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
   /**
    * Utility method broken out of internalPrepareFlushCache so that method is smaller.
    */
-  private void logFatLineOnFlush(final Collection<Store> storesToFlush, final long sequenceId) {
+  private void logFatLineOnFlush(Collection<HStore> storesToFlush, long sequenceId) {
     if (!LOG.isInfoEnabled()) {
       return;
     }
@@ -2407,10 +2507,10 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     StringBuilder perCfExtras = null;
     if (!isAllFamilies(storesToFlush)) {
       perCfExtras = new StringBuilder();
-      for (Store store: storesToFlush) {
+      for (HStore store: storesToFlush) {
         perCfExtras.append("; ").append(store.getColumnFamilyName());
         perCfExtras.append("=")
-            .append(StringUtils.byteDesc(store.getSizeToFlush().getDataSize()));
+            .append(StringUtils.byteDesc(store.getFlushableSize().getDataSize()));
       }
     }
     LOG.info("Flushing " + + storesToFlush.size() + "/" + stores.size() +
@@ -2439,7 +2539,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
   /**
    * Sync unflushed WAL changes. See HBASE-8208 for details
    */
-  private static void doSyncOfUnflushedWALChanges(final WAL wal, final HRegionInfo hri)
+  private static void doSyncOfUnflushedWALChanges(final WAL wal, final RegionInfo hri)
   throws IOException {
     if (wal == null) {
       return;
@@ -2455,7 +2555,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
   /**
    * @return True if passed Set is all families in the region.
    */
-  private boolean isAllFamilies(final Collection<Store> families) {
+  private boolean isAllFamilies(Collection<HStore> families) {
     return families == null || this.stores.size() == families.size();
   }
 
@@ -2468,7 +2568,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
   private boolean writeFlushRequestMarkerToWAL(WAL wal, boolean writeFlushWalMarker) {
     if (writeFlushWalMarker && wal != null && !writestate.readOnly) {
       FlushDescriptor desc = ProtobufUtil.toFlushDescriptor(FlushAction.CANNOT_FLUSH,
-        getRegionInfo(), -1, new TreeMap<byte[], List<Path>>(Bytes.BYTES_COMPARATOR));
+        getRegionInfo(), -1, new TreeMap<>(Bytes.BYTES_COMPARATOR));
       try {
         WALUtil.writeFlushMarker(wal, this.getReplicationScope(), getRegionInfo(), desc, true,
             mvcc);
@@ -2483,11 +2583,8 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
 
   @edu.umd.cs.findbugs.annotations.SuppressWarnings(value="NN_NAKED_NOTIFY",
       justification="Intentional; notify is about completed flush")
-  protected FlushResult internalFlushCacheAndCommit(
-        final WAL wal, MonitoredTask status, final PrepareFlushResult prepareResult,
-        final Collection<Store> storesToFlush)
-    throws IOException {
-
+  protected FlushResultImpl internalFlushCacheAndCommit(WAL wal, MonitoredTask status,
+      PrepareFlushResult prepareResult, Collection<HStore> storesToFlush) throws IOException {
     // prepare flush context is carried via PrepareFlushResult
     TreeMap<byte[], StoreFlushContext> storeFlushCtxs = prepareResult.storeFlushCtxs;
     TreeMap<byte[], List<Path>> committedFiles = prepareResult.committedFiles;
@@ -2517,27 +2614,27 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
 
       // Switch snapshot (in memstore) -> new hfile (thus causing
       // all the store scanners to reset/reseek).
-      Iterator<Store> it = storesToFlush.iterator();
+      Iterator<HStore> it = storesToFlush.iterator();
       // stores.values() and storeFlushCtxs have same order
       for (StoreFlushContext flush : storeFlushCtxs.values()) {
         boolean needsCompaction = flush.commit(status);
         if (needsCompaction) {
           compactionRequested = true;
         }
-        byte[] storeName = it.next().getFamily().getName();
+        byte[] storeName = it.next().getColumnFamilyDescriptor().getName();
         List<Path> storeCommittedFiles = flush.getCommittedFiles();
         committedFiles.put(storeName, storeCommittedFiles);
         // Flush committed no files, indicating flush is empty or flush was canceled
         if (storeCommittedFiles == null || storeCommittedFiles.isEmpty()) {
-          MemstoreSize storeFlushableSize = prepareResult.storeFlushableSize.get(storeName);
-          prepareResult.totalFlushableSize.decMemstoreSize(storeFlushableSize);
+          MemStoreSize storeFlushableSize = prepareResult.storeFlushableSize.get(storeName);
+          prepareResult.totalFlushableSize.decMemStoreSize(storeFlushableSize);
         }
         flushedOutputFileSize += flush.getOutputFileSize();
       }
       storeFlushCtxs.clear();
 
       // Set down the memstore size by amount of flush.
-      this.decrMemstoreSize(prepareResult.totalFlushableSize);
+      this.decrMemStoreSize(prepareResult.totalFlushableSize);
 
       if (wal != null) {
         // write flush marker to WAL. If fail, we should throw DroppedSnapshotException
@@ -2585,15 +2682,12 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     }
 
     // If we get to here, the HStores have been written.
-    for(Store storeToFlush :storesToFlush) {
-      ((HStore) storeToFlush).finalizeFlush();
-    }
     if (wal != null) {
       wal.completeCacheFlush(this.getRegionInfo().getEncodedNameAsBytes());
     }
 
     // Record latest flush time
-    for (Store store: storesToFlush) {
+    for (HStore store: storesToFlush) {
       this.lastStoreFlushTimeMap.put(store, startTime);
     }
 
@@ -2645,24 +2739,24 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
   //////////////////////////////////////////////////////////////////////////////
 
   @Override
-  public RegionScanner getScanner(Scan scan) throws IOException {
+  public RegionScannerImpl getScanner(Scan scan) throws IOException {
    return getScanner(scan, null);
   }
 
   @Override
-  public RegionScanner getScanner(Scan scan, List<KeyValueScanner> additionalScanners)
+  public RegionScannerImpl getScanner(Scan scan, List<KeyValueScanner> additionalScanners)
       throws IOException {
     return getScanner(scan, additionalScanners, HConstants.NO_NONCE, HConstants.NO_NONCE);
   }
 
-  private RegionScanner getScanner(Scan scan, List<KeyValueScanner> additionalScanners,
+  private RegionScannerImpl getScanner(Scan scan, List<KeyValueScanner> additionalScanners,
       long nonceGroup, long nonce) throws IOException {
     startRegionOperation(Operation.SCAN);
     try {
       // Verify families are all valid
       if (!scan.hasFamilies()) {
         // Adding all families to scanner
-        for (byte[] family : this.htableDescriptor.getFamiliesKeys()) {
+        for (byte[] family : this.htableDescriptor.getColumnFamilyNames()) {
           scan.addFamily(family);
         }
       } else {
@@ -2682,7 +2776,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
       HConstants.NO_NONCE);
   }
 
-  protected RegionScanner instantiateRegionScanner(Scan scan,
+  protected RegionScannerImpl instantiateRegionScanner(Scan scan,
       List<KeyValueScanner> additionalScanners, long nonceGroup, long nonce) throws IOException {
     if (scan.isReversed()) {
       if (scan.getFilter() != null) {
@@ -2693,11 +2787,15 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     return new RegionScannerImpl(scan, additionalScanners, this, nonceGroup, nonce);
   }
 
-  @Override
+  /**
+   * Prepare a delete for a row mutation processor
+   * @param delete The passed delete is modified by this method. WARNING!
+   * @throws IOException
+   */
   public void prepareDelete(Delete delete) throws IOException {
     // Check to see if this is a deleteRow insert
     if(delete.getFamilyCellMap().isEmpty()){
-      for(byte [] family : this.htableDescriptor.getFamiliesKeys()){
+      for(byte [] family : this.htableDescriptor.getColumnFamilyNames()){
         // Don't eat the timestamp
         delete.addFamily(family, delete.getTimeStamp());
       }
@@ -2717,7 +2815,6 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     checkResources();
     startRegionOperation(Operation.DELETE);
     try {
-      delete.getRow();
       // All edits for the given row (across all column families) must happen atomically.
       doBatchMutate(delete);
     } finally {
@@ -2743,7 +2840,14 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     doBatchMutate(delete);
   }
 
-  @Override
+  /**
+   * Set up correct timestamps in the KVs in Delete object.
+   * <p>Caller should have the row and region locks.
+   * @param mutation
+   * @param familyMap
+   * @param byteNow
+   * @throws IOException
+   */
   public void prepareDeleteTimestamps(Mutation mutation, Map<byte[], List<Cell>> familyMap,
       byte[] byteNow) throws IOException {
     for (Map.Entry<byte[], List<Cell>> e : familyMap.entrySet()) {
@@ -2752,15 +2856,15 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
       List<Cell> cells = e.getValue();
       assert cells instanceof RandomAccess;
 
-      Map<byte[], Integer> kvCount = new TreeMap<byte[], Integer>(Bytes.BYTES_COMPARATOR);
+      Map<byte[], Integer> kvCount = new TreeMap<>(Bytes.BYTES_COMPARATOR);
       int listSize = cells.size();
       for (int i=0; i < listSize; i++) {
         Cell cell = cells.get(i);
         //  Check if time is LATEST, change to time of most recent addition if so
         //  This is expensive.
-        if (cell.getTimestamp() == HConstants.LATEST_TIMESTAMP && CellUtil.isDeleteType(cell)) {
+        if (cell.getTimestamp() == HConstants.LATEST_TIMESTAMP
+            && PrivateCellUtil.isDeleteType(cell)) {
           byte[] qual = CellUtil.cloneQualifier(cell);
-          if (qual == null) qual = HConstants.EMPTY_BYTE_ARRAY;
 
           Integer count = kvCount.get(qual);
           if (count == null) {
@@ -2782,7 +2886,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
             updateDeleteLatestVersionTimeStamp(cell, get, count, byteNow);
           }
         } else {
-          CellUtil.updateLatestStamp(cell, byteNow, 0);
+          PrivateCellUtil.updateLatestStamp(cell, byteNow);
         }
       }
     }
@@ -2794,14 +2898,14 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
 
     if (result.size() < count) {
       // Nothing to delete
-      CellUtil.updateLatestStamp(cell, byteNow, 0);
+      PrivateCellUtil.updateLatestStamp(cell, byteNow);
       return;
     }
     if (result.size() > count) {
       throw new RuntimeException("Unexpected size: " + result.size());
     }
     Cell getCell = result.get(count - 1);
-    CellUtil.setTimestamp(cell, getCell.getTimestamp());
+    PrivateCellUtil.setTimestamp(cell, getCell.getTimestamp());
   }
 
   @Override
@@ -2823,41 +2927,392 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
   }
 
   /**
-   * Struct-like class that tracks the progress of a batch operation,
-   * accumulating status codes and tracking the index at which processing
-   * is proceeding.
+   * Class that tracks the progress of a batch operations, accumulating status codes and tracking
+   * the index at which processing is proceeding. These batch operations may get split into
+   * mini-batches for processing.
    */
   private abstract static class BatchOperation<T> {
-    T[] operations;
-    int nextIndexToProcess = 0;
-    OperationStatus[] retCodeDetails;
-    WALEdit[] walEditsFromCoprocessors;
+    protected final T[] operations;
+    protected final OperationStatus[] retCodeDetails;
+    protected final WALEdit[] walEditsFromCoprocessors;
+    // reference family cell maps directly so coprocessors can mutate them if desired
+    protected final Map<byte[], List<Cell>>[] familyCellMaps;
 
-    public BatchOperation(T[] operations) {
+    protected final HRegion region;
+    protected int nextIndexToProcess = 0;
+    protected final ObservedExceptionsInBatch observedExceptions;
+    //Durability of the batch (highest durability of all operations)
+    protected Durability durability;
+    protected boolean atomic = false;
+
+    public BatchOperation(final HRegion region, T[] operations) {
       this.operations = operations;
       this.retCodeDetails = new OperationStatus[operations.length];
-      this.walEditsFromCoprocessors = new WALEdit[operations.length];
       Arrays.fill(this.retCodeDetails, OperationStatus.NOT_RUN);
+      this.walEditsFromCoprocessors = new WALEdit[operations.length];
+      familyCellMaps = new Map[operations.length];
+
+      this.region = region;
+      observedExceptions = new ObservedExceptionsInBatch();
+      durability = Durability.USE_DEFAULT;
+    }
+
+    /**
+     * Visitor interface for batch operations
+     */
+    @FunctionalInterface
+    public interface Visitor {
+      /**
+       * @param index operation index
+       * @return If true continue visiting remaining entries, break otherwise
+       */
+      boolean visit(int index) throws IOException;
+    }
+
+    /**
+     * Helper method for visiting pending/ all batch operations
+     */
+    public void visitBatchOperations(boolean pendingOnly, int lastIndexExclusive, Visitor visitor)
+        throws IOException {
+      assert lastIndexExclusive <= this.size();
+      for (int i = nextIndexToProcess; i < lastIndexExclusive; i++) {
+        if (!pendingOnly || isOperationPending(i)) {
+          if (!visitor.visit(i)) {
+            break;
+          }
+        }
+      }
     }
 
     public abstract Mutation getMutation(int index);
     public abstract long getNonceGroup(int index);
     public abstract long getNonce(int index);
-    /** This method is potentially expensive and should only be used for non-replay CP path. */
+    /** This method is potentially expensive and useful mostly for non-replay CP path. */
     public abstract Mutation[] getMutationsForCoprocs();
     public abstract boolean isInReplay();
-    public abstract long getReplaySequenceId();
+    public abstract long getOrigLogSeqNum();
+    public abstract void startRegionOperation() throws IOException;
+    public abstract void closeRegionOperation() throws IOException;
+
+    /**
+     * Validates each mutation and prepares a batch for write. If necessary (non-replay case), runs
+     * CP prePut()/ preDelete() hooks for all mutations in a batch. This is intended to operate on
+     * entire batch and will be called from outside of class to check and prepare batch. This can
+     * be implemented by calling helper method {@link #checkAndPrepareMutation(int, long)} in a
+     * 'for' loop over mutations.
+     */
+    public abstract void checkAndPrepare() throws IOException;
+
+    /**
+     * Implement any Put request specific check and prepare logic here. Please refer to
+     * {@link #checkAndPrepareMutation(Mutation, long)} for how its used.
+     */
+    protected abstract void checkAndPreparePut(final Put p) throws IOException;
+
+    /**
+     *  If necessary, calls preBatchMutate() CP hook for a mini-batch and updates metrics, cell
+     *  count, tags and timestamp for all cells of all operations in a mini-batch.
+     */
+    public abstract void prepareMiniBatchOperations(MiniBatchOperationInProgress<Mutation>
+        miniBatchOp, long timestamp, final List<RowLock> acquiredRowLocks) throws IOException;
+
+    /**
+     * Write mini-batch operations to MemStore
+     */
+    public abstract WriteEntry writeMiniBatchOperationsToMemStore(
+        final MiniBatchOperationInProgress<Mutation> miniBatchOp, final WriteEntry writeEntry)
+        throws IOException;
+
+    protected void writeMiniBatchOperationsToMemStore(
+        final MiniBatchOperationInProgress<Mutation> miniBatchOp, final long writeNumber)
+        throws IOException {
+      MemStoreSizing memStoreAccounting = new MemStoreSizing();
+      visitBatchOperations(true, miniBatchOp.getLastIndexExclusive(), (int index) -> {
+        // We need to update the sequence id for following reasons.
+        // 1) If the op is in replay mode, FSWALEntry#stampRegionSequenceId won't stamp sequence id.
+        // 2) If no WAL, FSWALEntry won't be used
+        // we use durability of the original mutation for the mutation passed by CP.
+        if (isInReplay() || getMutation(index).getDurability() == Durability.SKIP_WAL) {
+          region.updateSequenceId(familyCellMaps[index].values(), writeNumber);
+        }
+        applyFamilyMapToMemStore(familyCellMaps[index], memStoreAccounting);
+        return true;
+      });
+      // update memStore size
+      region.addAndGetMemStoreSize(memStoreAccounting);
+    }
 
     public boolean isDone() {
       return nextIndexToProcess == operations.length;
     }
+
+    public int size() {
+      return operations.length;
+    }
+
+    public boolean isOperationPending(int index) {
+      return retCodeDetails[index].getOperationStatusCode() == OperationStatusCode.NOT_RUN;
+    }
+
+    public List<UUID> getClusterIds() {
+      assert size() != 0;
+      return getMutation(0).getClusterIds();
+    }
+
+    boolean isAtomic() {
+      return atomic;
+    }
+
+    /**
+     * Helper method that checks and prepares only one mutation. This can be used to implement
+     * {@link #checkAndPrepare()} for entire Batch.
+     * NOTE: As CP prePut()/ preDelete() hooks may modify mutations, this method should be called
+     * after prePut()/ preDelete() CP hooks are run for the mutation
+     */
+    protected void checkAndPrepareMutation(Mutation mutation, final long timestamp)
+        throws IOException {
+      region.checkRow(mutation.getRow(), "batchMutate");
+      if (mutation instanceof Put) {
+        // Check the families in the put. If bad, skip this one.
+        checkAndPreparePut((Put) mutation);
+        region.checkTimestamps(mutation.getFamilyCellMap(), timestamp);
+      } else {
+        region.prepareDelete((Delete) mutation);
+      }
+    }
+
+    protected void checkAndPrepareMutation(int index, long timestamp) throws IOException {
+      Mutation mutation = getMutation(index);
+      try {
+        this.checkAndPrepareMutation(mutation, timestamp);
+
+        // store the family map reference to allow for mutations
+        familyCellMaps[index] = mutation.getFamilyCellMap();
+        // store durability for the batch (highest durability of all operations in the batch)
+        Durability tmpDur = region.getEffectiveDurability(mutation.getDurability());
+        if (tmpDur.ordinal() > durability.ordinal()) {
+          durability = tmpDur;
+        }
+      } catch (NoSuchColumnFamilyException nscfe) {
+        final String msg = "No such column family in batch mutation. ";
+        if (observedExceptions.hasSeenNoSuchFamily()) {
+          LOG.warn(msg + nscfe.getMessage());
+        } else {
+          LOG.warn(msg, nscfe);
+          observedExceptions.sawNoSuchFamily();
+        }
+        retCodeDetails[index] = new OperationStatus(
+            OperationStatusCode.BAD_FAMILY, nscfe.getMessage());
+        if (isAtomic()) { // fail, atomic means all or none
+          throw nscfe;
+        }
+      } catch (FailedSanityCheckException fsce) {
+        final String msg = "Batch Mutation did not pass sanity check. ";
+        if (observedExceptions.hasSeenFailedSanityCheck()) {
+          LOG.warn(msg + fsce.getMessage());
+        } else {
+          LOG.warn(msg, fsce);
+          observedExceptions.sawFailedSanityCheck();
+        }
+        retCodeDetails[index] = new OperationStatus(
+            OperationStatusCode.SANITY_CHECK_FAILURE, fsce.getMessage());
+        if (isAtomic()) {
+          throw fsce;
+        }
+      } catch (WrongRegionException we) {
+        final String msg = "Batch mutation had a row that does not belong to this region. ";
+        if (observedExceptions.hasSeenWrongRegion()) {
+          LOG.warn(msg + we.getMessage());
+        } else {
+          LOG.warn(msg, we);
+          observedExceptions.sawWrongRegion();
+        }
+        retCodeDetails[index] = new OperationStatus(
+            OperationStatusCode.SANITY_CHECK_FAILURE, we.getMessage());
+        if (isAtomic()) {
+          throw we;
+        }
+      }
+    }
+
+    /**
+     * Creates Mini-batch of all operations [nextIndexToProcess, lastIndexExclusive) for which
+     * a row lock can be acquired. All mutations with locked rows are considered to be
+     * In-progress operations and hence the name {@link MiniBatchOperationInProgress}. Mini batch
+     * is window over {@link BatchOperation} and contains contiguous pending operations.
+     *
+     * @param acquiredRowLocks keeps track of rowLocks acquired.
+     */
+    public MiniBatchOperationInProgress<Mutation> lockRowsAndBuildMiniBatch(
+        List<RowLock> acquiredRowLocks) throws IOException {
+      int readyToWriteCount = 0;
+      int lastIndexExclusive = 0;
+      RowLock prevRowLock = null;
+      for (; lastIndexExclusive < size(); lastIndexExclusive++) {
+        // It reaches the miniBatchSize, stop here and process the miniBatch
+        // This only applies to non-atomic batch operations.
+        if (!isAtomic() && (readyToWriteCount == region.miniBatchSize)) {
+          break;
+        }
+
+        if (!isOperationPending(lastIndexExclusive)) {
+          continue;
+        }
+        Mutation mutation = getMutation(lastIndexExclusive);
+        // If we haven't got any rows in our batch, we should block to get the next one.
+        RowLock rowLock = null;
+        try {
+          // if atomic then get exclusive lock, else shared lock
+          rowLock = region.getRowLockInternal(mutation.getRow(), !isAtomic(), prevRowLock);
+        } catch (TimeoutIOException e) {
+          // We will retry when other exceptions, but we should stop if we timeout .
+          throw e;
+        } catch (IOException ioe) {
+          LOG.warn("Failed getting lock, row=" + Bytes.toStringBinary(mutation.getRow()), ioe);
+          if (isAtomic()) { // fail, atomic means all or none
+            throw ioe;
+          }
+        }
+        if (rowLock == null) {
+          // We failed to grab another lock
+          if (isAtomic()) {
+            throw new IOException("Can't apply all operations atomically!");
+          }
+          break; // Stop acquiring more rows for this batch
+        } else {
+          if (rowLock != prevRowLock) {
+            // It is a different row now, add this to the acquiredRowLocks and
+            // set prevRowLock to the new returned rowLock
+            acquiredRowLocks.add(rowLock);
+            prevRowLock = rowLock;
+          }
+        }
+
+        readyToWriteCount++;
+      }
+      return createMiniBatch(lastIndexExclusive, readyToWriteCount);
+    }
+
+    protected MiniBatchOperationInProgress<Mutation> createMiniBatch(final int lastIndexExclusive,
+        final int readyToWriteCount) {
+      return new MiniBatchOperationInProgress<>(getMutationsForCoprocs(), retCodeDetails,
+          walEditsFromCoprocessors, nextIndexToProcess, lastIndexExclusive, readyToWriteCount);
+    }
+
+    /**
+     * Builds separate WALEdit per nonce by applying input mutations. If WALEdits from CP are
+     * present, they are merged to result WALEdit.
+     */
+    public List<Pair<NonceKey, WALEdit>> buildWALEdits(
+        final MiniBatchOperationInProgress<Mutation> miniBatchOp) throws IOException {
+      List<Pair<NonceKey, WALEdit>> walEdits = new ArrayList<>();
+
+      visitBatchOperations(true, nextIndexToProcess + miniBatchOp.size(), new Visitor() {
+        private Pair<NonceKey, WALEdit> curWALEditForNonce;
+        @Override
+        public boolean visit(int index) throws IOException {
+          Mutation m = getMutation(index);
+          // we use durability of the original mutation for the mutation passed by CP.
+          if (region.getEffectiveDurability(m.getDurability()) == Durability.SKIP_WAL) {
+            region.recordMutationWithoutWal(m.getFamilyCellMap());
+            return true;
+          }
+
+          // the batch may contain multiple nonce keys (replay case). If so, write WALEdit for each.
+          // Given how nonce keys are originally written, these should be contiguous.
+          // They don't have to be, it will still work, just write more WALEdits than needed.
+          long nonceGroup = getNonceGroup(index);
+          long nonce = getNonce(index);
+          if (curWALEditForNonce == null ||
+              curWALEditForNonce.getFirst().getNonceGroup() != nonceGroup ||
+              curWALEditForNonce.getFirst().getNonce() != nonce) {
+            curWALEditForNonce = new Pair<>(new NonceKey(nonceGroup, nonce),
+                new WALEdit(miniBatchOp.getCellCount(), isInReplay()));
+            walEdits.add(curWALEditForNonce);
+          }
+          WALEdit walEdit = curWALEditForNonce.getSecond();
+
+          // Add WAL edits by CP
+          WALEdit fromCP = walEditsFromCoprocessors[index];
+          if (fromCP != null) {
+            for (Cell cell : fromCP.getCells()) {
+              walEdit.add(cell);
+            }
+          }
+          addFamilyMapToWALEdit(familyCellMaps[index], walEdit);
+
+          return true;
+        }
+      });
+      return walEdits;
+    }
+
+    /**
+     * This method completes mini-batch operations by calling postBatchMutate() CP hook (if
+     * required) and completing mvcc.
+     */
+    public void completeMiniBatchOperations(
+        final MiniBatchOperationInProgress<Mutation> miniBatchOp, final WriteEntry writeEntry)
+        throws IOException {
+      if (writeEntry != null) {
+        region.mvcc.completeAndWait(writeEntry);
+      }
+    }
+
+    public void doPostOpCleanupForMiniBatch(
+        final MiniBatchOperationInProgress<Mutation> miniBatchOp, final WALEdit walEdit,
+        boolean success) throws IOException {}
+
+    /**
+     * Atomically apply the given map of family->edits to the memstore.
+     * This handles the consistency control on its own, but the caller
+     * should already have locked updatesLock.readLock(). This also does
+     * <b>not</b> check the families for validity.
+     *
+     * @param familyMap Map of Cells by family
+     */
+    protected void applyFamilyMapToMemStore(Map<byte[], List<Cell>> familyMap,
+        MemStoreSizing memstoreAccounting) throws IOException {
+      for (Map.Entry<byte[], List<Cell>> e : familyMap.entrySet()) {
+        byte[] family = e.getKey();
+        List<Cell> cells = e.getValue();
+        assert cells instanceof RandomAccess;
+        region.applyToMemStore(region.getStore(family), cells, false, memstoreAccounting);
+      }
+    }
+
+    /**
+     * Append the given map of family->edits to a WALEdit data structure.
+     * This does not write to the WAL itself.
+     * @param familyMap map of family->edits
+     * @param walEdit the destination entry to append into
+     */
+    private void addFamilyMapToWALEdit(Map<byte[], List<Cell>> familyMap,
+        WALEdit walEdit) {
+      for (List<Cell> edits : familyMap.values()) {
+        // Optimization: 'foreach' loop is not used. See:
+        // HBASE-12023 HRegion.applyFamilyMapToMemstore creates too many iterator objects
+        assert edits instanceof RandomAccess;
+        int listSize = edits.size();
+        for (int i=0; i < listSize; i++) {
+          Cell cell = edits.get(i);
+          walEdit.add(cell);
+        }
+      }
+    }
   }
 
-  private static class MutationBatch extends BatchOperation<Mutation> {
+  /**
+   * Batch of mutation operations. Base class is shared with {@link ReplayBatchOperation} as most
+   * of the logic is same.
+   */
+  static class MutationBatchOperation extends BatchOperation<Mutation> {
     private long nonceGroup;
     private long nonce;
-    public MutationBatch(Mutation[] operations, long nonceGroup, long nonce) {
-      super(operations);
+    public MutationBatchOperation(final HRegion region, Mutation[] operations, boolean atomic,
+        long nonceGroup, long nonce) {
+      super(region, operations);
+      this.atomic = atomic;
       this.nonceGroup = nonceGroup;
       this.nonce = nonce;
     }
@@ -2888,16 +3343,283 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     }
 
     @Override
-    public long getReplaySequenceId() {
-      return 0;
+    public long getOrigLogSeqNum() {
+      return SequenceId.NO_SEQUENCE_ID;
+    }
+
+    @Override
+    public void startRegionOperation() throws IOException {
+      region.startRegionOperation(Operation.BATCH_MUTATE);
+    }
+
+    @Override
+    public void closeRegionOperation() throws IOException {
+      region.closeRegionOperation(Operation.BATCH_MUTATE);
+    }
+
+    @Override
+    public void checkAndPreparePut(Put p) throws IOException {
+      region.checkFamilies(p.getFamilyCellMap().keySet());
+    }
+
+    @Override
+    public void checkAndPrepare() throws IOException {
+      final int[] metrics = {0, 0}; // index 0: puts, index 1: deletes
+      visitBatchOperations(true, this.size(), new Visitor() {
+        private long now = EnvironmentEdgeManager.currentTime();
+        private WALEdit walEdit;
+        @Override
+        public boolean visit(int index) throws IOException {
+          // Run coprocessor pre hook outside of locks to avoid deadlock
+          if (region.coprocessorHost != null) {
+            if (walEdit == null) {
+              walEdit = new WALEdit();
+            }
+            callPreMutateCPHook(index, walEdit, metrics);
+            if (!walEdit.isEmpty()) {
+              walEditsFromCoprocessors[index] = walEdit;
+              walEdit = null;
+            }
+          }
+          if (isOperationPending(index)) {
+            // TODO: Currently validation is done with current time before acquiring locks and
+            // updates are done with different timestamps after acquiring locks. This behavior is
+            // inherited from the code prior to this change. Can this be changed?
+            checkAndPrepareMutation(index, now);
+          }
+          return true;
+        }
+      });
+
+      // FIXME: we may update metrics twice! here for all operations bypassed by CP and later in
+      // normal processing.
+      // Update metrics in same way as it is done when we go the normal processing route (we now
+      // update general metrics though a Coprocessor did the work).
+      if (region.metricsRegion != null) {
+        if (metrics[0] > 0) {
+          // There were some Puts in the batch.
+          region.metricsRegion.updatePut();
+        }
+        if (metrics[1] > 0) {
+          // There were some Deletes in the batch.
+          region.metricsRegion.updateDelete();
+        }
+      }
+    }
+
+    @Override
+    public void prepareMiniBatchOperations(MiniBatchOperationInProgress<Mutation> miniBatchOp,
+        long timestamp, final List<RowLock> acquiredRowLocks) throws IOException {
+      byte[] byteTS = Bytes.toBytes(timestamp);
+      visitBatchOperations(true, miniBatchOp.getLastIndexExclusive(), (int index) -> {
+        Mutation mutation = getMutation(index);
+        if (mutation instanceof Put) {
+          region.updateCellTimestamps(familyCellMaps[index].values(), byteTS);
+          miniBatchOp.incrementNumOfPuts();
+        } else {
+          region.prepareDeleteTimestamps(mutation, familyCellMaps[index], byteTS);
+          miniBatchOp.incrementNumOfDeletes();
+        }
+        region.rewriteCellTags(familyCellMaps[index], mutation);
+
+        // update cell count
+        if (region.getEffectiveDurability(mutation.getDurability()) != Durability.SKIP_WAL) {
+          for (List<Cell> cells : mutation.getFamilyCellMap().values()) {
+            miniBatchOp.addCellCount(cells.size());
+          }
+        }
+
+        WALEdit fromCP = walEditsFromCoprocessors[index];
+        if (fromCP != null) {
+          miniBatchOp.addCellCount(fromCP.size());
+        }
+        return true;
+      });
+
+      if (region.coprocessorHost != null) {
+        // calling the pre CP hook for batch mutation
+        region.coprocessorHost.preBatchMutate(miniBatchOp);
+        checkAndMergeCPMutations(miniBatchOp, acquiredRowLocks, timestamp);
+      }
+    }
+
+    @Override
+    public List<Pair<NonceKey, WALEdit>> buildWALEdits(final MiniBatchOperationInProgress<Mutation>
+        miniBatchOp) throws IOException {
+      List<Pair<NonceKey, WALEdit>> walEdits = super.buildWALEdits(miniBatchOp);
+      // for MutationBatchOperation, more than one nonce is not allowed
+      if (walEdits.size() > 1) {
+        throw new IOException("Found multiple nonce keys per batch!");
+      }
+      return walEdits;
+    }
+
+    @Override
+    public WriteEntry writeMiniBatchOperationsToMemStore(
+        final MiniBatchOperationInProgress<Mutation> miniBatchOp, @Nullable WriteEntry writeEntry)
+        throws IOException {
+      if (writeEntry == null) {
+        writeEntry = region.mvcc.begin();
+      }
+      super.writeMiniBatchOperationsToMemStore(miniBatchOp, writeEntry.getWriteNumber());
+      return writeEntry;
+    }
+
+    @Override
+    public void completeMiniBatchOperations(
+        final MiniBatchOperationInProgress<Mutation> miniBatchOp, final WriteEntry writeEntry)
+        throws IOException {
+      // TODO: can it be done after completing mvcc?
+      // calling the post CP hook for batch mutation
+      if (region.coprocessorHost != null) {
+        region.coprocessorHost.postBatchMutate(miniBatchOp);
+      }
+      super.completeMiniBatchOperations(miniBatchOp, writeEntry);
+    }
+
+    @Override
+    public void doPostOpCleanupForMiniBatch(MiniBatchOperationInProgress<Mutation> miniBatchOp,
+        final WALEdit walEdit, boolean success) throws IOException {
+      if (miniBatchOp != null) {
+        // synced so that the coprocessor contract is adhered to.
+        if (region.coprocessorHost != null) {
+          visitBatchOperations(false, miniBatchOp.getLastIndexExclusive(), (int i) -> {
+            // only for successful puts
+            if (retCodeDetails[i].getOperationStatusCode() == OperationStatusCode.SUCCESS) {
+              Mutation m = getMutation(i);
+              if (m instanceof Put) {
+                region.coprocessorHost.postPut((Put) m, walEdit, m.getDurability());
+              } else {
+                region.coprocessorHost.postDelete((Delete) m, walEdit, m.getDurability());
+              }
+            }
+            return true;
+          });
+        }
+
+        // See if the column families were consistent through the whole thing.
+        // if they were then keep them. If they were not then pass a null.
+        // null will be treated as unknown.
+        // Total time taken might be involving Puts and Deletes.
+        // Split the time for puts and deletes based on the total number of Puts and Deletes.
+        if (region.metricsRegion != null) {
+          if (miniBatchOp.getNumOfPuts() > 0) {
+            // There were some Puts in the batch.
+            region.metricsRegion.updatePut();
+          }
+          if (miniBatchOp.getNumOfDeletes() > 0) {
+            // There were some Deletes in the batch.
+            region.metricsRegion.updateDelete();
+          }
+        }
+      }
+
+      if (region.coprocessorHost != null) {
+        // call the coprocessor hook to do any finalization steps after the put is done
+        region.coprocessorHost.postBatchMutateIndispensably(
+            miniBatchOp != null ? miniBatchOp : createMiniBatch(size(), 0), success);
+      }
+    }
+
+    /**
+     * Runs prePut/ preDelete coprocessor hook for input mutation in a batch
+     * @param metrics Array of 2 ints. index 0: count of puts and index 1: count of deletes
+     */
+    private void callPreMutateCPHook(int index, final WALEdit walEdit, final int[] metrics)
+        throws IOException {
+      Mutation m = getMutation(index);
+      if (m instanceof Put) {
+        if (region.coprocessorHost.prePut((Put) m, walEdit, m.getDurability())) {
+          // pre hook says skip this Put
+          // mark as success and skip in doMiniBatchMutation
+          metrics[0]++;
+          retCodeDetails[index] = OperationStatus.SUCCESS;
+        }
+      } else if (m instanceof Delete) {
+        Delete curDel = (Delete) m;
+        if (curDel.getFamilyCellMap().isEmpty()) {
+          // handle deleting a row case
+          // TODO: prepareDelete() has been called twice, before and after preDelete() CP hook.
+          // Can this be avoided?
+          region.prepareDelete(curDel);
+        }
+        if (region.coprocessorHost.preDelete(curDel, walEdit, m.getDurability())) {
+          // pre hook says skip this Delete
+          // mark as success and skip in doMiniBatchMutation
+          metrics[1]++;
+          retCodeDetails[index] = OperationStatus.SUCCESS;
+        }
+      } else {
+        String msg = "Put/Delete mutations only supported in a batch";
+        // In case of passing Append mutations along with the Puts and Deletes in batchMutate
+        // mark the operation return code as failure so that it will not be considered in
+        // the doMiniBatchMutation
+        retCodeDetails[index] = new OperationStatus(OperationStatusCode.FAILURE, msg);
+
+        if (isAtomic()) { // fail, atomic means all or none
+          throw new IOException(msg);
+        }
+      }
+    }
+
+    private void checkAndMergeCPMutations(final MiniBatchOperationInProgress<Mutation> miniBatchOp,
+        final List<RowLock> acquiredRowLocks, final long timestamp) throws IOException {
+      visitBatchOperations(true, nextIndexToProcess + miniBatchOp.size(), (int i) -> {
+        // we pass (i - firstIndex) below since the call expects a relative index
+        Mutation[] cpMutations = miniBatchOp.getOperationsFromCoprocessors(i - nextIndexToProcess);
+        if (cpMutations == null) {
+          return true;
+        }
+        // Else Coprocessor added more Mutations corresponding to the Mutation at this index.
+        Mutation mutation = getMutation(i);
+        for (Mutation cpMutation : cpMutations) {
+          this.checkAndPrepareMutation(cpMutation, timestamp);
+
+          // Acquire row locks. If not, the whole batch will fail.
+          acquiredRowLocks.add(region.getRowLockInternal(cpMutation.getRow(), true, null));
+
+          // Returned mutations from coprocessor correspond to the Mutation at index i. We can
+          // directly add the cells from those mutations to the familyMaps of this mutation.
+          Map<byte[], List<Cell>> cpFamilyMap = cpMutation.getFamilyCellMap();
+          // will get added to the memStore later
+          mergeFamilyMaps(familyCellMaps[i], cpFamilyMap);
+
+          // The durability of returned mutation is replaced by the corresponding mutation.
+          // If the corresponding mutation contains the SKIP_WAL, we shouldn't count the
+          // cells of returned mutation.
+          if (region.getEffectiveDurability(mutation.getDurability()) != Durability.SKIP_WAL) {
+            for (List<Cell> cells : cpFamilyMap.values()) {
+              miniBatchOp.addCellCount(cells.size());
+            }
+          }
+        }
+        return true;
+      });
+    }
+
+    private void mergeFamilyMaps(Map<byte[], List<Cell>> familyMap,
+        Map<byte[], List<Cell>> toBeMerged) {
+      for (Map.Entry<byte[], List<Cell>> entry : toBeMerged.entrySet()) {
+        List<Cell> cells = familyMap.get(entry.getKey());
+        if (cells == null) {
+          familyMap.put(entry.getKey(), entry.getValue());
+        } else {
+          cells.addAll(entry.getValue());
+        }
+      }
     }
   }
 
-  private static class ReplayBatch extends BatchOperation<MutationReplay> {
-    private long replaySeqId = 0;
-    public ReplayBatch(MutationReplay[] operations, long seqId) {
-      super(operations);
-      this.replaySeqId = seqId;
+  /**
+   * Batch of mutations for replay. Base class is shared with {@link MutationBatchOperation} as most
+   * of the logic is same.
+   */
+  static class ReplayBatchOperation extends BatchOperation<MutationReplay> {
+    private long origLogSeqNum = 0;
+    public ReplayBatchOperation(final HRegion region, MutationReplay[] operations,
+        long origLogSeqNum) {
+      super(region, operations);
+      this.origLogSeqNum = origLogSeqNum;
     }
 
     @Override
@@ -2917,8 +3639,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
 
     @Override
     public Mutation[] getMutationsForCoprocs() {
-      assert false;
-      throw new RuntimeException("Should not be called for replay batch");
+      return null;
     }
 
     @Override
@@ -2927,26 +3648,102 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     }
 
     @Override
-    public long getReplaySequenceId() {
-      return this.replaySeqId;
+    public long getOrigLogSeqNum() {
+      return this.origLogSeqNum;
+    }
+
+    @Override
+    public void startRegionOperation() throws IOException {
+      region.startRegionOperation(Operation.REPLAY_BATCH_MUTATE);
+    }
+
+    @Override
+    public void closeRegionOperation() throws IOException {
+      region.closeRegionOperation(Operation.REPLAY_BATCH_MUTATE);
+    }
+
+    /**
+     * During replay, there could exist column families which are removed between region server
+     * failure and replay
+     */
+    @Override
+    protected void checkAndPreparePut(Put p) throws IOException {
+      Map<byte[], List<Cell>> familyCellMap = p.getFamilyCellMap();
+      List<byte[]> nonExistentList = null;
+      for (byte[] family : familyCellMap.keySet()) {
+        if (!region.htableDescriptor.hasColumnFamily(family)) {
+          if (nonExistentList == null) {
+            nonExistentList = new ArrayList<>();
+          }
+          nonExistentList.add(family);
+        }
+      }
+      if (nonExistentList != null) {
+        for (byte[] family : nonExistentList) {
+          // Perhaps schema was changed between crash and replay
+          LOG.info("No family for " + Bytes.toString(family) + " omit from reply.");
+          familyCellMap.remove(family);
+        }
+      }
+    }
+
+    @Override
+    public void checkAndPrepare() throws IOException {
+      long now = EnvironmentEdgeManager.currentTime();
+      visitBatchOperations(true, this.size(), (int index) -> {
+        checkAndPrepareMutation(index, now);
+        return true;
+      });
+    }
+
+    @Override
+    public void prepareMiniBatchOperations(MiniBatchOperationInProgress<Mutation> miniBatchOp,
+        long timestamp, final List<RowLock> acquiredRowLocks) throws IOException {
+      visitBatchOperations(true, miniBatchOp.getLastIndexExclusive(), (int index) -> {
+        // update cell count
+        for (List<Cell> cells : getMutation(index).getFamilyCellMap().values()) {
+          miniBatchOp.addCellCount(cells.size());
+        }
+        return true;
+      });
+    }
+
+    @Override
+    public WriteEntry writeMiniBatchOperationsToMemStore(
+        final MiniBatchOperationInProgress<Mutation> miniBatchOp, final WriteEntry writeEntry)
+        throws IOException {
+      super.writeMiniBatchOperationsToMemStore(miniBatchOp, getOrigLogSeqNum());
+      return writeEntry;
+    }
+
+    @Override
+    public void completeMiniBatchOperations(
+        final MiniBatchOperationInProgress<Mutation> miniBatchOp, final WriteEntry writeEntry)
+        throws IOException {
+      super.completeMiniBatchOperations(miniBatchOp, writeEntry);
+      region.mvcc.advanceTo(getOrigLogSeqNum());
     }
   }
 
-  @Override
   public OperationStatus[] batchMutate(Mutation[] mutations, long nonceGroup, long nonce)
       throws IOException {
+    return batchMutate(mutations, false, nonceGroup, nonce);
+  }
+
+  public OperationStatus[] batchMutate(Mutation[] mutations, boolean atomic, long nonceGroup,
+      long nonce) throws IOException {
     // As it stands, this is used for 3 things
     //  * batchMutate with single mutation - put/delete, separate or from checkAndMutate.
     //  * coprocessor calls (see ex. BulkDeleteEndpoint).
     // So nonces are not really ever used by HBase. They could be by coprocs, and checkAnd...
-    return batchMutate(new MutationBatch(mutations, nonceGroup, nonce));
+    return batchMutate(new MutationBatchOperation(this, mutations, atomic, nonceGroup, nonce));
   }
 
+  @Override
   public OperationStatus[] batchMutate(Mutation[] mutations) throws IOException {
     return batchMutate(mutations, HConstants.NO_NONCE, HConstants.NO_NONCE);
   }
 
-  @Override
   public OperationStatus[] batchReplay(MutationReplay[] mutations, long replaySeqId)
       throws IOException {
     if (!RegionReplicaUtil.isDefaultReplica(getRegionInfo())
@@ -2968,12 +3765,24 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
       }
       return statuses;
     }
-    return batchMutate(new ReplayBatch(mutations, replaySeqId));
+    return batchMutate(new ReplayBatchOperation(this, mutations, replaySeqId));
   }
 
   /**
    * Perform a batch of mutations.
-   * It supports only Put and Delete mutations and will ignore other types passed.
+   *
+   * It supports only Put and Delete mutations and will ignore other types passed. Operations in
+   * a batch are stored with highest durability specified of for all operations in a batch,
+   * except for {@link Durability#SKIP_WAL}.
+   *
+   * <p>This function is called from {@link #batchReplay(MutationReplay[], long)} with
+   * {@link ReplayBatchOperation} instance and {@link #batchMutate(Mutation[], long, long)} with
+   * {@link MutationBatchOperation} instance as an argument. As the processing of replay batch
+   * and mutation batch is very similar, lot of code is shared by providing generic methods in
+   * base class {@link BatchOperation}. The logic for this method and
+   * {@link #doMiniBatchMutate(BatchOperation)} is implemented using methods in base class which
+   * are overridden by derived classes to implement special behavior.
+   *
    * @param batchOp contains the list of mutations
    * @return an array of OperationStatus which internally contains the
    *         OperationStatusCode and the exceptionMessage if any.
@@ -2981,8 +3790,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
    */
   OperationStatus[] batchMutate(BatchOperation<?> batchOp) throws IOException {
     boolean initialized = false;
-    Operation op = batchOp.isInReplay() ? Operation.REPLAY_BATCH_MUTATE : Operation.BATCH_MUTATE;
-    startRegionOperation(op);
+    batchOp.startRegionOperation();
     try {
       while (!batchOp.isDone()) {
         if (!batchOp.isInReplay()) {
@@ -2991,59 +3799,20 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
         checkResources();
 
         if (!initialized) {
-          this.writeRequestsCount.add(batchOp.operations.length);
-          if (!batchOp.isInReplay()) {
-            doPreBatchMutateHook(batchOp);
-          }
+          this.writeRequestsCount.add(batchOp.size());
+          // validate and prepare batch for write, for MutationBatchOperation it also calls CP
+          // prePut()/ preDelete() hooks
+          batchOp.checkAndPrepare();
           initialized = true;
         }
         doMiniBatchMutate(batchOp);
-        long newSize = this.getMemstoreSize();
+        long newSize = this.getMemStoreSize();
         requestFlushIfNeeded(newSize);
       }
     } finally {
-      closeRegionOperation(op);
+      batchOp.closeRegionOperation();
     }
     return batchOp.retCodeDetails;
-  }
-
-  private void doPreBatchMutateHook(BatchOperation<?> batchOp)
-      throws IOException {
-    /* Run coprocessor pre hook outside of locks to avoid deadlock */
-    WALEdit walEdit = new WALEdit();
-    if (coprocessorHost != null) {
-      for (int i = 0 ; i < batchOp.operations.length; i++) {
-        Mutation m = batchOp.getMutation(i);
-        if (m instanceof Put) {
-          if (coprocessorHost.prePut((Put) m, walEdit, m.getDurability())) {
-            // pre hook says skip this Put
-            // mark as success and skip in doMiniBatchMutation
-            batchOp.retCodeDetails[i] = OperationStatus.SUCCESS;
-          }
-        } else if (m instanceof Delete) {
-          Delete curDel = (Delete) m;
-          if (curDel.getFamilyCellMap().isEmpty()) {
-            // handle deleting a row case
-            prepareDelete(curDel);
-          }
-          if (coprocessorHost.preDelete(curDel, walEdit, m.getDurability())) {
-            // pre hook says skip this Delete
-            // mark as success and skip in doMiniBatchMutation
-            batchOp.retCodeDetails[i] = OperationStatus.SUCCESS;
-          }
-        } else {
-          // In case of passing Append mutations along with the Puts and Deletes in batchMutate
-          // mark the operation return code as failure so that it will not be considered in
-          // the doMiniBatchMutation
-          batchOp.retCodeDetails[i] = new OperationStatus(OperationStatusCode.FAILURE,
-              "Put/Delete mutations only supported in batchMutate() now");
-        }
-        if (!walEdit.isEmpty()) {
-          batchOp.walEditsFromCoprocessors[i] = walEdit;
-          walEdit = new WALEdit();
-        }
-      }
-    }
   }
 
   /**
@@ -3051,478 +3820,87 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
    * In here we also handle replay of edits on region recover.
    * @return Change in size brought about by applying <code>batchOp</code>
    */
-  @edu.umd.cs.findbugs.annotations.SuppressWarnings(value="UL_UNRELEASED_LOCK",
-      justification="Findbugs seems to be confused on this.")
-  @SuppressWarnings("unchecked")
-  // TODO: This needs a rewrite. Doesn't have to be this long. St.Ack 20160120
   private void doMiniBatchMutate(BatchOperation<?> batchOp) throws IOException {
-    boolean replay = batchOp.isInReplay();
-    // Variable to note if all Put items are for the same CF -- metrics related
-    boolean putsCfSetConsistent = true;
-    // Variable to note if all Delete items are for the same CF -- metrics related
-    boolean deletesCfSetConsistent = true;
-    // The set of columnFamilies first seen for Put.
-    Set<byte[]> putsCfSet = null;
-    // The set of columnFamilies first seen for Delete.
-    Set<byte[]> deletesCfSet = null;
-    long currentNonceGroup = HConstants.NO_NONCE;
-    long currentNonce = HConstants.NO_NONCE;
-    WALEdit walEdit = null;
-    boolean locked = false;
-    // reference family maps directly so coprocessors can mutate them if desired
-    Map<byte[], List<Cell>>[] familyMaps = new Map[batchOp.operations.length];
-    // We try to set up a batch in the range [firstIndex,lastIndexExclusive)
-    int firstIndex = batchOp.nextIndexToProcess;
-    int lastIndexExclusive = firstIndex;
     boolean success = false;
-    int noOfPuts = 0;
-    int noOfDeletes = 0;
+    WALEdit walEdit = null;
     WriteEntry writeEntry = null;
-    int cellCount = 0;
+    boolean locked = false;
+    // We try to set up a batch in the range [batchOp.nextIndexToProcess,lastIndexExclusive)
+    MiniBatchOperationInProgress<Mutation> miniBatchOp = null;
     /** Keep track of the locks we hold so we can release them in finally clause */
-    List<RowLock> acquiredRowLocks = Lists.newArrayListWithCapacity(batchOp.operations.length);
-    MemstoreSize memstoreSize = new MemstoreSize();
+    List<RowLock> acquiredRowLocks = Lists.newArrayListWithCapacity(batchOp.size());
     try {
-      // STEP 1. Try to acquire as many locks as we can, and ensure we acquire at least one.
-      int numReadyToWrite = 0;
-      long now = EnvironmentEdgeManager.currentTime();
-      while (lastIndexExclusive < batchOp.operations.length) {
-        if (checkBatchOp(batchOp, lastIndexExclusive, familyMaps, now)) {
-          lastIndexExclusive++;
-          continue;
-        }
-        Mutation mutation = batchOp.getMutation(lastIndexExclusive);
-        // If we haven't got any rows in our batch, we should block to get the next one.
-        RowLock rowLock = null;
-        try {
-          rowLock = getRowLockInternal(mutation.getRow(), true);
-        } catch (IOException ioe) {
-          LOG.warn("Failed getting lock, row=" + Bytes.toStringBinary(mutation.getRow()), ioe);
-        }
-        if (rowLock == null) {
-          // We failed to grab another lock
-          break; // Stop acquiring more rows for this batch
-        } else {
-          acquiredRowLocks.add(rowLock);
-        }
-
-        lastIndexExclusive++;
-        numReadyToWrite++;
-        if (replay) {
-          for (List<Cell> cells : mutation.getFamilyCellMap().values()) {
-            cellCount += cells.size();
-          }
-        }
-        if (mutation instanceof Put) {
-          // If Column Families stay consistent through out all of the
-          // individual puts then metrics can be reported as a multiput across
-          // column families in the first put.
-          if (putsCfSet == null) {
-            putsCfSet = mutation.getFamilyCellMap().keySet();
-          } else {
-            putsCfSetConsistent = putsCfSetConsistent
-                && mutation.getFamilyCellMap().keySet().equals(putsCfSet);
-          }
-        } else {
-          if (deletesCfSet == null) {
-            deletesCfSet = mutation.getFamilyCellMap().keySet();
-          } else {
-            deletesCfSetConsistent = deletesCfSetConsistent
-                && mutation.getFamilyCellMap().keySet().equals(deletesCfSet);
-          }
-        }
-      }
+      // STEP 1. Try to acquire as many locks as we can and build mini-batch of operations with
+      // locked rows
+      miniBatchOp = batchOp.lockRowsAndBuildMiniBatch(acquiredRowLocks);
 
       // We've now grabbed as many mutations off the list as we can
-
-      // STEP 2. Update any LATEST_TIMESTAMP timestamps
-      // We should record the timestamp only after we have acquired the rowLock,
-      // otherwise, newer puts/deletes are not guaranteed to have a newer timestamp
-      now = EnvironmentEdgeManager.currentTime();
-      byte[] byteNow = Bytes.toBytes(now);
-
-      // Nothing to put/delete -- an exception in the above such as NoSuchColumnFamily?
-      if (numReadyToWrite <= 0) {
+      // Ensure we acquire at least one.
+      if (miniBatchOp.getReadyToWriteCount() <= 0) {
+        // Nothing to put/delete -- an exception in the above such as NoSuchColumnFamily?
         return;
       }
 
-      for (int i = firstIndex; !replay && i < lastIndexExclusive; i++) {
-        // skip invalid
-        if (batchOp.retCodeDetails[i].getOperationStatusCode()
-            != OperationStatusCode.NOT_RUN) {
-          // lastIndexExclusive was incremented above.
-          continue;
-        }
-
-        Mutation mutation = batchOp.getMutation(i);
-        if (mutation instanceof Put) {
-          updateCellTimestamps(familyMaps[i].values(), byteNow);
-          noOfPuts++;
-        } else {
-          prepareDeleteTimestamps(mutation, familyMaps[i], byteNow);
-          noOfDeletes++;
-        }
-        rewriteCellTags(familyMaps[i], mutation);
-        WALEdit fromCP = batchOp.walEditsFromCoprocessors[i];
-        if (fromCP != null) {
-          cellCount += fromCP.size();
-        }
-        for (List<Cell> cells : familyMaps[i].values()) {
-          cellCount += cells.size();
-        }
-      }
-      walEdit = new WALEdit(cellCount, replay);
-      lock(this.updatesLock.readLock(), numReadyToWrite);
+      lock(this.updatesLock.readLock(), miniBatchOp.getReadyToWriteCount());
       locked = true;
 
-      // calling the pre CP hook for batch mutation
-      if (!replay && coprocessorHost != null) {
-        MiniBatchOperationInProgress<Mutation> miniBatchOp =
-          new MiniBatchOperationInProgress<Mutation>(batchOp.getMutationsForCoprocs(),
-          batchOp.retCodeDetails, batchOp.walEditsFromCoprocessors, firstIndex, lastIndexExclusive);
-        if (coprocessorHost.preBatchMutate(miniBatchOp)) {
-          return;
-        } else {
-          for (int i = firstIndex; i < lastIndexExclusive; i++) {
-            if (batchOp.retCodeDetails[i].getOperationStatusCode() != OperationStatusCode.NOT_RUN) {
-              // lastIndexExclusive was incremented above.
-              continue;
-            }
-            // we pass (i - firstIndex) below since the call expects a relative index
-            Mutation[] cpMutations = miniBatchOp.getOperationsFromCoprocessors(i - firstIndex);
-            if (cpMutations == null) {
-              continue;
-            }
-            // Else Coprocessor added more Mutations corresponding to the Mutation at this index.
-            for (int j = 0; j < cpMutations.length; j++) {
-              Mutation cpMutation = cpMutations[j];
-              Map<byte[], List<Cell>> cpFamilyMap = cpMutation.getFamilyCellMap();
-              checkAndPrepareMutation(cpMutation, replay, cpFamilyMap, now);
-
-              // Acquire row locks. If not, the whole batch will fail.
-              acquiredRowLocks.add(getRowLockInternal(cpMutation.getRow(), true));
-
-              // Returned mutations from coprocessor correspond to the Mutation at index i. We can
-              // directly add the cells from those mutations to the familyMaps of this mutation.
-              mergeFamilyMaps(familyMaps[i], cpFamilyMap); // will get added to the memstore later
-            }
-          }
-        }
-      }
+      // STEP 2. Update mini batch of all operations in progress with  LATEST_TIMESTAMP timestamp
+      // We should record the timestamp only after we have acquired the rowLock,
+      // otherwise, newer puts/deletes are not guaranteed to have a newer timestamp
+      long now = EnvironmentEdgeManager.currentTime();
+      batchOp.prepareMiniBatchOperations(miniBatchOp, now, acquiredRowLocks);
 
       // STEP 3. Build WAL edit
-      Durability durability = Durability.USE_DEFAULT;
-      for (int i = firstIndex; i < lastIndexExclusive; i++) {
-        // Skip puts that were determined to be invalid during preprocessing
-        if (batchOp.retCodeDetails[i].getOperationStatusCode() != OperationStatusCode.NOT_RUN) {
-          continue;
+      List<Pair<NonceKey, WALEdit>> walEdits = batchOp.buildWALEdits(miniBatchOp);
+
+      // STEP 4. Append the WALEdits to WAL and sync.
+      for(Iterator<Pair<NonceKey, WALEdit>> it = walEdits.iterator(); it.hasNext();) {
+        Pair<NonceKey, WALEdit> nonceKeyWALEditPair = it.next();
+        walEdit = nonceKeyWALEditPair.getSecond();
+        NonceKey nonceKey = nonceKeyWALEditPair.getFirst();
+
+        if (walEdit != null && !walEdit.isEmpty()) {
+          writeEntry = doWALAppend(walEdit, batchOp.durability, batchOp.getClusterIds(), now,
+              nonceKey.getNonceGroup(), nonceKey.getNonce(), batchOp.getOrigLogSeqNum());
         }
 
-        Mutation m = batchOp.getMutation(i);
-        Durability tmpDur = getEffectiveDurability(m.getDurability());
-        if (tmpDur.ordinal() > durability.ordinal()) {
-          durability = tmpDur;
-        }
-        // we use durability of the original mutation for the mutation passed by CP.
-        if (tmpDur == Durability.SKIP_WAL) {
-          recordMutationWithoutWal(m.getFamilyCellMap());
-          continue;
-        }
-
-        long nonceGroup = batchOp.getNonceGroup(i);
-        long nonce = batchOp.getNonce(i);
-        // In replay, the batch may contain multiple nonces. If so, write WALEdit for each.
-        // Given how nonces are originally written, these should be contiguous.
-        // They don't have to be, it will still work, just write more WALEdits than needed.
-        if (nonceGroup != currentNonceGroup || nonce != currentNonce) {
-          // Write what we have so far for nonces out to WAL
-          appendCurrentNonces(m, replay, walEdit, now, currentNonceGroup, currentNonce);
-          walEdit = new WALEdit(cellCount, replay);
-          currentNonceGroup = nonceGroup;
-          currentNonce = nonce;
-        }
-
-        // Add WAL edits by CP
-        WALEdit fromCP = batchOp.walEditsFromCoprocessors[i];
-        if (fromCP != null) {
-          for (Cell cell : fromCP.getCells()) {
-            walEdit.add(cell);
-          }
-        }
-        addFamilyMapToWALEdit(familyMaps[i], walEdit);
-      }
-
-      // STEP 4. Append the final edit to WAL and sync.
-      Mutation mutation = batchOp.getMutation(firstIndex);
-      WALKey walKey = null;
-      long txid;
-      if (replay) {
-        // use wal key from the original
-        walKey = new ReplayHLogKey(this.getRegionInfo().getEncodedNameAsBytes(),
-          this.htableDescriptor.getTableName(), WALKey.NO_SEQUENCE_ID, now,
-          mutation.getClusterIds(), currentNonceGroup, currentNonce, mvcc);
-        walKey.setOrigLogSeqNum(batchOp.getReplaySequenceId());
-        if (!walEdit.isEmpty()) {
-          txid = this.wal.append(this.getRegionInfo(), walKey, walEdit, true);
-          if (txid != 0) {
-            sync(txid, durability);
-          }
-        }
-      } else {
-        try {
-          if (!walEdit.isEmpty()) {
-            try {
-              if (this.mvccPreAssign) {
-                preAssignMvccLock.lock();
-                writeEntry = mvcc.begin();
-              }
-              // we use HLogKey here instead of WALKey directly to support legacy coprocessors.
-              walKey = new HLogKey(this.getRegionInfo().getEncodedNameAsBytes(),
-                  this.htableDescriptor.getTableName(), WALKey.NO_SEQUENCE_ID, now,
-                  mutation.getClusterIds(), currentNonceGroup, currentNonce, mvcc,
-                  this.getReplicationScope());
-              if (this.mvccPreAssign) {
-                walKey.setPreAssignedWriteEntry(writeEntry);
-              }
-              // TODO: Use the doAppend methods below... complicated by the replay stuff above.
-              txid = this.wal.append(this.getRegionInfo(), walKey, walEdit, true);
-            } finally {
-              if (mvccPreAssign) {
-                preAssignMvccLock.unlock();
-              }
-            }
-            if (txid != 0) {
-              sync(txid, durability);
-            }
-            if (writeEntry == null) {
-              // if MVCC not preassigned, wait here until assigned
-              writeEntry = walKey.getWriteEntry();
-            }
-          }
-        } catch (IOException ioe) {
-          if (walKey != null && writeEntry == null) {
-            // the writeEntry is not preassigned and error occurred during append or sync
-            mvcc.complete(walKey.getWriteEntry());
-          }
-          throw ioe;
-        }
-      }
-      if (walKey == null) {
-        // If no walKey, then not in replay and skipping WAL or some such. Begin an MVCC transaction
-        // to get sequence id.
-        writeEntry = mvcc.begin();
-      }
-
-      // STEP 5. Write back to memstore
-      for (int i = firstIndex; i < lastIndexExclusive; i++) {
-        if (batchOp.retCodeDetails[i].getOperationStatusCode() != OperationStatusCode.NOT_RUN) {
-          continue;
-        }
-        // We need to update the sequence id for following reasons.
-        // 1) If the op is in replay mode, FSWALEntry#stampRegionSequenceId won't stamp sequence id.
-        // 2) If no WAL, FSWALEntry won't be used
-        // we use durability of the original mutation for the mutation passed by CP.
-        boolean updateSeqId = replay || batchOp.getMutation(i).getDurability() == Durability.SKIP_WAL;
-        if (updateSeqId) {
-          this.updateSequenceId(familyMaps[i].values(),
-            replay? batchOp.getReplaySequenceId(): writeEntry.getWriteNumber());
-        }
-        applyFamilyMapToMemstore(familyMaps[i], memstoreSize);
-      }
-
-      // STEP 6. Complete mvcc.
-      if (replay) {
-        this.mvcc.advanceTo(batchOp.getReplaySequenceId());
-      } else {
-        // writeEntry won't be empty if not in replay mode
-        mvcc.completeAndWait(writeEntry);
-        writeEntry = null;
-      }
-
-      // STEP 7. Release row locks, etc.
-      if (locked) {
-        this.updatesLock.readLock().unlock();
-        locked = false;
-      }
-      releaseRowLocks(acquiredRowLocks);
-
-      // calling the post CP hook for batch mutation
-      if (!replay && coprocessorHost != null) {
-        MiniBatchOperationInProgress<Mutation> miniBatchOp =
-          new MiniBatchOperationInProgress<Mutation>(batchOp.getMutationsForCoprocs(),
-          batchOp.retCodeDetails, batchOp.walEditsFromCoprocessors, firstIndex, lastIndexExclusive);
-        coprocessorHost.postBatchMutate(miniBatchOp);
-      }
-
-      for (int i = firstIndex; i < lastIndexExclusive; i ++) {
-        if (batchOp.retCodeDetails[i] == OperationStatus.NOT_RUN) {
-          batchOp.retCodeDetails[i] = OperationStatus.SUCCESS;
+        // Complete mvcc for all but last writeEntry (for replay case)
+        if (it.hasNext() && writeEntry != null) {
+          mvcc.complete(writeEntry);
+          writeEntry = null;
         }
       }
 
-      // STEP 8. Run coprocessor post hooks. This should be done after the wal is
-      // synced so that the coprocessor contract is adhered to.
-      if (!replay && coprocessorHost != null) {
-        for (int i = firstIndex; i < lastIndexExclusive; i++) {
-          // only for successful puts
-          if (batchOp.retCodeDetails[i].getOperationStatusCode()
-              != OperationStatusCode.SUCCESS) {
-            continue;
-          }
-          Mutation m = batchOp.getMutation(i);
-          if (m instanceof Put) {
-            coprocessorHost.postPut((Put) m, walEdit, m.getDurability());
-          } else {
-            coprocessorHost.postDelete((Delete) m, walEdit, m.getDurability());
-          }
-        }
-      }
+      // STEP 5. Write back to memStore
+      // NOTE: writeEntry can be null here
+      writeEntry = batchOp.writeMiniBatchOperationsToMemStore(miniBatchOp, writeEntry);
 
+      // STEP 6. Complete MiniBatchOperations: If required calls postBatchMutate() CP hook and
+      // complete mvcc for last writeEntry
+      batchOp.completeMiniBatchOperations(miniBatchOp, writeEntry);
+      writeEntry = null;
       success = true;
     } finally {
       // Call complete rather than completeAndWait because we probably had error if walKey != null
       if (writeEntry != null) mvcc.complete(writeEntry);
-      this.addAndGetMemstoreSize(memstoreSize);
+
       if (locked) {
         this.updatesLock.readLock().unlock();
       }
       releaseRowLocks(acquiredRowLocks);
 
-      // See if the column families were consistent through the whole thing.
-      // if they were then keep them. If they were not then pass a null.
-      // null will be treated as unknown.
-      // Total time taken might be involving Puts and Deletes.
-      // Split the time for puts and deletes based on the total number of Puts and Deletes.
+      final int finalLastIndexExclusive =
+          miniBatchOp != null ? miniBatchOp.getLastIndexExclusive() : batchOp.size();
+      final boolean finalSuccess = success;
+      batchOp.visitBatchOperations(true, finalLastIndexExclusive, (int i) -> {
+        batchOp.retCodeDetails[i] =
+            finalSuccess ? OperationStatus.SUCCESS : OperationStatus.FAILURE;
+        return true;
+      });
 
-      if (noOfPuts > 0) {
-        // There were some Puts in the batch.
-        if (this.metricsRegion != null) {
-          this.metricsRegion.updatePut();
-        }
-      }
-      if (noOfDeletes > 0) {
-        // There were some Deletes in the batch.
-        if (this.metricsRegion != null) {
-          this.metricsRegion.updateDelete();
-        }
-      }
-      if (!success) {
-        for (int i = firstIndex; i < lastIndexExclusive; i++) {
-          if (batchOp.retCodeDetails[i].getOperationStatusCode() == OperationStatusCode.NOT_RUN) {
-            batchOp.retCodeDetails[i] = OperationStatus.FAILURE;
-          }
-        }
-      }
-      if (coprocessorHost != null && !batchOp.isInReplay()) {
-        // call the coprocessor hook to do any finalization steps
-        // after the put is done
-        MiniBatchOperationInProgress<Mutation> miniBatchOp =
-          new MiniBatchOperationInProgress<Mutation>(batchOp.getMutationsForCoprocs(),
-          batchOp.retCodeDetails, batchOp.walEditsFromCoprocessors, firstIndex, lastIndexExclusive);
-        coprocessorHost.postBatchMutateIndispensably(miniBatchOp, success);
-      }
+      batchOp.doPostOpCleanupForMiniBatch(miniBatchOp, walEdit, finalSuccess);
 
-      batchOp.nextIndexToProcess = lastIndexExclusive;
-    }
-  }
-
-  private void mergeFamilyMaps(Map<byte[], List<Cell>> familyMap,
-      Map<byte[], List<Cell>> toBeMerged) {
-    for (Map.Entry<byte[], List<Cell>> entry : toBeMerged.entrySet()) {
-      List<Cell> cells = familyMap.get(entry.getKey());
-      if (cells == null) {
-        familyMap.put(entry.getKey(), entry.getValue());
-      } else {
-        cells.addAll(entry.getValue());
-      }
-    }
-  }
-
-  private void appendCurrentNonces(final Mutation mutation, final boolean replay,
-      final WALEdit walEdit, final long now, final long currentNonceGroup, final long currentNonce)
-  throws IOException {
-    if (walEdit.isEmpty()) return;
-    if (!replay) throw new IOException("Multiple nonces per batch and not in replay");
-    WALKey walKey = new WALKey(this.getRegionInfo().getEncodedNameAsBytes(),
-        this.htableDescriptor.getTableName(), now, mutation.getClusterIds(),
-        currentNonceGroup, currentNonce, mvcc, this.getReplicationScope());
-    this.wal.append(this.getRegionInfo(), walKey, walEdit, true);
-    // Complete the mvcc transaction started down in append else it will block others
-    this.mvcc.complete(walKey.getWriteEntry());
-  }
-
-  private boolean checkBatchOp(BatchOperation<?> batchOp, final int lastIndexExclusive,
-      final Map<byte[], List<Cell>>[] familyMaps, final long now)
-  throws IOException {
-    boolean skip = false;
-    // Skip anything that "ran" already
-    if (batchOp.retCodeDetails[lastIndexExclusive].getOperationStatusCode()
-        != OperationStatusCode.NOT_RUN) {
-      return true;
-    }
-    Mutation mutation = batchOp.getMutation(lastIndexExclusive);
-    Map<byte[], List<Cell>> familyMap = mutation.getFamilyCellMap();
-    // store the family map reference to allow for mutations
-    familyMaps[lastIndexExclusive] = familyMap;
-
-    try {
-      checkAndPrepareMutation(mutation, batchOp.isInReplay(), familyMap, now);
-    } catch (NoSuchColumnFamilyException nscf) {
-      LOG.warn("No such column family in batch mutation", nscf);
-      batchOp.retCodeDetails[lastIndexExclusive] = new OperationStatus(
-          OperationStatusCode.BAD_FAMILY, nscf.getMessage());
-      skip = true;
-    } catch (FailedSanityCheckException fsce) {
-      LOG.warn("Batch Mutation did not pass sanity check", fsce);
-      batchOp.retCodeDetails[lastIndexExclusive] = new OperationStatus(
-          OperationStatusCode.SANITY_CHECK_FAILURE, fsce.getMessage());
-      skip = true;
-    } catch (WrongRegionException we) {
-      LOG.warn("Batch mutation had a row that does not belong to this region", we);
-      batchOp.retCodeDetails[lastIndexExclusive] = new OperationStatus(
-          OperationStatusCode.SANITY_CHECK_FAILURE, we.getMessage());
-      skip = true;
-    }
-    return skip;
-  }
-
-  private void checkAndPrepareMutation(Mutation mutation, boolean replay,
-      final Map<byte[], List<Cell>> familyMap, final long now)
-          throws IOException {
-    if (mutation instanceof Put) {
-      // Check the families in the put. If bad, skip this one.
-      if (replay) {
-        removeNonExistentColumnFamilyForReplay(familyMap);
-      } else {
-        checkFamilies(familyMap.keySet());
-      }
-      checkTimestamps(mutation.getFamilyCellMap(), now);
-    } else {
-      prepareDelete((Delete)mutation);
-    }
-    checkRow(mutation.getRow(), "doMiniBatchMutation");
-  }
-
-  /**
-   * During replay, there could exist column families which are removed between region server
-   * failure and replay
-   */
-  private void removeNonExistentColumnFamilyForReplay(final Map<byte[], List<Cell>> familyMap) {
-    List<byte[]> nonExistentList = null;
-    for (byte[] family : familyMap.keySet()) {
-      if (!this.htableDescriptor.hasFamily(family)) {
-        if (nonExistentList == null) {
-          nonExistentList = new ArrayList<byte[]>();
-        }
-        nonExistentList.add(family);
-      }
-    }
-    if (nonExistentList != null) {
-      for (byte[] family : nonExistentList) {
-        // Perhaps schema was changed between crash and replay
-        LOG.info("No family for " + Bytes.toString(family) + " omit from reply.");
-        familyMap.remove(family);
-      }
+      batchOp.nextIndexToProcess = finalLastIndexExclusive;
     }
   }
 
@@ -3531,25 +3909,24 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
    * the table descriptor.
    */
   protected Durability getEffectiveDurability(Durability d) {
-    return d == Durability.USE_DEFAULT ? this.durability : d;
+    return d == Durability.USE_DEFAULT ? this.regionDurability : d;
   }
 
   @Override
   public boolean checkAndMutate(byte [] row, byte [] family, byte [] qualifier,
-      CompareOp compareOp, ByteArrayComparable comparator, Mutation mutation,
-      boolean writeToWAL)
+                                CompareOperator op, ByteArrayComparable comparator, Mutation mutation, boolean writeToWAL)
   throws IOException{
     checkMutationType(mutation, row);
-    return doCheckAndRowMutate(row, family, qualifier, compareOp, comparator, null,
+    return doCheckAndRowMutate(row, family, qualifier, op, comparator, null,
       mutation, writeToWAL);
   }
 
   @Override
   public boolean checkAndRowMutate(byte [] row, byte [] family, byte [] qualifier,
-      CompareOp compareOp, ByteArrayComparable comparator, RowMutations rm,
-      boolean writeToWAL)
+                                   CompareOperator op, ByteArrayComparable comparator, RowMutations rm,
+                                   boolean writeToWAL)
   throws IOException {
-    return doCheckAndRowMutate(row, family, qualifier, compareOp, comparator, rm, null,
+    return doCheckAndRowMutate(row, family, qualifier, op, comparator, rm, null,
       writeToWAL);
   }
 
@@ -3558,8 +3935,8 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
    * switches in the few places where there is deviation.
    */
   private boolean doCheckAndRowMutate(byte [] row, byte [] family, byte [] qualifier,
-      CompareOp compareOp, ByteArrayComparable comparator, RowMutations rowMutations,
-      Mutation mutation, boolean writeToWAL)
+                                      CompareOperator op, ByteArrayComparable comparator, RowMutations rowMutations,
+                                      Mutation mutation, boolean writeToWAL)
   throws IOException {
     // Could do the below checks but seems wacky with two callers only. Just comment out for now.
     // One caller passes a Mutation, the other passes RowMutation. Presume all good so we don't
@@ -3576,17 +3953,17 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
       get.addColumn(family, qualifier);
       // Lock row - note that doBatchMutate will relock this row if called
       checkRow(row, "doCheckAndRowMutate");
-      RowLock rowLock = getRowLockInternal(get.getRow(), false);
+      RowLock rowLock = getRowLockInternal(get.getRow(), false, null);
       try {
         if (mutation != null && this.getCoprocessorHost() != null) {
           // Call coprocessor.
           Boolean processed = null;
           if (mutation instanceof Put) {
             processed = this.getCoprocessorHost().preCheckAndPutAfterRowLock(row, family,
-                qualifier, compareOp, comparator, (Put)mutation);
+                qualifier, op, comparator, (Put)mutation);
           } else if (mutation instanceof Delete) {
             processed = this.getCoprocessorHost().preCheckAndDeleteAfterRowLock(row, family,
-                qualifier, compareOp, comparator, (Delete)mutation);
+                qualifier, op, comparator, (Delete)mutation);
           }
           if (processed != null) {
             return processed;
@@ -3599,7 +3976,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
         boolean valueIsNull = comparator.getValue() == null || comparator.getValue().length == 0;
         boolean matches = false;
         long cellTs = 0;
-        if (result.size() == 0 && valueIsNull) {
+        if (result.isEmpty() && valueIsNull) {
           matches = true;
         } else if (result.size() > 0 && result.get(0).getValueLength() == 0 && valueIsNull) {
           matches = true;
@@ -3607,8 +3984,8 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
         } else if (result.size() == 1 && !valueIsNull) {
           Cell kv = result.get(0);
           cellTs = kv.getTimestamp();
-          int compareResult = CellComparator.compareValue(kv, comparator);
-          matches = matches(compareOp, compareResult);
+          int compareResult = PrivateCellUtil.compareValue(kv, comparator);
+          matches = matches(op, compareResult);
         }
         // If matches put the new put or delete the new delete
         if (matches) {
@@ -3664,9 +4041,9 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     }
   }
 
-  private boolean matches(final CompareOp compareOp, final int compareResult) {
+  private boolean matches(final CompareOperator op, final int compareResult) {
     boolean matches = false;
-    switch (compareOp) {
+    switch (op) {
       case LESS:
         matches = compareResult < 0;
         break;
@@ -3686,7 +4063,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
         matches = compareResult > 0;
         break;
       default:
-        throw new RuntimeException("Unknown Compare op " + compareOp.name());
+        throw new RuntimeException("Unknown Compare op " + op.name());
     }
     return matches;
   }
@@ -3723,24 +4100,6 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     SnapshotManifest manifest = SnapshotManifest.create(conf, getFilesystem(),
             snapshotDir, desc, exnSnare);
     manifest.addRegion(this);
-
-    // The regionserver holding the first region of the table is responsible for taking the
-    // manifest of the mob dir.
-    if (!Bytes.equals(getRegionInfo().getStartKey(), HConstants.EMPTY_START_ROW))
-      return;
-
-    // if any cf's have is mob enabled, add the "mob region" to the manifest.
-    List<Store> stores = getStores();
-    for (Store store : stores) {
-      boolean hasMobStore = store.getFamily().isMobEnabled();
-      if (hasMobStore) {
-        // use the .mob as the start key and 0 as the regionid
-        HRegionInfo mobRegionInfo = MobUtils.getMobRegionInfo(this.getTableDesc().getTableName());
-        mobRegionInfo.setOffline(true);
-        manifest.addMobRegion(mobRegionInfo, this.getTableDesc().getColumnFamilies());
-        return;
-      }
-    }
   }
 
   private void updateSequenceId(final Iterable<List<Cell>> cellItr, final long sequenceId)
@@ -3748,20 +4107,27 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     for (List<Cell> cells: cellItr) {
       if (cells == null) return;
       for (Cell cell : cells) {
-        CellUtil.setSequenceId(cell, sequenceId);
+        PrivateCellUtil.setSequenceId(cell, sequenceId);
       }
     }
   }
 
-  @Override
+  /**
+   * Replace any cell timestamps set to {@link org.apache.hadoop.hbase.HConstants#LATEST_TIMESTAMP}
+   * provided current timestamp.
+   * @param cellItr
+   * @param now
+   */
   public void updateCellTimestamps(final Iterable<List<Cell>> cellItr, final byte[] now)
       throws IOException {
     for (List<Cell> cells: cellItr) {
       if (cells == null) continue;
+      // Optimization: 'foreach' loop is not used. See:
+      // HBASE-12023 HRegion.applyFamilyMapToMemstore creates too many iterator objects
       assert cells instanceof RandomAccess;
       int listSize = cells.size();
       for (int i = 0; i < listSize; i++) {
-        CellUtil.updateLatestStamp(cells.get(i), now, 0);
+        PrivateCellUtil.updateLatestStamp(cells.get(i), now);
       }
     }
   }
@@ -3786,7 +4152,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
         List<Tag> newTags = TagUtil.carryForwardTags(null, cell);
         newTags = TagUtil.carryForwardTTLTag(newTags, m.getTTL());
         // Rewrite the cell with the updated set of tags
-        cells.set(i, CellUtil.createCell(cell, newTags));
+        cells.set(i, PrivateCellUtil.createCell(cell, newTags));
       }
     }
   }
@@ -3797,20 +4163,21 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
    * We throw RegionTooBusyException if above memstore limit
    * and expect client to retry using some kind of backoff
   */
-  private void checkResources() throws RegionTooBusyException {
+  void checkResources() throws RegionTooBusyException {
     // If catalog region, do not impose resource constraints or block updates.
     if (this.getRegionInfo().isMetaRegion()) return;
 
     if (this.memstoreDataSize.get() > this.blockingMemStoreSize) {
       blockedRequestsCount.increment();
       requestFlush();
-      throw new RegionTooBusyException("Above memstore limit, " +
-          "regionName=" + (this.getRegionInfo() == null ? "unknown" :
-          this.getRegionInfo().getRegionNameAsString()) +
-          ", server=" + (this.getRegionServerServices() == null ? "unknown" :
+      // Don't print current limit because it will vary too much. The message is used as a key
+      // over in RetriesExhaustedWithDetailsException processing.
+      throw new RegionTooBusyException("Over memstore limit; regionName=" +
+          (this.getRegionInfo() == null? "unknown": this.getRegionInfo().getEncodedName()) +
+          ", server=" + (this.getRegionServerServices() == null ? "unknown":
           this.getRegionServerServices().getServerName()) +
-          ", memstoreSize=" + memstoreDataSize.get() +
-          ", blockingMemStoreSize=" + blockingMemStoreSize);
+          ", blockingMemStoreSize=" +
+          org.apache.hadoop.hbase.procedure2.util.StringUtils.humanSize(blockingMemStoreSize));
     }
   }
 
@@ -3843,10 +4210,10 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
    * @param edits Cell updates by column
    * @throws IOException
    */
-  private void put(final byte [] row, byte [] family, List<Cell> edits)
+  void put(final byte [] row, byte [] family, List<Cell> edits)
   throws IOException {
     NavigableMap<byte[], List<Cell>> familyMap;
-    familyMap = new TreeMap<byte[], List<Cell>>(Bytes.BYTES_COMPARATOR);
+    familyMap = new TreeMap<>(Bytes.BYTES_COMPARATOR);
 
     familyMap.put(family, edits);
     Put p = new Put(row);
@@ -3854,63 +4221,53 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     doBatchMutate(p);
   }
 
-  /*
-   * Atomically apply the given map of family->edits to the memstore.
-   * This handles the consistency control on its own, but the caller
-   * should already have locked updatesLock.readLock(). This also does
-   * <b>not</b> check the families for validity.
-   *
-   * @param familyMap Map of Cells by family
-   * @param memstoreSize
-   */
-  private void applyFamilyMapToMemstore(Map<byte[], List<Cell>> familyMap,
-      MemstoreSize memstoreSize) throws IOException {
-    for (Map.Entry<byte[], List<Cell>> e : familyMap.entrySet()) {
-      byte[] family = e.getKey();
-      List<Cell> cells = e.getValue();
-      assert cells instanceof RandomAccess;
-      applyToMemstore(getStore(family), cells, false, memstoreSize);
-    }
-  }
-
-  /*
+  /**
    * @param delta If we are doing delta changes -- e.g. increment/append -- then this flag will be
-   *  set; when set we will run operations that make sense in the increment/append scenario but
-   *  that do not make sense otherwise.
-   * @see #applyToMemstore(Store, Cell, long)
+   *          set; when set we will run operations that make sense in the increment/append scenario
+   *          but that do not make sense otherwise.
+   * @see #applyToMemStore(HStore, Cell, MemStoreSizing)
    */
-  private void applyToMemstore(final Store store, final List<Cell> cells, final boolean delta,
-      MemstoreSize memstoreSize) throws IOException {
-    // Any change in how we update Store/MemStore needs to also be done in other applyToMemstore!!!!
-    boolean upsert = delta && store.getFamily().getMaxVersions() == 1;
+  private void applyToMemStore(HStore store, List<Cell> cells, boolean delta,
+      MemStoreSizing memstoreAccounting) throws IOException {
+    // Any change in how we update Store/MemStore needs to also be done in other applyToMemStore!!!!
+    boolean upsert = delta && store.getColumnFamilyDescriptor().getMaxVersions() == 1;
     if (upsert) {
-      ((HStore) store).upsert(cells, getSmallestReadPoint(), memstoreSize);
+      store.upsert(cells, getSmallestReadPoint(), memstoreAccounting);
     } else {
-      ((HStore) store).add(cells, memstoreSize);
+      store.add(cells, memstoreAccounting);
     }
   }
 
-  /*
-   * @see #applyToMemstore(Store, List, boolean, boolean, long)
+  /**
+   * @see #applyToMemStore(HStore, List, boolean, MemStoreSizing)
    */
-  private void applyToMemstore(final Store store, final Cell cell, MemstoreSize memstoreSize)
-  throws IOException {
-    // Any change in how we update Store/MemStore needs to also be done in other applyToMemstore!!!!
+  private void applyToMemStore(HStore store, Cell cell, MemStoreSizing memstoreAccounting)
+      throws IOException {
+    // Any change in how we update Store/MemStore needs to also be done in other applyToMemStore!!!!
     if (store == null) {
       checkFamily(CellUtil.cloneFamily(cell));
       // Unreachable because checkFamily will throw exception
     }
-    ((HStore) store).add(cell, memstoreSize);
+    store.add(cell, memstoreAccounting);
   }
 
-  @Override
+  /**
+   * Check the collection of families for validity.
+   * @param families
+   * @throws NoSuchColumnFamilyException
+   */
   public void checkFamilies(Collection<byte[]> families) throws NoSuchColumnFamilyException {
     for (byte[] family : families) {
       checkFamily(family);
     }
   }
 
-  @Override
+  /**
+   * Check the collection of families for valid timestamps
+   * @param familyMap
+   * @param now current timestamp
+   * @throws FailedSanityCheckException
+   */
   public void checkTimestamps(final Map<byte[], List<Cell>> familyMap, long now)
       throws FailedSanityCheckException {
     if (timestampSlop == HConstants.LATEST_TIMESTAMP) {
@@ -3918,6 +4275,8 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     }
     long maxTs = now + timestampSlop;
     for (List<Cell> kvs : familyMap.values()) {
+      // Optimization: 'foreach' loop is not used. See:
+      // HBASE-12023 HRegion.applyFamilyMapToMemstore creates too many iterator objects
       assert kvs instanceof RandomAccess;
       int listSize  = kvs.size();
       for (int i=0; i < listSize; i++) {
@@ -3929,47 +4288,6 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
               + cell + " (too.new=" + timestampSlop + ")");
         }
       }
-    }
-  }
-
-  /**
-   * Append the given map of family->edits to a WALEdit data structure.
-   * This does not write to the WAL itself.
-   * @param familyMap map of family->edits
-   * @param walEdit the destination entry to append into
-   */
-  private void addFamilyMapToWALEdit(Map<byte[], List<Cell>> familyMap,
-      WALEdit walEdit) {
-    for (List<Cell> edits : familyMap.values()) {
-      assert edits instanceof RandomAccess;
-      int listSize = edits.size();
-      for (int i=0; i < listSize; i++) {
-        Cell cell = edits.get(i);
-        walEdit.add(cell);
-      }
-    }
-  }
-
-  private void requestFlushIfNeeded(long memstoreTotalSize) throws RegionTooBusyException {
-    if(memstoreTotalSize > this.getMemstoreFlushSize()) {
-      requestFlush();
-    }
-  }
-
-  private void requestFlush() {
-    if (this.rsServices == null) {
-      return;
-    }
-    synchronized (writestate) {
-      if (this.writestate.isFlushRequested()) {
-        return;
-      }
-      writestate.flushRequested = true;
-    }
-    // Make request outside of synchronize block; HBASE-818.
-    this.rsServices.getFlushRequester().requestFlush(this, false);
-    if (LOG.isDebugEnabled()) {
-      LOG.debug("Flush requested on " + this.getRegionInfo().getEncodedName());
     }
   }
 
@@ -4087,7 +4405,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     }
     if (seqid > minSeqIdForTheRegion) {
       // Then we added some edits to memory. Flush and cleanup split edit files.
-      internalFlushcache(null, seqid, stores.values(), status, false);
+      internalFlushcache(null, seqid, stores.values(), status, false, FlushLifeCycleTracker.DUMMY);
     }
     // Now delete the content of recovered edits.  We're done w/ them.
     if (files.size() > 0 && this.conf.getBoolean("hbase.region.archive.recovered.edits", false)) {
@@ -4095,10 +4413,10 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
       // If this flag is set, make use of the hfile archiving by making recovered.edits a fake
       // column family. Have to fake out file type too by casting our recovered.edits as storefiles
       String fakeFamilyName = WALSplitter.getRegionDirRecoveredEditsDir(regiondir).getName();
-      Set<StoreFile> fakeStoreFiles = new HashSet<StoreFile>(files.size());
+      Set<HStoreFile> fakeStoreFiles = new HashSet<>(files.size());
       for (Path file: files) {
-        fakeStoreFiles.add(new StoreFile(getRegionFileSystem().getFileSystem(), file, this.conf,
-          null, null));
+        fakeStoreFiles.add(
+          new HStoreFile(getRegionFileSystem().getFileSystem(), file, this.conf, null, null, true));
       }
       getRegionFileSystem().removeStoreFiles(fakeFamilyName, fakeStoreFiles);
     } else {
@@ -4188,16 +4506,16 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
           }
 
           if (firstSeqIdInLog == -1) {
-            firstSeqIdInLog = key.getLogSeqNum();
+            firstSeqIdInLog = key.getSequenceId();
           }
-          if (currentEditSeqId > key.getLogSeqNum()) {
+          if (currentEditSeqId > key.getSequenceId()) {
             // when this condition is true, it means we have a serious defect because we need to
             // maintain increasing SeqId for WAL edits per region
             LOG.error(getRegionInfo().getEncodedName() + " : "
                  + "Found decreasing SeqId. PreId=" + currentEditSeqId + " key=" + key
                 + "; edit=" + val);
           } else {
-            currentEditSeqId = key.getLogSeqNum();
+            currentEditSeqId = key.getSequenceId();
           }
           currentReplaySeqId = (key.getOrigLogSeqNum() > 0) ?
             key.getOrigLogSeqNum() : currentEditSeqId;
@@ -4219,7 +4537,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
           }
 
           boolean flush = false;
-          MemstoreSize memstoreSize = new MemstoreSize();
+          MemStoreSizing memstoreSize = new MemStoreSizing();
           for (Cell cell: val.getCells()) {
             // Check this edit is for me. Also, guard against writing the special
             // METACOLUMN info such as HBASE::CACHEFLUSH entries
@@ -4237,8 +4555,9 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
               continue;
             }
             // Figure which store the edit is meant for.
-            if (store == null || !CellUtil.matchingFamily(cell, store.getFamily().getName())) {
-              store = getHStore(cell);
+            if (store == null || !CellUtil.matchingFamily(cell,
+                store.getColumnFamilyDescriptor().getName())) {
+              store = getStore(cell);
             }
             if (store == null) {
               // This should never happen.  Perhaps schema was changed between
@@ -4254,12 +4573,12 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
               continue;
             }
             // Now, figure if we should skip this edit.
-            if (key.getLogSeqNum() <= maxSeqIdInStores.get(store.getFamily()
+            if (key.getSequenceId() <= maxSeqIdInStores.get(store.getColumnFamilyDescriptor()
                 .getName())) {
               skippedEdits++;
               continue;
             }
-            CellUtil.setSequenceId(cell, currentReplaySeqId);
+            PrivateCellUtil.setSequenceId(cell, currentReplaySeqId);
 
             restoreEdit(store, cell, memstoreSize);
             editsCount++;
@@ -4268,9 +4587,10 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
             rsAccounting.addRegionReplayEditsSize(getRegionInfo().getRegionName(),
                 memstoreSize);
           }
-          flush = isFlushSize(this.addAndGetMemstoreSize(memstoreSize));
+          flush = isFlushSize(this.addAndGetMemStoreSize(memstoreSize));
           if (flush) {
-            internalFlushcache(null, currentEditSeqId, stores.values(), status, false);
+            internalFlushcache(null, currentEditSeqId, stores.values(), status, false,
+              FlushLifeCycleTracker.DUMMY);
           }
 
           if (coprocessorHost != null) {
@@ -4367,7 +4687,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
 
       startRegionOperation(Operation.REPLAY_EVENT);
       try {
-        HStore store = this.getHStore(compaction.getFamilyName().toByteArray());
+        HStore store = this.getStore(compaction.getFamilyName().toByteArray());
         if (store == null) {
           LOG.warn(getRegionInfo().getEncodedName() + " : "
               + "Found Compaction WAL edit for deleted family:"
@@ -4437,10 +4757,10 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
   PrepareFlushResult replayWALFlushStartMarker(FlushDescriptor flush) throws IOException {
     long flushSeqId = flush.getFlushSequenceNumber();
 
-    HashSet<Store> storesToFlush = new HashSet<Store>();
+    HashSet<HStore> storesToFlush = new HashSet<>();
     for (StoreFlushDescriptor storeFlush : flush.getStoreFlushesList()) {
       byte[] family = storeFlush.getFamilyName().toByteArray();
-      Store store = getStore(family);
+      HStore store = getStore(family);
       if (store == null) {
         LOG.warn(getRegionInfo().getEncodedName() + " : "
           + "Received a flush start marker from primary, but the family is not found. Ignoring"
@@ -4473,8 +4793,8 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
           // we can just snapshot our memstores and continue as normal.
 
           // invoke prepareFlushCache. Send null as wal since we do not want the flush events in wal
-          PrepareFlushResult prepareResult = internalPrepareFlushCache(null,
-            flushSeqId, storesToFlush, status, false);
+          PrepareFlushResult prepareResult = internalPrepareFlushCache(null, flushSeqId,
+            storesToFlush, status, false, FlushLifeCycleTracker.DUMMY);
           if (prepareResult.result == null) {
             // save the PrepareFlushResult so that we can use it later from commit flush
             this.writestate.flushing = true;
@@ -4577,7 +4897,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
             replayFlushInStores(flush, prepareFlushResult, true);
 
             // Set down the memstore size by amount of flush.
-            this.decrMemstoreSize(prepareFlushResult.totalFlushableSize);
+            this.decrMemStoreSize(prepareFlushResult.totalFlushableSize);
 
             this.prepareFlushResult = null;
             writestate.flushing = false;
@@ -4610,11 +4930,11 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
             replayFlushInStores(flush, prepareFlushResult, true);
 
             // Set down the memstore size by amount of flush.
-            this.decrMemstoreSize(prepareFlushResult.totalFlushableSize);
+            this.decrMemStoreSize(prepareFlushResult.totalFlushableSize);
 
             // Inspect the memstore contents to see whether the memstore contains only edits
             // with seqId smaller than the flush seqId. If so, we can discard those edits.
-            dropMemstoreContentsForSeqId(flush.getFlushSequenceNumber(), null);
+            dropMemStoreContentsForSeqId(flush.getFlushSequenceNumber(), null);
 
             this.prepareFlushResult = null;
             writestate.flushing = false;
@@ -4635,7 +4955,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
 
           // Inspect the memstore contents to see whether the memstore contains only edits
           // with seqId smaller than the flush seqId. If so, we can discard those edits.
-          dropMemstoreContentsForSeqId(flush.getFlushSequenceNumber(), null);
+          dropMemStoreContentsForSeqId(flush.getFlushSequenceNumber(), null);
         }
 
         status.markComplete("Flush commit successful");
@@ -4677,7 +4997,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
       throws IOException {
     for (StoreFlushDescriptor storeFlush : flush.getStoreFlushesList()) {
       byte[] family = storeFlush.getFamilyName().toByteArray();
-      Store store = getStore(family);
+      HStore store = getStore(family);
       if (store == null) {
         LOG.warn(getRegionInfo().getEncodedName() + " : "
             + "Received a flush commit marker from primary, but the family is not found."
@@ -4688,7 +5008,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
       StoreFlushContext ctx = null;
       long startTime = EnvironmentEdgeManager.currentTime();
       if (prepareFlushResult == null || prepareFlushResult.storeFlushCtxs == null) {
-        ctx = store.createFlushContext(flush.getFlushSequenceNumber());
+        ctx = store.createFlushContext(flush.getFlushSequenceNumber(), FlushLifeCycleTracker.DUMMY);
       } else {
         ctx = prepareFlushResult.storeFlushCtxs.get(family);
         startTime = prepareFlushResult.startTime;
@@ -4713,8 +5033,8 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
    * if the memstore edits have seqNums smaller than the given seq id
    * @throws IOException
    */
-  private MemstoreSize dropMemstoreContentsForSeqId(long seqId, Store store) throws IOException {
-    MemstoreSize totalFreedSize = new MemstoreSize();
+  private MemStoreSize dropMemStoreContentsForSeqId(long seqId, HStore store) throws IOException {
+    MemStoreSizing totalFreedSize = new MemStoreSizing();
     this.updatesLock.writeLock().lock();
     try {
 
@@ -4727,11 +5047,11 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
 
         // Prepare flush (take a snapshot) and then abort (drop the snapshot)
         if (store == null) {
-          for (Store s : stores.values()) {
-            totalFreedSize.incMemstoreSize(doDropStoreMemstoreContentsForSeqId(s, currentSeqId));
+          for (HStore s : stores.values()) {
+            totalFreedSize.incMemStoreSize(doDropStoreMemStoreContentsForSeqId(s, currentSeqId));
           }
         } else {
-          totalFreedSize.incMemstoreSize(doDropStoreMemstoreContentsForSeqId(store, currentSeqId));
+          totalFreedSize.incMemStoreSize(doDropStoreMemStoreContentsForSeqId(store, currentSeqId));
         }
       } else {
         LOG.info(getRegionInfo().getEncodedName() + " : "
@@ -4744,11 +5064,11 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     return totalFreedSize;
   }
 
-  private MemstoreSize doDropStoreMemstoreContentsForSeqId(Store s, long currentSeqId)
+  private MemStoreSize doDropStoreMemStoreContentsForSeqId(HStore s, long currentSeqId)
       throws IOException {
-    MemstoreSize flushableSize = s.getSizeToFlush();
-    this.decrMemstoreSize(flushableSize);
-    StoreFlushContext ctx = s.createFlushContext(currentSeqId);
+    MemStoreSize flushableSize = s.getFlushableSize();
+    this.decrMemStoreSize(flushableSize);
+    StoreFlushContext ctx = s.createFlushContext(currentSeqId, FlushLifeCycleTracker.DUMMY);
     ctx.prepare();
     ctx.abort();
     return flushableSize;
@@ -4835,7 +5155,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
         for (StoreDescriptor storeDescriptor : regionEvent.getStoresList()) {
           // stores of primary may be different now
           byte[] family = storeDescriptor.getFamilyName().toByteArray();
-          Store store = getStore(family);
+          HStore store = getStore(family);
           if (store == null) {
             LOG.warn(getRegionInfo().getEncodedName() + " : "
                 + "Received a region open marker from primary, but the family is not found. "
@@ -4843,7 +5163,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
             continue;
           }
 
-          long storeSeqId = store.getMaxSequenceId();
+          long storeSeqId = store.getMaxSequenceId().orElse(0L);
           List<String> storeFiles = storeDescriptor.getStoreFileList();
           try {
             store.refreshStoreFiles(storeFiles); // replace the files with the new ones
@@ -4853,7 +5173,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
                     + " doesn't exist any more. Skip loading the file(s)", ex);
             continue;
           }
-          if (store.getMaxSequenceId() != storeSeqId) {
+          if (store.getMaxSequenceId().orElse(0L) != storeSeqId) {
             // Record latest flush time if we picked up new files
             lastStoreFlushTimeMap.put(store, EnvironmentEdgeManager.currentTime());
           }
@@ -4864,16 +5184,16 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
               StoreFlushContext ctx = this.prepareFlushResult.storeFlushCtxs == null ?
                   null : this.prepareFlushResult.storeFlushCtxs.get(family);
               if (ctx != null) {
-                MemstoreSize snapshotSize = store.getSizeToFlush();
+                MemStoreSize snapshotSize = store.getFlushableSize();
                 ctx.abort();
-                this.decrMemstoreSize(snapshotSize);
+                this.decrMemStoreSize(snapshotSize);
                 this.prepareFlushResult.storeFlushCtxs.remove(family);
               }
             }
           }
 
           // Drop the memstore contents if they are now smaller than the latest seen flushed file
-          dropMemstoreContentsForSeqId(regionEvent.getLogSequenceNumber(), store);
+          dropMemStoreContentsForSeqId(regionEvent.getLogSequenceNumber(), store);
           if (storeSeqId > this.maxFlushedSeqId) {
             this.maxFlushedSeqId = storeSeqId;
           }
@@ -4951,7 +5271,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
         for (StoreDescriptor storeDescriptor : bulkLoadEvent.getStoresList()) {
           // stores of primary may be different now
           family = storeDescriptor.getFamilyName().toByteArray();
-          HStore store = getHStore(family);
+          HStore store = getStore(family);
           if (store == null) {
             LOG.warn(getRegionInfo().getEncodedName() + " : "
                     + "Received a bulk load marker from primary, but the family is not found. "
@@ -4989,13 +5309,13 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     if (writestate.flushing) {
       boolean canDrop = true;
       if (prepareFlushResult.storeFlushCtxs != null) {
-        for (Entry<byte[], StoreFlushContext> entry
-            : prepareFlushResult.storeFlushCtxs.entrySet()) {
-          Store store = getStore(entry.getKey());
+        for (Entry<byte[], StoreFlushContext> entry : prepareFlushResult.storeFlushCtxs
+            .entrySet()) {
+          HStore store = getStore(entry.getKey());
           if (store == null) {
             continue;
           }
-          if (store.getSizeOfSnapshot().getDataSize() > 0) {
+          if (store.getSnapshotSize().getDataSize() > 0) {
             canDrop = false;
             break;
           }
@@ -5016,8 +5336,8 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     return refreshStoreFiles(false);
   }
 
-  @edu.umd.cs.findbugs.annotations.SuppressWarnings(value="NN_NAKED_NOTIFY",
-      justification="Notify is about post replay. Intentional")
+  @edu.umd.cs.findbugs.annotations.SuppressWarnings(value = "NN_NAKED_NOTIFY",
+      justification = "Notify is about post replay. Intentional")
   protected boolean refreshStoreFiles(boolean force) throws IOException {
     if (!force && ServerRegionReplicaUtil.isDefaultReplica(this.getRegionInfo())) {
       return false; // if primary nothing to do
@@ -5034,34 +5354,35 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
 
     startRegionOperation(); // obtain region close lock
     try {
-      Map<Store, Long> map = new HashMap<Store, Long>();
+      Map<HStore, Long> map = new HashMap<>();
       synchronized (writestate) {
-        for (Store store : getStores()) {
+        for (HStore store : stores.values()) {
           // TODO: some stores might see new data from flush, while others do not which
           // MIGHT break atomic edits across column families.
-          long maxSeqIdBefore = store.getMaxSequenceId();
+          long maxSeqIdBefore = store.getMaxSequenceId().orElse(0L);
 
           // refresh the store files. This is similar to observing a region open wal marker.
           store.refreshStoreFiles();
 
-          long storeSeqId = store.getMaxSequenceId();
+          long storeSeqId = store.getMaxSequenceId().orElse(0L);
           if (storeSeqId < smallestSeqIdInStores) {
             smallestSeqIdInStores = storeSeqId;
           }
 
           // see whether we can drop the memstore or the snapshot
           if (storeSeqId > maxSeqIdBefore) {
-
             if (writestate.flushing) {
               // only drop memstore snapshots if they are smaller than last flush for the store
               if (this.prepareFlushResult.flushOpSeqId <= storeSeqId) {
                 StoreFlushContext ctx = this.prepareFlushResult.storeFlushCtxs == null ?
-                    null : this.prepareFlushResult.storeFlushCtxs.get(store.getFamily().getName());
+                    null : this.prepareFlushResult.storeFlushCtxs.get(
+                            store.getColumnFamilyDescriptor().getName());
                 if (ctx != null) {
-                  MemstoreSize snapshotSize = store.getSizeToFlush();
+                  MemStoreSize snapshotSize = store.getFlushableSize();
                   ctx.abort();
-                  this.decrMemstoreSize(snapshotSize);
-                  this.prepareFlushResult.storeFlushCtxs.remove(store.getFamily().getName());
+                  this.decrMemStoreSize(snapshotSize);
+                  this.prepareFlushResult.storeFlushCtxs.remove(
+                          store.getColumnFamilyDescriptor().getName());
                   totalFreedDataSize += snapshotSize.getDataSize();
                 }
               }
@@ -5076,10 +5397,10 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
         dropPrepareFlushIfPossible();
 
         // advance the mvcc read point so that the new flushed files are visible.
-          // either greater than flush seq number or they were already picked up via flush.
-          for (Store s : getStores()) {
-            mvcc.advanceTo(s.getMaxMemstoreTS());
-          }
+        // either greater than flush seq number or they were already picked up via flush.
+        for (HStore s : stores.values()) {
+          mvcc.advanceTo(s.getMaxMemStoreTS().orElse(0L));
+        }
 
 
         // smallestSeqIdInStores is the seqId that we have a corresponding hfile for. We can safely
@@ -5091,17 +5412,10 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
         }
       }
       if (!map.isEmpty()) {
-        if (!force) {
-          for (Map.Entry<Store, Long> entry : map.entrySet()) {
-            // Drop the memstore contents if they are now smaller than the latest seen flushed file
-            totalFreedDataSize += dropMemstoreContentsForSeqId(entry.getValue(), entry.getKey())
-                .getDataSize();
-          }
-        } else {
-          synchronized (storeSeqIds) {
-            // don't try to acquire write lock of updatesLock now
-            storeSeqIds.add(map);
-          }
+        for (Map.Entry<HStore, Long> entry : map.entrySet()) {
+          // Drop the memstore contents if they are now smaller than the latest seen flushed file
+          totalFreedDataSize += dropMemStoreContentsForSeqId(entry.getValue(), entry.getKey())
+              .getDataSize();
         }
       }
       // C. Finally notify anyone waiting on memstore to clear:
@@ -5118,13 +5432,9 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
   private void logRegionFiles() {
     if (LOG.isTraceEnabled()) {
       LOG.trace(getRegionInfo().getEncodedName() + " : Store files for region: ");
-      for (Store s : stores.values()) {
-        Collection<StoreFile> storeFiles = s.getStorefiles();
-        if (storeFiles == null) continue;
-        for (StoreFile sf : storeFiles) {
-          LOG.trace(getRegionInfo().getEncodedName() + " : " + sf);
-        }
-      }
+      stores.values().stream().filter(s -> s.getStorefiles() != null)
+          .flatMap(s -> s.getStorefiles().stream())
+          .forEachOrdered(sf -> LOG.trace(getRegionInfo().getEncodedName() + " : " + sf));
     }
   }
 
@@ -5148,18 +5458,17 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
       + " does not match this region: " + this.getRegionInfo());
   }
 
-  /*
+  /**
    * Used by tests
    * @param s Store to add edit too.
    * @param cell Cell to add.
-   * @param memstoreSize
    */
-  protected void restoreEdit(final HStore s, final Cell cell, MemstoreSize memstoreSize) {
-    s.add(cell, memstoreSize);
+  @VisibleForTesting
+  protected void restoreEdit(HStore s, Cell cell, MemStoreSizing memstoreAccounting) {
+    s.add(cell, memstoreAccounting);
   }
 
-  /*
-   * @param fs
+  /**
    * @param p File to check.
    * @return True if file was zero-length (and if so, we'll delete it in here).
    * @throws IOException
@@ -5167,13 +5476,15 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
   private static boolean isZeroLengthThenDelete(final FileSystem fs, final Path p)
       throws IOException {
     FileStatus stat = fs.getFileStatus(p);
-    if (stat.getLen() > 0) return false;
+    if (stat.getLen() > 0) {
+      return false;
+    }
     LOG.warn("File " + p + " is zero-length, deleting.");
     fs.delete(p, false);
     return true;
   }
 
-  protected HStore instantiateHStore(final HColumnDescriptor family) throws IOException {
+  protected HStore instantiateHStore(final ColumnFamilyDescriptor family) throws IOException {
     if (family.isMobEnabled()) {
       if (HFile.getFormatVersion(this.conf) < HFile.MIN_FORMAT_VERSION_WITH_TAGS) {
         throw new IOException("A minimum HFile version of "
@@ -5187,51 +5498,39 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
   }
 
   @Override
-  public Store getStore(final byte[] column) {
-    return getHStore(column);
-  }
-
-  public HStore getHStore(final byte[] column) {
-    return (HStore) this.stores.get(column);
+  public HStore getStore(byte[] column) {
+    return this.stores.get(column);
   }
 
   /**
-   * Return HStore instance. Does not do any copy: as the number of store is limited, we
-   *  iterate on the list.
+   * Return HStore instance. Does not do any copy: as the number of store is limited, we iterate on
+   * the list.
    */
-  private HStore getHStore(Cell cell) {
-    for (Map.Entry<byte[], Store> famStore : stores.entrySet()) {
-      if (Bytes.equals(
-          cell.getFamilyArray(), cell.getFamilyOffset(), cell.getFamilyLength(),
-          famStore.getKey(), 0, famStore.getKey().length)) {
-        return (HStore) famStore.getValue();
-      }
-    }
-
-    return null;
+  private HStore getStore(Cell cell) {
+    return stores.entrySet().stream().filter(e -> CellUtil.matchingFamily(cell, e.getKey()))
+        .map(e -> e.getValue()).findFirst().orElse(null);
   }
 
   @Override
-  public List<Store> getStores() {
-    List<Store> list = new ArrayList<Store>(stores.size());
-    list.addAll(stores.values());
-    return list;
+  public List<HStore> getStores() {
+    return new ArrayList<>(stores.values());
   }
 
   @Override
-  public List<String> getStoreFileList(final byte [][] columns)
-    throws IllegalArgumentException {
-    List<String> storeFileNames = new ArrayList<String>();
-    synchronized(closeLock) {
-      for(byte[] column : columns) {
-        Store store = this.stores.get(column);
+  public List<String> getStoreFileList(byte[][] columns) throws IllegalArgumentException {
+    List<String> storeFileNames = new ArrayList<>();
+    synchronized (closeLock) {
+      for (byte[] column : columns) {
+        HStore store = this.stores.get(column);
         if (store == null) {
-          throw new IllegalArgumentException("No column family : " +
-              new String(column) + " available");
+          throw new IllegalArgumentException(
+              "No column family : " + new String(column) + " available");
         }
-        Collection<StoreFile> storeFiles = store.getStorefiles();
-        if (storeFiles == null) continue;
-        for (StoreFile storeFile: storeFiles) {
+        Collection<HStoreFile> storeFiles = store.getStorefiles();
+        if (storeFiles == null) {
+          continue;
+        }
+        for (HStoreFile storeFile : storeFiles) {
           storeFileNames.add(storeFile.getPath().toString());
         }
 
@@ -5246,7 +5545,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
   //////////////////////////////////////////////////////////////////////////////
 
   /** Make sure this is a valid row for the HRegion */
-  void checkRow(final byte [] row, String op) throws IOException {
+  void checkRow(byte[] row, String op) throws IOException {
     if (!rowIsInRange(getRegionInfo(), row)) {
       throw new WrongRegionException("Requested row out of range for " +
           op + " on HRegion " + this + ", startKey='" +
@@ -5270,83 +5569,105 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
   @Override
   public RowLock getRowLock(byte[] row, boolean readLock) throws IOException {
     checkRow(row, "row lock");
-    return getRowLockInternal(row, readLock);
+    return getRowLockInternal(row, readLock, null);
   }
 
-  protected RowLock getRowLockInternal(byte[] row, boolean readLock) throws IOException {
+  protected RowLock getRowLockInternal(byte[] row, boolean readLock, final RowLock prevRowLock)
+      throws IOException {
     // create an object to use a a key in the row lock map
     HashedBytes rowKey = new HashedBytes(row);
 
     RowLockContext rowLockContext = null;
     RowLockImpl result = null;
-    TraceScope traceScope = null;
 
-    // If we're tracing start a span to show how long this took.
-    if (Trace.isTracing()) {
-      traceScope = Trace.startSpan("HRegion.getRowLock");
-      traceScope.getSpan().addTimelineAnnotation("Getting a " + (readLock?"readLock":"writeLock"));
-    }
-
-    try {
+    boolean success = false;
+    try (TraceScope scope = TraceUtil.createTrace("HRegion.getRowLock")) {
+      TraceUtil.addTimelineAnnotation("Getting a " + (readLock?"readLock":"writeLock"));
       // Keep trying until we have a lock or error out.
       // TODO: do we need to add a time component here?
       while (result == null) {
-
-        // Try adding a RowLockContext to the lockedRows.
-        // If we can add it then there's no other transactions currently running.
-        rowLockContext = new RowLockContext(rowKey);
-        RowLockContext existingContext = lockedRows.putIfAbsent(rowKey, rowLockContext);
-
-        // if there was a running transaction then there's already a context.
-        if (existingContext != null) {
-          rowLockContext = existingContext;
-        }
-
+        rowLockContext = computeIfAbsent(lockedRows, rowKey, () -> new RowLockContext(rowKey));
         // Now try an get the lock.
-        //
         // This can fail as
         if (readLock) {
+          // For read lock, if the caller has locked the same row previously, it will not try
+          // to acquire the same read lock. It simply returns the previous row lock.
+          RowLockImpl prevRowLockImpl = (RowLockImpl)prevRowLock;
+          if ((prevRowLockImpl != null) && (prevRowLockImpl.getLock() ==
+              rowLockContext.readWriteLock.readLock())) {
+            success = true;
+            return prevRowLock;
+          }
           result = rowLockContext.newReadLock();
         } else {
           result = rowLockContext.newWriteLock();
         }
       }
-      if (!result.getLock().tryLock(this.rowLockWaitDuration, TimeUnit.MILLISECONDS)) {
-        if (traceScope != null) {
-          traceScope.getSpan().addTimelineAnnotation("Failed to get row lock");
+
+      int timeout = rowLockWaitDuration;
+      boolean reachDeadlineFirst = false;
+      Optional<RpcCall> call = RpcServer.getCurrentCall();
+      if (call.isPresent()) {
+        long deadline = call.get().getDeadline();
+        if (deadline < Long.MAX_VALUE) {
+          int timeToDeadline = (int) (deadline - System.currentTimeMillis());
+          if (timeToDeadline <= this.rowLockWaitDuration) {
+            reachDeadlineFirst = true;
+            timeout = timeToDeadline;
+          }
         }
-        result = null;
-        // Clean up the counts just in case this was the thing keeping the context alive.
-        rowLockContext.cleanUp();
-        throw new IOException("Timed out waiting for lock for row: " + rowKey + " in region "
-            + getRegionInfo().getEncodedName());
+      }
+
+      if (timeout <= 0 || !result.getLock().tryLock(timeout, TimeUnit.MILLISECONDS)) {
+        TraceUtil.addTimelineAnnotation("Failed to get row lock");
+        String message = "Timed out waiting for lock for row: " + rowKey + " in region "
+            + getRegionInfo().getEncodedName();
+        if (reachDeadlineFirst) {
+          throw new TimeoutIOException(message);
+        } else {
+          // If timeToDeadline is larger than rowLockWaitDuration, we can not drop the request.
+          throw new IOException(message);
+        }
       }
       rowLockContext.setThreadName(Thread.currentThread().getName());
+      success = true;
       return result;
     } catch (InterruptedException ie) {
       LOG.warn("Thread interrupted waiting for lock on row: " + rowKey);
       InterruptedIOException iie = new InterruptedIOException();
       iie.initCause(ie);
-      if (traceScope != null) {
-        traceScope.getSpan().addTimelineAnnotation("Interrupted exception getting row lock");
-      }
+      TraceUtil.addTimelineAnnotation("Interrupted exception getting row lock");
       Thread.currentThread().interrupt();
       throw iie;
+    } catch (Error error) {
+      // The maximum lock count for read lock is 64K (hardcoded), when this maximum count
+      // is reached, it will throw out an Error. This Error needs to be caught so it can
+      // go ahead to process the minibatch with lock acquired.
+      LOG.warn("Error to get row lock for " + Bytes.toStringBinary(row) + ", cause: " + error);
+      IOException ioe = new IOException();
+      ioe.initCause(error);
+      TraceUtil.addTimelineAnnotation("Error getting row lock");
+      throw ioe;
     } finally {
-      if (traceScope != null) {
-        traceScope.close();
+      // Clean up the counts just in case this was the thing keeping the context alive.
+      if (!success && rowLockContext != null) {
+        rowLockContext.cleanUp();
       }
     }
   }
 
-  @Override
-  public void releaseRowLocks(List<RowLock> rowLocks) {
+  private void releaseRowLocks(List<RowLock> rowLocks) {
     if (rowLocks != null) {
-      for (int i = 0; i < rowLocks.size(); i++) {
-        rowLocks.get(i).release();
+      for (RowLock rowLock : rowLocks) {
+        rowLock.release();
       }
       rowLocks.clear();
     }
+  }
+
+  @VisibleForTesting
+  public int getReadLockCount() {
+    return lock.getReadLockCount();
   }
 
   public ConcurrentHashMap<HashedBytes, RowLockContext> getLockedRows() {
@@ -5390,7 +5711,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
       long c = count.decrementAndGet();
       if (c <= 0) {
         synchronized (lock) {
-          if (count.get() <= 0){
+          if (count.get() <= 0 && usable.get()){ // Don't attempt to remove row if already removed
             usable.set(false);
             RowLockContext removed = lockedRows.remove(row);
             assert removed == this: "we should never remove a different context";
@@ -5471,18 +5792,72 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     return multipleFamilies;
   }
 
-  @Override
-  public boolean bulkLoadHFiles(Collection<Pair<byte[], String>> familyPaths, boolean assignSeqId,
+  /**
+   * Attempts to atomically load a group of hfiles.  This is critical for loading
+   * rows with multiple column families atomically.
+   *
+   * @param familyPaths List of Pair&lt;byte[] column family, String hfilePath&gt;
+   * @param bulkLoadListener Internal hooks enabling massaging/preparation of a
+   * file about to be bulk loaded
+   * @param assignSeqId
+   * @return Map from family to List of store file paths if successful, null if failed recoverably
+   * @throws IOException if failed unrecoverably.
+   */
+  public Map<byte[], List<Path>> bulkLoadHFiles(Collection<Pair<byte[], String>> familyPaths, boolean assignSeqId,
       BulkLoadListener bulkLoadListener) throws IOException {
     return bulkLoadHFiles(familyPaths, assignSeqId, bulkLoadListener, false);
   }
 
-  @Override
-  public boolean bulkLoadHFiles(Collection<Pair<byte[], String>> familyPaths, boolean assignSeqId,
-      BulkLoadListener bulkLoadListener, boolean copyFile) throws IOException {
+  /**
+   * Listener class to enable callers of
+   * bulkLoadHFile() to perform any necessary
+   * pre/post processing of a given bulkload call
+   */
+  public interface BulkLoadListener {
+    /**
+     * Called before an HFile is actually loaded
+     * @param family family being loaded to
+     * @param srcPath path of HFile
+     * @return final path to be used for actual loading
+     * @throws IOException
+     */
+    String prepareBulkLoad(byte[] family, String srcPath, boolean copyFile)
+        throws IOException;
+
+    /**
+     * Called after a successful HFile load
+     * @param family family being loaded to
+     * @param srcPath path of HFile
+     * @throws IOException
+     */
+    void doneBulkLoad(byte[] family, String srcPath) throws IOException;
+
+    /**
+     * Called after a failed HFile load
+     * @param family family being loaded to
+     * @param srcPath path of HFile
+     * @throws IOException
+     */
+    void failedBulkLoad(byte[] family, String srcPath) throws IOException;
+  }
+
+  /**
+   * Attempts to atomically load a group of hfiles.  This is critical for loading
+   * rows with multiple column families atomically.
+   *
+   * @param familyPaths List of Pair&lt;byte[] column family, String hfilePath&gt;
+   * @param assignSeqId
+   * @param bulkLoadListener Internal hooks enabling massaging/preparation of a
+   * file about to be bulk loaded
+   * @param copyFile always copy hfiles if true
+   * @return Map from family to List of store file paths if successful, null if failed recoverably
+   * @throws IOException if failed unrecoverably.
+   */
+  public Map<byte[], List<Path>> bulkLoadHFiles(Collection<Pair<byte[], String>> familyPaths,
+      boolean assignSeqId, BulkLoadListener bulkLoadListener, boolean copyFile) throws IOException {
     long seqId = -1;
-    Map<byte[], List<Path>> storeFiles = new TreeMap<byte[], List<Path>>(Bytes.BYTES_COMPARATOR);
-    Map<String, Long> storeFilesSizes = new HashMap<String, Long>();
+    Map<byte[], List<Path>> storeFiles = new TreeMap<>(Bytes.BYTES_COMPARATOR);
+    Map<String, Long> storeFilesSizes = new HashMap<>();
     Preconditions.checkNotNull(familyPaths);
     // we need writeLock for multi-family bulk load
     startBulkRegionOperation(hasMultipleColumnFamilies(familyPaths));
@@ -5493,13 +5868,13 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
       // There possibly was a split that happened between when the split keys
       // were gathered and before the HRegion's write lock was taken.  We need
       // to validate the HFile region before attempting to bulk load all of them
-      List<IOException> ioes = new ArrayList<IOException>();
-      List<Pair<byte[], String>> failures = new ArrayList<Pair<byte[], String>>();
+      List<IOException> ioes = new ArrayList<>();
+      List<Pair<byte[], String>> failures = new ArrayList<>();
       for (Pair<byte[], String> p : familyPaths) {
         byte[] familyName = p.getFirst();
         String path = p.getSecond();
 
-        HStore store = getHStore(familyName);
+        HStore store = getStore(familyName);
         if (store == null) {
           IOException ioe = new org.apache.hadoop.hbase.DoNotRetryIOException(
               "No such column family " + Bytes.toStringBinary(familyName));
@@ -5534,7 +5909,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
         // problem when validating
         LOG.warn("There was a recoverable bulk load failure likely due to a" +
             " split.  These (family, HFile) pairs were not loaded: " + list);
-        return isSuccessful;
+        return null;
       }
 
       // We need to assign a sequential ID that's in between two memstores in order to preserve
@@ -5543,53 +5918,42 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
       // guaranteed to be one beyond the file made when we flushed (or if nothing to flush, it is
       // a sequence id that we can be sure is beyond the last hfile written).
       if (assignSeqId) {
-        FlushResult fs = flushcache(true, false);
+        FlushResult fs = flushcache(true, false, FlushLifeCycleTracker.DUMMY);
         if (fs.isFlushSucceeded()) {
           seqId = ((FlushResultImpl)fs).flushSequenceId;
         } else if (fs.getResult() == FlushResult.Result.CANNOT_FLUSH_MEMSTORE_EMPTY) {
           seqId = ((FlushResultImpl)fs).flushSequenceId;
+        } else if (fs.getResult() == FlushResult.Result.CANNOT_FLUSH) {
+          // CANNOT_FLUSH may mean that a flush is already on-going
+          // we need to wait for that flush to complete
+          waitForFlushes();
         } else {
           throw new IOException("Could not bulk load with an assigned sequential ID because the "+
             "flush didn't run. Reason for not flushing: " + ((FlushResultImpl)fs).failureReason);
         }
       }
 
+      Map<byte[], List<Pair<Path, Path>>> familyWithFinalPath =
+          new TreeMap<>(Bytes.BYTES_COMPARATOR);
       for (Pair<byte[], String> p : familyPaths) {
         byte[] familyName = p.getFirst();
         String path = p.getSecond();
-        HStore store = getHStore(familyName);
+        HStore store = getStore(familyName);
+        if (!familyWithFinalPath.containsKey(familyName)) {
+          familyWithFinalPath.put(familyName, new ArrayList<>());
+        }
+        List<Pair<Path, Path>> lst = familyWithFinalPath.get(familyName);
         try {
           String finalPath = path;
           if (bulkLoadListener != null) {
             finalPath = bulkLoadListener.prepareBulkLoad(familyName, path, copyFile);
           }
-          Path commitedStoreFile = store.bulkLoadHFile(finalPath, seqId);
-
-          // Note the size of the store file
-          try {
-            FileSystem fs = commitedStoreFile.getFileSystem(baseConf);
-            storeFilesSizes.put(commitedStoreFile.getName(), fs.getFileStatus(commitedStoreFile)
-                .getLen());
-          } catch (IOException e) {
-            LOG.warn("Failed to find the size of hfile " + commitedStoreFile);
-            storeFilesSizes.put(commitedStoreFile.getName(), 0L);
-          }
-
-          if(storeFiles.containsKey(familyName)) {
-            storeFiles.get(familyName).add(commitedStoreFile);
-          } else {
-            List<Path> storeFileNames = new ArrayList<Path>();
-            storeFileNames.add(commitedStoreFile);
-            storeFiles.put(familyName, storeFileNames);
-          }
-          if (bulkLoadListener != null) {
-            bulkLoadListener.doneBulkLoad(familyName, path);
-          }
+          Pair<Path, Path> pair = store.preBulkLoadHFile(finalPath, seqId);
+          lst.add(pair);
         } catch (IOException ioe) {
           // A failure here can cause an atomicity violation that we currently
           // cannot recover from since it is likely a failed HDFS operation.
 
-          // TODO Need a better story for reverting partial failures due to HDFS.
           LOG.error("There was a partial failure due to IO when attempting to" +
               " load " + Bytes.toString(p.getFirst()) + " : " + p.getSecond(), ioe);
           if (bulkLoadListener != null) {
@@ -5601,6 +5965,59 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
             }
           }
           throw ioe;
+        }
+      }
+
+      if (this.getCoprocessorHost() != null) {
+        for (Map.Entry<byte[], List<Pair<Path, Path>>> entry : familyWithFinalPath.entrySet()) {
+          this.getCoprocessorHost().preCommitStoreFile(entry.getKey(), entry.getValue());
+        }
+      }
+      for (Map.Entry<byte[], List<Pair<Path, Path>>> entry : familyWithFinalPath.entrySet()) {
+        byte[] familyName = entry.getKey();
+        for (Pair<Path, Path> p : entry.getValue()) {
+          String path = p.getFirst().toString();
+          Path commitedStoreFile = p.getSecond();
+          HStore store = getStore(familyName);
+          try {
+            store.bulkLoadHFile(familyName, path, commitedStoreFile);
+            // Note the size of the store file
+            try {
+              FileSystem fs = commitedStoreFile.getFileSystem(baseConf);
+              storeFilesSizes.put(commitedStoreFile.getName(), fs.getFileStatus(commitedStoreFile)
+                  .getLen());
+            } catch (IOException e) {
+              LOG.warn("Failed to find the size of hfile " + commitedStoreFile, e);
+              storeFilesSizes.put(commitedStoreFile.getName(), 0L);
+            }
+
+            if(storeFiles.containsKey(familyName)) {
+              storeFiles.get(familyName).add(commitedStoreFile);
+            } else {
+              List<Path> storeFileNames = new ArrayList<>();
+              storeFileNames.add(commitedStoreFile);
+              storeFiles.put(familyName, storeFileNames);
+            }
+            if (bulkLoadListener != null) {
+              bulkLoadListener.doneBulkLoad(familyName, path);
+            }
+          } catch (IOException ioe) {
+            // A failure here can cause an atomicity violation that we currently
+            // cannot recover from since it is likely a failed HDFS operation.
+
+            // TODO Need a better story for reverting partial failures due to HDFS.
+            LOG.error("There was a partial failure due to IO when attempting to" +
+                " load " + Bytes.toString(familyName) + " : " + p.getSecond(), ioe);
+            if (bulkLoadListener != null) {
+              try {
+                bulkLoadListener.failedBulkLoad(familyName, path);
+              } catch (Exception ex) {
+                LOG.error("Error while calling failedBulkLoad for family " +
+                    Bytes.toString(familyName) + " with path " + path, ex);
+              }
+            }
+            throw ioe;
+          }
         }
       }
 
@@ -5628,7 +6045,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
 
       closeBulkRegionOperation();
     }
-    return isSuccessful;
+    return isSuccessful ? storeFiles : null;
   }
 
   @Override
@@ -5650,7 +6067,8 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
   /**
    * RegionScannerImpl is used to combine scanners from multiple Stores (aka column families).
    */
-  class RegionScannerImpl implements RegionScanner, org.apache.hadoop.hbase.ipc.RpcCallback {
+  class RegionScannerImpl
+      implements RegionScanner, Shipper, org.apache.hadoop.hbase.ipc.RpcCallback {
     // Package local for testability
     KeyValueHeap storeHeap = null;
     /** Heap of key-values that are not essential for the provided filters and are thus read
@@ -5662,8 +6080,8 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     protected Cell joinedContinuationRow = null;
     private boolean filterClosed = false;
 
-    protected final int isScan;
     protected final byte[] stopRow;
+    protected final boolean includeStopRow;
     protected final HRegion region;
     protected final CellComparator comparator;
 
@@ -5673,7 +6091,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     private final FilterWrapper filter;
 
     @Override
-    public HRegionInfo getRegionInfo() {
+    public RegionInfo getRegionInfo() {
       return region.getRegionInfo();
     }
 
@@ -5691,7 +6109,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
       } else {
         this.filter = null;
       }
-      this.comparator = region.getCellCompartor();
+      this.comparator = region.getCellComparator();
       /**
        * By default, calls to next/nextRaw must enforce the batch limit. Thus, construct a default
        * scanner context that can be used to enforce the batch limit in the event that a
@@ -5699,21 +6117,17 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
        */
       defaultScannerContext = ScannerContext.newBuilder()
           .setBatchLimit(scan.getBatch()).build();
-
-      if (Bytes.equals(scan.getStopRow(), HConstants.EMPTY_END_ROW) && !scan.isGetScan()) {
-        this.stopRow = null;
-      } else {
-        this.stopRow = scan.getStopRow();
-      }
-      // If we are doing a get, we want to be [startRow,endRow]. Normally
-      // it is [startRow,endRow) and if startRow=endRow we get nothing.
-      this.isScan = scan.isGetScan() ? 1 : 0;
+      this.stopRow = scan.getStopRow();
+      this.includeStopRow = scan.includeStopRow();
 
       // synchronize on scannerReadPoints so that nobody calculates
       // getSmallestReadPoint, before scannerReadPoints is updated.
       IsolationLevel isolationLevel = scan.getIsolationLevel();
-      synchronized(scannerReadPoints) {
-        if (nonce == HConstants.NO_NONCE || rsServices == null
+      long mvccReadPoint = PackagePrivateFieldAccessor.getMvccReadPoint(scan);
+      synchronized (scannerReadPoints) {
+        if (mvccReadPoint > 0) {
+          this.readPt = mvccReadPoint;
+        } else if (nonce == HConstants.NO_NONCE || rsServices == null
             || rsServices.getNonceManager() == null) {
           this.readPt = getReadPoint(isolationLevel);
         } else {
@@ -5721,7 +6135,6 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
         }
         scannerReadPoints.put(this, this.readPt);
       }
-
       initializeScanners(scan, additionalScanners);
     }
 
@@ -5729,11 +6142,10 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
         throws IOException {
       // Here we separate all scanners into two lists - scanner that provide data required
       // by the filter to operate (scanners list) and all others (joinedScanners list).
-      List<KeyValueScanner> scanners = new ArrayList<KeyValueScanner>(scan.getFamilyMap().size());
-      List<KeyValueScanner> joinedScanners =
-          new ArrayList<KeyValueScanner>(scan.getFamilyMap().size());
+      List<KeyValueScanner> scanners = new ArrayList<>(scan.getFamilyMap().size());
+      List<KeyValueScanner> joinedScanners = new ArrayList<>(scan.getFamilyMap().size());
       // Store all already instantiated scanners for exception handling
-      List<KeyValueScanner> instantiatedScanners = new ArrayList<KeyValueScanner>();
+      List<KeyValueScanner> instantiatedScanners = new ArrayList<>();
       // handle additionalScanners
       if (additionalScanners != null && !additionalScanners.isEmpty()) {
         scanners.addAll(additionalScanners);
@@ -5742,13 +6154,8 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
 
       try {
         for (Map.Entry<byte[], NavigableSet<byte[]>> entry : scan.getFamilyMap().entrySet()) {
-          Store store = stores.get(entry.getKey());
-          KeyValueScanner scanner;
-          try {
-            scanner = store.getScanner(scan, entry.getValue(), this.readPt);
-          } catch (FileNotFoundException e) {
-            throw handleFileNotFound(e);
-          }
+          HStore store = stores.get(entry.getKey());
+          KeyValueScanner scanner = store.getScanner(scan, entry.getValue(), this.readPt);
           instantiatedScanners.add(scanner);
           if (this.filter == null || !scan.doLoadColumnFamiliesOnDemand()
               || this.filter.isFamilyEssential(entry.getKey())) {
@@ -5834,7 +6241,6 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
             "or a lengthy garbage collection");
       }
       startRegionOperation(Operation.SCAN);
-      readRequestsCount.increment();
       try {
         return nextRaw(outResults, scannerContext);
       } finally {
@@ -5861,18 +6267,21 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
         // to handle scan or get operation.
         moreValues = nextInternal(outResults, scannerContext);
       } else {
-        List<Cell> tmpList = new ArrayList<Cell>();
+        List<Cell> tmpList = new ArrayList<>();
         moreValues = nextInternal(tmpList, scannerContext);
         outResults.addAll(tmpList);
       }
 
-      // If the size limit was reached it means a partial Result is being
-      // returned. Returning a
-      // partial Result means that we should not reset the filters; filters
-      // should only be reset in
+      if (!outResults.isEmpty()) {
+        readRequestsCount.increment();
+      }
+
+      // If the size limit was reached it means a partial Result is being returned. Returning a
+      // partial Result means that we should not reset the filters; filters should only be reset in
       // between rows
-      if (!scannerContext.midRowResultFormed())
+      if (!scannerContext.mayHaveMoreCellsInRow()) {
         resetFilters();
+      }
 
       if (isFilterDoneInternal()) {
         moreValues = false;
@@ -5914,33 +6323,29 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
       boolean tmpKeepProgress = scannerContext.getKeepProgress();
       // Scanning between column families and thus the scope is between cells
       LimitScope limitScope = LimitScope.BETWEEN_CELLS;
-      try {
-        do {
-          // We want to maintain any progress that is made towards the limits while scanning across
-          // different column families. To do this, we toggle the keep progress flag on during calls
-          // to the StoreScanner to ensure that any progress made thus far is not wiped away.
-          scannerContext.setKeepProgress(true);
-          heap.next(results, scannerContext);
-          scannerContext.setKeepProgress(tmpKeepProgress);
+      do {
+        // We want to maintain any progress that is made towards the limits while scanning across
+        // different column families. To do this, we toggle the keep progress flag on during calls
+        // to the StoreScanner to ensure that any progress made thus far is not wiped away.
+        scannerContext.setKeepProgress(true);
+        heap.next(results, scannerContext);
+        scannerContext.setKeepProgress(tmpKeepProgress);
 
-          nextKv = heap.peek();
-          moreCellsInRow = moreCellsInRow(nextKv, currentRowCell);
-          if (!moreCellsInRow) incrementCountOfRowsScannedMetric(scannerContext);
-          if (moreCellsInRow && scannerContext.checkBatchLimit(limitScope)) {
-            return scannerContext.setScannerState(NextState.BATCH_LIMIT_REACHED).hasMoreValues();
-          } else if (scannerContext.checkSizeLimit(limitScope)) {
-            ScannerContext.NextState state =
-              moreCellsInRow? NextState.SIZE_LIMIT_REACHED_MID_ROW: NextState.SIZE_LIMIT_REACHED;
-            return scannerContext.setScannerState(state).hasMoreValues();
-          } else if (scannerContext.checkTimeLimit(limitScope)) {
-            ScannerContext.NextState state =
-              moreCellsInRow? NextState.TIME_LIMIT_REACHED_MID_ROW: NextState.TIME_LIMIT_REACHED;
-            return scannerContext.setScannerState(state).hasMoreValues();
-          }
-        } while (moreCellsInRow);
-      } catch (FileNotFoundException e) {
-        throw handleFileNotFound(e);
-      }
+        nextKv = heap.peek();
+        moreCellsInRow = moreCellsInRow(nextKv, currentRowCell);
+        if (!moreCellsInRow) incrementCountOfRowsScannedMetric(scannerContext);
+        if (moreCellsInRow && scannerContext.checkBatchLimit(limitScope)) {
+          return scannerContext.setScannerState(NextState.BATCH_LIMIT_REACHED).hasMoreValues();
+        } else if (scannerContext.checkSizeLimit(limitScope)) {
+          ScannerContext.NextState state =
+              moreCellsInRow ? NextState.SIZE_LIMIT_REACHED_MID_ROW : NextState.SIZE_LIMIT_REACHED;
+          return scannerContext.setScannerState(state).hasMoreValues();
+        } else if (scannerContext.checkTimeLimit(limitScope)) {
+          ScannerContext.NextState state =
+              moreCellsInRow ? NextState.TIME_LIMIT_REACHED_MID_ROW : NextState.TIME_LIMIT_REACHED;
+          return scannerContext.setScannerState(state).hasMoreValues();
+        }
+      } while (moreCellsInRow);
       return nextKv != null;
     }
 
@@ -5953,7 +6358,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
      * @return true When there are more cells in the row to be read
      */
     private boolean moreCellsInRow(final Cell nextKv, Cell currentRowCell) {
-      return nextKv != null && CellUtil.matchingRow(nextKv, currentRowCell);
+      return nextKv != null && CellUtil.matchingRows(nextKv, currentRowCell);
     }
 
     /*
@@ -5976,13 +6381,14 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
       if (scannerContext == null) {
         throw new IllegalArgumentException("Scanner context cannot be null");
       }
-      RpcCallContext rpcCall = RpcServer.getCurrentCall();
+      Optional<RpcCall> rpcCall = RpcServer.getCurrentCall();
 
       // Save the initial progress from the Scanner context in these local variables. The progress
       // may need to be reset a few times if rows are being filtered out so we save the initial
       // progress.
       int initialBatchProgress = scannerContext.getBatchProgress();
-      long initialSizeProgress = scannerContext.getSizeProgress();
+      long initialSizeProgress = scannerContext.getDataSizeProgress();
+      long initialHeapSizeProgress = scannerContext.getHeapSizeProgress();
       long initialTimeProgress = scannerContext.getTimeProgress();
 
       // The loop here is used only when at some point during the next we determine
@@ -5996,17 +6402,16 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
         if (scannerContext.getKeepProgress()) {
           // Progress should be kept. Reset to initial values seen at start of method invocation.
           scannerContext.setProgress(initialBatchProgress, initialSizeProgress,
-            initialTimeProgress);
+              initialHeapSizeProgress, initialTimeProgress);
         } else {
           scannerContext.clearProgress();
         }
-
-        if (rpcCall != null) {
+        if (rpcCall.isPresent()) {
           // If a user specifies a too-restrictive or too-slow scanner, the
           // client might time out and disconnect while the server side
           // is still processing the request. We should abort aggressively
           // in that case.
-          long afterTime = rpcCall.disconnectSince();
+          long afterTime = rpcCall.get().disconnectSince();
           if (afterTime >= 0) {
             throw new CallerDisconnectedException(
                 "Aborting on region " + getRegionInfo().getRegionNameAsString() + ", call " +
@@ -6018,7 +6423,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
         // Let's see what we have in the storeHeap.
         Cell current = this.storeHeap.peek();
 
-        boolean stopRow = isStopRow(current);
+        boolean shouldStop = shouldStop(current);
         // When has filter row is true it means that the all the cells for a particular row must be
         // read before a filtering decision can be made. This means that filters where hasFilterRow
         // run the risk of enLongAddering out of memory errors in the case that they are applied to a
@@ -6042,7 +6447,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
         // If not, then it's main path - getting results from storeHeap.
         if (joinedContinuationRow == null) {
           // First, check if we are at a stop row. If so, there are no more results.
-          if (stopRow) {
+          if (shouldStop) {
             if (hasFilterRow) {
               filter.filterRowCells(results);
             }
@@ -6071,7 +6476,6 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
 
           // Ok, we are good, let's try to get some results from the main heap.
           populateResult(results, this.storeHeap, scannerContext, current);
-
           if (scannerContext.checkAnyLimitReached(LimitScope.BETWEEN_CELLS)) {
             if (hasFilterRow) {
               throw new IncompatibleFilterException(
@@ -6082,7 +6486,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
           }
 
           Cell nextKv = this.storeHeap.peek();
-          stopRow = nextKv == null || isStopRow(nextKv);
+          shouldStop = shouldStop(nextKv);
           // save that the row was empty before filters applied to it.
           final boolean isEmptyRow = results.isEmpty();
 
@@ -6098,14 +6502,15 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
             long timeProgress = scannerContext.getTimeProgress();
             if (scannerContext.getKeepProgress()) {
               scannerContext.setProgress(initialBatchProgress, initialSizeProgress,
-                initialTimeProgress);
+                  initialHeapSizeProgress, initialTimeProgress);
             } else {
               scannerContext.clearProgress();
             }
             scannerContext.setTimeProgress(timeProgress);
             scannerContext.incrementBatchProgress(results.size());
             for (Cell cell : results) {
-              scannerContext.incrementSizeProgress(CellUtil.estimatedHeapSizeOf(cell));
+              scannerContext.incrementSizeProgress(PrivateCellUtil.estimatedSerializedSizeOf(cell),
+                PrivateCellUtil.estimatedHeapSizeOf(cell));
             }
           }
 
@@ -6119,7 +6524,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
 
             // This row was totally filtered out, if this is NOT the last row,
             // we should continue on. Otherwise, nothing else to do.
-            if (!stopRow) continue;
+            if (!shouldStop) continue;
             return scannerContext.setScannerState(NextState.NO_MORE_VALUES).hasMoreValues();
           }
 
@@ -6160,10 +6565,10 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
           if (!moreRows) {
             return scannerContext.setScannerState(NextState.NO_MORE_VALUES).hasMoreValues();
           }
-          if (!stopRow) continue;
+          if (!shouldStop) continue;
         }
 
-        if (stopRow) {
+        if (shouldStop) {
           return scannerContext.setScannerState(NextState.NO_MORE_VALUES).hasMoreValues();
         } else {
           return scannerContext.setScannerState(NextState.MORE_VALUES).hasMoreValues();
@@ -6194,17 +6599,17 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
         throws IOException {
       Cell nextJoinedKv = joinedHeap.peek();
       boolean matchCurrentRow =
-          nextJoinedKv != null && CellUtil.matchingRow(nextJoinedKv, currentRowCell);
+          nextJoinedKv != null && CellUtil.matchingRows(nextJoinedKv, currentRowCell);
       boolean matchAfterSeek = false;
 
       // If the next value in the joined heap does not match the current row, try to seek to the
       // correct row
       if (!matchCurrentRow) {
-        Cell firstOnCurrentRow = CellUtil.createFirstOnRow(currentRowCell);
+        Cell firstOnCurrentRow = PrivateCellUtil.createFirstOnRow(currentRowCell);
         boolean seekSuccessful = this.joinedHeap.requestSeek(firstOnCurrentRow, true, true);
         matchAfterSeek =
             seekSuccessful && joinedHeap.peek() != null
-                && CellUtil.matchingRow(joinedHeap.peek(), currentRowCell);
+                && CellUtil.matchingRows(joinedHeap.peek(), currentRowCell);
       }
 
       return matchCurrentRow || matchAfterSeek;
@@ -6232,7 +6637,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
       assert this.joinedContinuationRow == null: "Trying to go to next row during joinedHeap read.";
       Cell next;
       while ((next = this.storeHeap.peek()) != null &&
-             CellUtil.matchingRow(next, curRowCell)) {
+             CellUtil.matchingRows(next, curRowCell)) {
         this.storeHeap.next(MOCKED_LIST);
       }
       resetFilters();
@@ -6243,10 +6648,15 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
               .postScannerFilterRow(this, curRowCell);
     }
 
-    protected boolean isStopRow(Cell currentRowCell) {
-      return currentRowCell == null
-          || (stopRow != null && comparator.compareRows(currentRowCell, stopRow, 0, stopRow
-          .length) >= isScan);
+    protected boolean shouldStop(Cell currentRowCell) {
+      if (currentRowCell == null) {
+        return true;
+      }
+      if (stopRow == null || Bytes.equals(stopRow, HConstants.EMPTY_END_ROW)) {
+        return false;
+      }
+      int c = comparator.compareRows(currentRowCell, stopRow, 0, stopRow.length);
+      return c > 0 || (c == 0 && !includeStopRow);
     }
 
     @Override
@@ -6275,41 +6685,17 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
       }
       boolean result = false;
       startRegionOperation();
-      Cell kv = CellUtil.createFirstOnRow(row, 0, (short) row.length);
+      Cell kv = PrivateCellUtil.createFirstOnRow(row, 0, (short) row.length);
       try {
         // use request seek to make use of the lazy seek option. See HBASE-5520
         result = this.storeHeap.requestSeek(kv, true, true);
         if (this.joinedHeap != null) {
           result = this.joinedHeap.requestSeek(kv, true, true) || result;
         }
-      } catch (FileNotFoundException e) {
-        throw handleFileNotFound(e);
       } finally {
         closeRegionOperation();
       }
       return result;
-    }
-
-    private IOException handleFileNotFound(FileNotFoundException fnfe) throws IOException {
-      // tries to refresh the store files, otherwise shutdown the RS.
-      // TODO: add support for abort() of a single region and trigger reassignment.
-      try {
-        region.refreshStoreFiles(true);
-        return new IOException("unable to read store file");
-      } catch (IOException e) {
-        String msg = "a store file got lost: " + fnfe.getMessage();
-        LOG.error("unable to refresh store files", e);
-        abortRegionServer(msg);
-        return new NotServingRegionException(
-          getRegionInfo().getRegionNameAsString() + " is closing");
-      }
-    }
-
-    private void abortRegionServer(String msg) throws IOException {
-      if (rsServices instanceof HRegionServer) {
-        ((HRegionServer)rsServices).abort(msg);
-      }
-      throw new UnsupportedOperationException("not able to abort RS after: " + msg);
     }
 
     @Override
@@ -6344,13 +6730,13 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
    * the supplied path.
    * @param fs is the filesystem.
    * @param conf is global configuration settings.
-   * @param regionInfo - HRegionInfo that describes the region
+   * @param regionInfo - RegionInfo that describes the region
    * is new), then read them from the supplied path.
    * @param htd the table descriptor
    * @return the new instance
    */
   static HRegion newHRegion(Path tableDir, WAL wal, FileSystem fs,
-      Configuration conf, HRegionInfo regionInfo, final HTableDescriptor htd,
+      Configuration conf, RegionInfo regionInfo, final TableDescriptor htd,
       RegionServerServices rsServices) {
     try {
       @SuppressWarnings("unchecked")
@@ -6359,7 +6745,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
 
       Constructor<? extends HRegion> c =
           regionClass.getConstructor(Path.class, WAL.class, FileSystem.class,
-              Configuration.class, HRegionInfo.class, HTableDescriptor.class,
+              Configuration.class, RegionInfo.class, TableDescriptor.class,
               RegionServerServices.class);
 
       return c.newInstance(tableDir, wal, fs, conf, regionInfo, htd, rsServices);
@@ -6379,8 +6765,8 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
    * @return new HRegion
    * @throws IOException
    */
-  public static HRegion createHRegion(final HRegionInfo info, final Path rootDir,
-        final Configuration conf, final HTableDescriptor hTableDescriptor,
+  public static HRegion createHRegion(final RegionInfo info, final Path rootDir,
+        final Configuration conf, final TableDescriptor hTableDescriptor,
         final WAL wal, final boolean initialize)
   throws IOException {
     LOG.info("creating HRegion " + info.getTable().getNameAsString()
@@ -6394,9 +6780,9 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     return region;
   }
 
-  public static HRegion createHRegion(final HRegionInfo info, final Path rootDir,
+  public static HRegion createHRegion(final RegionInfo info, final Path rootDir,
                                       final Configuration conf,
-                                      final HTableDescriptor hTableDescriptor,
+                                      final TableDescriptor hTableDescriptor,
                                       final WAL wal)
     throws IOException {
     return createHRegion(info, rootDir, conf, hTableDescriptor, wal, true);
@@ -6414,8 +6800,8 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
    *
    * @throws IOException
    */
-  public static HRegion openHRegion(final HRegionInfo info,
-      final HTableDescriptor htd, final WAL wal,
+  public static HRegion openHRegion(final RegionInfo info,
+      final TableDescriptor htd, final WAL wal,
       final Configuration conf)
   throws IOException {
     return openHRegion(info, htd, wal, conf, null, null);
@@ -6436,8 +6822,8 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
    *
    * @throws IOException
    */
-  public static HRegion openHRegion(final HRegionInfo info,
-    final HTableDescriptor htd, final WAL wal, final Configuration conf,
+  public static HRegion openHRegion(final RegionInfo info,
+    final TableDescriptor htd, final WAL wal, final Configuration conf,
     final RegionServerServices rsServices,
     final CancelableProgressable reporter)
   throws IOException {
@@ -6457,8 +6843,8 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
    * @return new HRegion
    * @throws IOException
    */
-  public static HRegion openHRegion(Path rootDir, final HRegionInfo info,
-      final HTableDescriptor htd, final WAL wal, final Configuration conf)
+  public static HRegion openHRegion(Path rootDir, final RegionInfo info,
+      final TableDescriptor htd, final WAL wal, final Configuration conf)
   throws IOException {
     return openHRegion(rootDir, info, htd, wal, conf, null, null);
   }
@@ -6478,8 +6864,8 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
    * @return new HRegion
    * @throws IOException
    */
-  public static HRegion openHRegion(final Path rootDir, final HRegionInfo info,
-      final HTableDescriptor htd, final WAL wal, final Configuration conf,
+  public static HRegion openHRegion(final Path rootDir, final RegionInfo info,
+      final TableDescriptor htd, final WAL wal, final Configuration conf,
       final RegionServerServices rsServices,
       final CancelableProgressable reporter)
   throws IOException {
@@ -6508,7 +6894,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
    * @throws IOException
    */
   public static HRegion openHRegion(final Configuration conf, final FileSystem fs,
-      final Path rootDir, final HRegionInfo info, final HTableDescriptor htd, final WAL wal)
+      final Path rootDir, final RegionInfo info, final TableDescriptor htd, final WAL wal)
       throws IOException {
     return openHRegion(conf, fs, rootDir, info, htd, wal, null, null);
   }
@@ -6530,7 +6916,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
    * @throws IOException
    */
   public static HRegion openHRegion(final Configuration conf, final FileSystem fs,
-      final Path rootDir, final HRegionInfo info, final HTableDescriptor htd, final WAL wal,
+      final Path rootDir, final RegionInfo info, final TableDescriptor htd, final WAL wal,
       final RegionServerServices rsServices, final CancelableProgressable reporter)
       throws IOException {
     Path tableDir = FSUtils.getTableDir(rootDir, info.getTable());
@@ -6554,7 +6940,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
    * @throws IOException
    */
   public static HRegion openHRegion(final Configuration conf, final FileSystem fs,
-      final Path rootDir, final Path tableDir, final HRegionInfo info, final HTableDescriptor htd,
+      final Path rootDir, final Path tableDir, final RegionInfo info, final TableDescriptor htd,
       final WAL wal, final RegionServerServices rsServices,
       final CancelableProgressable reporter)
       throws IOException {
@@ -6582,7 +6968,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
       throws IOException {
     HRegionFileSystem regionFs = other.getRegionFileSystem();
     HRegion r = newHRegion(regionFs.getTableDir(), other.getWAL(), regionFs.getFileSystem(),
-        other.baseConf, other.getRegionInfo(), other.getTableDesc(), null);
+        other.baseConf, other.getRegionInfo(), other.getTableDescriptor(), null);
     return r.openHRegion(reporter);
   }
 
@@ -6608,18 +6994,15 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     checkClassLoading();
     this.openSeqNum = initialize(reporter);
     this.mvcc.advanceTo(openSeqNum);
-    if (wal != null && getRegionServerServices() != null && !writestate.readOnly
-        && !recovering) {
-      // Only write the region open event marker to WAL if (1) we are not read-only
-      // (2) dist log replay is off or we are not recovering. In case region is
-      // recovering, the open event will be written at setRecovering(false)
+    if (wal != null && getRegionServerServices() != null && !writestate.readOnly) {
+      // Only write the region open event marker to WAL if we are not read-only.
       writeRegionOpenMarker(wal, openSeqNum);
     }
     return this;
   }
 
-  public static void warmupHRegion(final HRegionInfo info,
-      final HTableDescriptor htd, final WAL wal, final Configuration conf,
+  public static void warmupHRegion(final RegionInfo info,
+      final TableDescriptor htd, final WAL wal, final Configuration conf,
       final RegionServerServices rsServices,
       final CancelableProgressable reporter)
       throws IOException {
@@ -6647,14 +7030,14 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
 
 
   private void checkCompressionCodecs() throws IOException {
-    for (HColumnDescriptor fam: this.htableDescriptor.getColumnFamilies()) {
+    for (ColumnFamilyDescriptor fam: this.htableDescriptor.getColumnFamilies()) {
       CompressionTest.testCompression(fam.getCompressionType());
       CompressionTest.testCompression(fam.getCompactionCompressionType());
     }
   }
 
   private void checkEncryption() throws IOException {
-    for (HColumnDescriptor fam: this.htableDescriptor.getColumnFamilies()) {
+    for (ColumnFamilyDescriptor fam: this.htableDescriptor.getColumnFamilies()) {
       EncryptionTest.testEncryption(conf, fam.getEncryptionType(), fam.getEncryptionKey());
     }
   }
@@ -6662,73 +7045,6 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
   private void checkClassLoading() throws IOException {
     RegionSplitPolicy.getSplitPolicyClass(this.htableDescriptor, conf);
     RegionCoprocessorHost.testTableCoprocessorAttrs(conf, this.htableDescriptor);
-  }
-
-  /**
-   * Create a daughter region from given a temp directory with the region data.
-   * @param hri Spec. for daughter region to open.
-   * @throws IOException
-   */
-  public HRegion createDaughterRegionFromSplits(final HRegionInfo hri) throws IOException {
-    // Move the files from the temporary .splits to the final /table/region directory
-    fs.commitDaughterRegion(hri);
-
-    // Create the daughter HRegion instance
-    HRegion r = HRegion.newHRegion(this.fs.getTableDir(), this.getWAL(), fs.getFileSystem(),
-        this.getBaseConf(), hri, this.getTableDesc(), rsServices);
-    r.readRequestsCount.add(this.getReadRequestsCount() / 2);
-    r.filteredReadRequestsCount.add(this.getFilteredReadRequestsCount() / 2);
-    r.writeRequestsCount.add(this.getWriteRequestsCount() / 2);
-    return r;
-  }
-
-  /**
-   * Create a merged region given a temp directory with the region data.
-   * @param region_b another merging region
-   * @return merged HRegion
-   * @throws IOException
-   */
-  HRegion createMergedRegionFromMerges(final HRegionInfo mergedRegionInfo,
-      final HRegion region_b) throws IOException {
-    HRegion r = HRegion.newHRegion(this.fs.getTableDir(), this.getWAL(),
-        fs.getFileSystem(), this.getBaseConf(), mergedRegionInfo,
-        this.getTableDesc(), this.rsServices);
-    r.readRequestsCount.add(this.getReadRequestsCount()
-        + region_b.getReadRequestsCount());
-    r.filteredReadRequestsCount.add(this.getFilteredReadRequestsCount()
-      + region_b.getFilteredReadRequestsCount());
-    r.writeRequestsCount.add(this.getWriteRequestsCount()
-
-        + region_b.getWriteRequestsCount());
-    this.fs.commitMergedRegion(mergedRegionInfo);
-    return r;
-  }
-
-  /**
-   * Inserts a new region's meta information into the passed
-   * <code>meta</code> region. Used by the HMaster bootstrap code adding
-   * new table to hbase:meta table.
-   *
-   * @param meta hbase:meta HRegion to be updated
-   * @param r HRegion to add to <code>meta</code>
-   *
-   * @throws IOException
-   */
-  // TODO remove since only test and merge use this
-  public static void addRegionToMETA(final HRegion meta, final HRegion r) throws IOException {
-    meta.checkResources();
-    // The row key is the region name
-    byte[] row = r.getRegionInfo().getRegionName();
-    final long now = EnvironmentEdgeManager.currentTime();
-    final List<Cell> cells = new ArrayList<Cell>(2);
-    cells.add(new KeyValue(row, HConstants.CATALOG_FAMILY,
-      HConstants.REGIONINFO_QUALIFIER, now,
-      r.getRegionInfo().toByteArray()));
-    // Set into the root table the version of the meta table.
-    cells.add(new KeyValue(row, HConstants.CATALOG_FAMILY,
-      HConstants.META_VERSION_QUALIFIER, now,
-      Bytes.toBytes(HConstants.META_VERSION)));
-    meta.put(row, HConstants.CATALOG_FAMILY, cells);
   }
 
   /**
@@ -6748,145 +7064,39 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
    * Computes the Path of the HRegion
    *
    * @param rootdir qualified path of HBase root directory
-   * @param info HRegionInfo for the region
+   * @param info RegionInfo for the region
    * @return qualified path of region directory
    * @deprecated For tests only; to be removed.
    */
   @Deprecated
   @VisibleForTesting
-  public static Path getRegionDir(final Path rootdir, final HRegionInfo info) {
+  public static Path getRegionDir(final Path rootdir, final RegionInfo info) {
     return new Path(
       FSUtils.getTableDir(rootdir, info.getTable()), info.getEncodedName());
   }
 
   /**
    * Determines if the specified row is within the row range specified by the
-   * specified HRegionInfo
+   * specified RegionInfo
    *
-   * @param info HRegionInfo that specifies the row range
+   * @param info RegionInfo that specifies the row range
    * @param row row to be checked
-   * @return true if the row is within the range specified by the HRegionInfo
+   * @return true if the row is within the range specified by the RegionInfo
    */
-  public static boolean rowIsInRange(HRegionInfo info, final byte [] row) {
+  public static boolean rowIsInRange(RegionInfo info, final byte [] row) {
     return ((info.getStartKey().length == 0) ||
         (Bytes.compareTo(info.getStartKey(), row) <= 0)) &&
         ((info.getEndKey().length == 0) ||
             (Bytes.compareTo(info.getEndKey(), row) > 0));
   }
 
-  public static boolean rowIsInRange(HRegionInfo info, final byte [] row, final int offset,
+  public static boolean rowIsInRange(RegionInfo info, final byte [] row, final int offset,
       final short length) {
     return ((info.getStartKey().length == 0) ||
         (Bytes.compareTo(info.getStartKey(), 0, info.getStartKey().length,
           row, offset, length) <= 0)) &&
         ((info.getEndKey().length == 0) ||
           (Bytes.compareTo(info.getEndKey(), 0, info.getEndKey().length, row, offset, length) > 0));
-  }
-
-  /**
-   * Merge two HRegions.  The regions must be adjacent and must not overlap.
-   *
-   * @return new merged HRegion
-   * @throws IOException
-   */
-  public static HRegion mergeAdjacent(final HRegion srcA, final HRegion srcB)
-  throws IOException {
-    HRegion a = srcA;
-    HRegion b = srcB;
-
-    // Make sure that srcA comes first; important for key-ordering during
-    // write of the merged file.
-    if (srcA.getRegionInfo().getStartKey() == null) {
-      if (srcB.getRegionInfo().getStartKey() == null) {
-        throw new IOException("Cannot merge two regions with null start key");
-      }
-      // A's start key is null but B's isn't. Assume A comes before B
-    } else if ((srcB.getRegionInfo().getStartKey() == null) ||
-      (Bytes.compareTo(srcA.getRegionInfo().getStartKey(),
-        srcB.getRegionInfo().getStartKey()) > 0)) {
-      a = srcB;
-      b = srcA;
-    }
-
-    if (!(Bytes.compareTo(a.getRegionInfo().getEndKey(),
-        b.getRegionInfo().getStartKey()) == 0)) {
-      throw new IOException("Cannot merge non-adjacent regions");
-    }
-    return merge(a, b);
-  }
-
-  /**
-   * Merge two regions whether they are adjacent or not.
-   *
-   * @param a region a
-   * @param b region b
-   * @return new merged region
-   * @throws IOException
-   */
-  public static HRegion merge(final HRegion a, final HRegion b) throws IOException {
-    if (!a.getRegionInfo().getTable().equals(b.getRegionInfo().getTable())) {
-      throw new IOException("Regions do not belong to the same table");
-    }
-
-    FileSystem fs = a.getRegionFileSystem().getFileSystem();
-    // Make sure each region's cache is empty
-    a.flush(true);
-    b.flush(true);
-
-    // Compact each region so we only have one store file per family
-    a.compact(true);
-    if (LOG.isDebugEnabled()) {
-      LOG.debug("Files for region: " + a);
-      a.getRegionFileSystem().logFileSystemState(LOG);
-    }
-    b.compact(true);
-    if (LOG.isDebugEnabled()) {
-      LOG.debug("Files for region: " + b);
-      b.getRegionFileSystem().logFileSystemState(LOG);
-    }
-
-    RegionMergeTransactionImpl rmt = new RegionMergeTransactionImpl(a, b, true);
-    if (!rmt.prepare(null)) {
-      throw new IOException("Unable to merge regions " + a + " and " + b);
-    }
-    HRegionInfo mergedRegionInfo = rmt.getMergedRegionInfo();
-    LOG.info("starting merge of regions: " + a + " and " + b
-        + " into new region " + mergedRegionInfo.getRegionNameAsString()
-        + " with start key <"
-        + Bytes.toStringBinary(mergedRegionInfo.getStartKey())
-        + "> and end key <"
-        + Bytes.toStringBinary(mergedRegionInfo.getEndKey()) + ">");
-    HRegion dstRegion;
-    try {
-      dstRegion = (HRegion)rmt.execute(null, null);
-    } catch (IOException ioe) {
-      rmt.rollback(null, null);
-      throw new IOException("Failed merging region " + a + " and " + b
-          + ", and successfully rolled back");
-    }
-    dstRegion.compact(true);
-
-    if (LOG.isDebugEnabled()) {
-      LOG.debug("Files for new region");
-      dstRegion.getRegionFileSystem().logFileSystemState(LOG);
-    }
-
-    // clear the compacted files if any
-    for (Store s : dstRegion.getStores()) {
-      s.closeAndArchiveCompactedFiles();
-    }
-    if (dstRegion.getRegionFileSystem().hasReferences(dstRegion.getTableDesc())) {
-      throw new IOException("Merged region " + dstRegion
-          + " still has references after the compaction, is compaction canceled?");
-    }
-
-    // Archiving the 'A' region
-    HFileArchiver.archiveRegion(a.getBaseConf(), fs, a.getRegionInfo());
-    // Archiving the 'B' region
-    HFileArchiver.archiveRegion(b.getBaseConf(), fs, b.getRegionInfo());
-
-    LOG.info("merge completed. New region is " + dstRegion);
-    return dstRegion;
   }
 
   @Override
@@ -6897,7 +7107,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     return Result.create(results, get.isCheckExistenceOnly() ? !results.isEmpty() : null, stale);
   }
 
-  void prepareGet(final Get get) throws IOException, NoSuchColumnFamilyException {
+  void prepareGet(final Get get) throws IOException {
     checkRow(get.getRow(), "Get");
     // Verify families are all valid
     if (get.hasFamilies()) {
@@ -6905,7 +7115,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
         checkFamily(family);
       }
     } else { // Adding all families to scanner
-      for (byte[] family : this.htableDescriptor.getFamiliesKeys()) {
+      for (byte[] family : this.htableDescriptor.getColumnFamilyNames()) {
         get.addFamily(family);
       }
     }
@@ -6916,18 +7126,18 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     return get(get, withCoprocessor, HConstants.NO_NONCE, HConstants.NO_NONCE);
   }
 
-  @Override
   public List<Cell> get(Get get, boolean withCoprocessor, long nonceGroup, long nonce)
       throws IOException {
-    List<Cell> results = new ArrayList<Cell>();
+    List<Cell> results = new ArrayList<>();
+    long before =  EnvironmentEdgeManager.currentTime();
 
     // pre-get CP hook
     if (withCoprocessor && (coprocessorHost != null)) {
       if (coprocessorHost.preGet(get, results)) {
+        metricsUpdateForGet(results, before);
         return results;
       }
     }
-    long before =  EnvironmentEdgeManager.currentTime();
     Scan scan = new Scan(get);
     if (scan.getLoadColumnFamiliesOnDemandValue() == null) {
       scan.setLoadColumnFamiliesOnDemand(isLoadingCfsOnDemandDefault());
@@ -6960,20 +7170,13 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
   @Override
   public void mutateRow(RowMutations rm) throws IOException {
     // Don't need nonces here - RowMutations only supports puts and deletes
-    mutateRowsWithLocks(rm.getMutations(), Collections.singleton(rm.getRow()));
+    final List<Mutation> m = rm.getMutations();
+    batchMutate(m.toArray(new Mutation[m.size()]), true, HConstants.NO_NONCE,
+        HConstants.NO_NONCE);
   }
 
   /**
-   * Perform atomic mutations within the region w/o nonces.
-   * See {@link #mutateRowsWithLocks(Collection, Collection, long, long)}
-   */
-  public void mutateRowsWithLocks(Collection<Mutation> mutations,
-      Collection<byte[]> rowsToLock) throws IOException {
-    mutateRowsWithLocks(mutations, rowsToLock, HConstants.NO_NONCE, HConstants.NO_NONCE);
-  }
-
-  /**
-   * Perform atomic mutations within the region.
+   * Perform atomic (all or none) mutations within the region.
    * @param mutations The list of mutations to perform.
    * <code>mutations</code> can contain operations for multiple rows.
    * Caller has to ensure that all rows are contained in this region.
@@ -6987,8 +7190,27 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
   @Override
   public void mutateRowsWithLocks(Collection<Mutation> mutations,
       Collection<byte[]> rowsToLock, long nonceGroup, long nonce) throws IOException {
-    MultiRowMutationProcessor proc = new MultiRowMutationProcessor(mutations, rowsToLock);
-    processRowsWithLocks(proc, -1, nonceGroup, nonce);
+    batchMutate(new MutationBatchOperation(this, mutations.toArray(new Mutation[mutations.size()]),
+        true, nonceGroup, nonce) {
+      @Override
+      public MiniBatchOperationInProgress<Mutation> lockRowsAndBuildMiniBatch(
+          List<RowLock> acquiredRowLocks) throws IOException {
+        RowLock prevRowLock = null;
+        for (byte[] row : rowsToLock) {
+          try {
+            RowLock rowLock = region.getRowLockInternal(row, false, prevRowLock); // write lock
+            if (rowLock != prevRowLock) {
+              acquiredRowLocks.add(rowLock);
+              prevRowLock = rowLock;
+            }
+          } catch (IOException ioe) {
+            LOG.warn("Failed getting lock, row=" + Bytes.toStringBinary(row), ioe);
+            throw ioe;
+          }
+        }
+        return createMiniBatch(size(), size());
+      }
+    });
   }
 
   /**
@@ -6999,18 +7221,26 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
       return null;
     }
     ClientProtos.RegionLoadStats.Builder stats = ClientProtos.RegionLoadStats.newBuilder();
-    stats.setMemstoreLoad((int) (Math.min(100, (this.memstoreDataSize.get() * 100) / this
+    stats.setMemStoreLoad((int) (Math.min(100, (this.memstoreDataSize.get() * 100) / this
         .memstoreFlushSize)));
-    stats.setHeapOccupancy((int)rsServices.getHeapMemoryManager().getHeapOccupancyPercent()*100);
-    stats.setCompactionPressure((int)rsServices.getCompactionPressure()*100 > 100 ? 100 :
-                (int)rsServices.getCompactionPressure()*100);
+    if (rsServices.getHeapMemoryManager() != null) {
+      // the HeapMemoryManager uses -0.0 to signal a problem asking the JVM,
+      // so we could just do the calculation below and we'll get a 0.
+      // treating it as a special case analogous to no HMM instead so that it can be
+      // programatically treated different from using <1% of heap.
+      final float occupancy = rsServices.getHeapMemoryManager().getHeapOccupancyPercent();
+      if (occupancy != HeapMemoryManager.HEAP_OCCUPANCY_ERROR_VALUE) {
+        stats.setHeapOccupancy((int)(occupancy * 100));
+      }
+    }
+    stats.setCompactionPressure((int) (rsServices.getCompactionPressure() * 100 > 100 ? 100
+        : rsServices.getCompactionPressure() * 100));
     return stats.build();
   }
 
   @Override
   public void processRowsWithLocks(RowProcessor<?,?> processor) throws IOException {
-    processRowsWithLocks(processor, rowProcessorTimeout, HConstants.NO_NONCE,
-      HConstants.NO_NONCE);
+    processRowsWithLocks(processor, rowProcessorTimeout, HConstants.NO_NONCE, HConstants.NO_NONCE);
   }
 
   @Override
@@ -7046,31 +7276,37 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
       return;
     }
 
-    boolean locked;
-    List<RowLock> acquiredRowLocks;
-    List<Mutation> mutations = new ArrayList<Mutation>();
+    boolean locked = false;
+    List<RowLock> acquiredRowLocks = null;
+    List<Mutation> mutations = new ArrayList<>();
     Collection<byte[]> rowsToLock = processor.getRowsToLock();
     // This is assigned by mvcc either explicity in the below or in the guts of the WAL append
     // when it assigns the edit a sequencedid (A.K.A the mvcc write number).
     WriteEntry writeEntry = null;
-    MemstoreSize memstoreSize = new MemstoreSize();
+    MemStoreSizing memstoreAccounting = new MemStoreSizing();
     try {
-      // STEP 2. Acquire the row lock(s)
-      acquiredRowLocks = new ArrayList<RowLock>(rowsToLock.size());
-      for (byte[] row : rowsToLock) {
-        // Attempt to lock all involved rows, throw if any lock times out
-        // use a writer lock for mixed reads and writes
-        acquiredRowLocks.add(getRowLockInternal(row, false));
-      }
-      // STEP 3. Region lock
-      lock(this.updatesLock.readLock(), acquiredRowLocks.size() == 0 ? 1 : acquiredRowLocks.size());
-      locked = true;
       boolean success = false;
-      long now = EnvironmentEdgeManager.currentTime();
       try {
+        // STEP 2. Acquire the row lock(s)
+        acquiredRowLocks = new ArrayList<>(rowsToLock.size());
+        RowLock prevRowLock = null;
+        for (byte[] row : rowsToLock) {
+          // Attempt to lock all involved rows, throw if any lock times out
+          // use a writer lock for mixed reads and writes
+          RowLock rowLock = getRowLockInternal(row, false, prevRowLock);
+          if (rowLock != prevRowLock) {
+            acquiredRowLocks.add(rowLock);
+            prevRowLock = rowLock;
+          }
+        }
+        // STEP 3. Region lock
+        lock(this.updatesLock.readLock(), acquiredRowLocks.isEmpty() ? 1 : acquiredRowLocks.size());
+        locked = true;
+        long now = EnvironmentEdgeManager.currentTime();
         // STEP 4. Let the processor scan the rows, generate mutations and add waledits
         doProcessRowWithTimeout(processor, now, this, mutations, walEdit, timeout);
         if (!mutations.isEmpty()) {
+          writeRequestsCount.add(mutations.size());
           // STEP 5. Call the preBatchMutate hook
           processor.preBatchMutate(this, walEdit);
 
@@ -7087,7 +7323,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
           long sequenceId = writeEntry.getWriteNumber();
           for (Mutation m : mutations) {
             // Handle any tag based cell features.
-            // TODO: Do we need to call rewriteCellTags down in applyToMemstore()? Why not before
+            // TODO: Do we need to call rewriteCellTags down in applyToMemStore()? Why not before
             // so tags go into WAL?
             rewriteCellTags(m.getFamilyCellMap(), m);
             for (CellScanner cellScanner = m.cellScanner(); cellScanner.advance();) {
@@ -7095,26 +7331,27 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
               if (walEdit.isEmpty()) {
                 // If walEdit is empty, we put nothing in WAL. WAL stamps Cells with sequence id.
                 // If no WAL, need to stamp it here.
-                CellUtil.setSequenceId(cell, sequenceId);
+                PrivateCellUtil.setSequenceId(cell, sequenceId);
               }
-              applyToMemstore(getHStore(cell), cell, memstoreSize);
+              applyToMemStore(getStore(cell), cell, memstoreAccounting);
             }
           }
-          // STEP 8. Complete mvcc.
+
+          // STEP 8. call postBatchMutate hook
+          processor.postBatchMutate(this);
+
+          // STEP 9. Complete mvcc.
           mvcc.completeAndWait(writeEntry);
           writeEntry = null;
 
-          // STEP 9. Release region lock
+          // STEP 10. Release region lock
           if (locked) {
             this.updatesLock.readLock().unlock();
             locked = false;
           }
 
-          // STEP 10. Release row lock(s)
+          // STEP 11. Release row lock(s)
           releaseRowLocks(acquiredRowLocks);
-
-          // STEP 11. call postBatchMutate hook
-          processor.postBatchMutate(this);
         }
         success = true;
       } finally {
@@ -7132,7 +7369,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     } finally {
       closeRegionOperation();
       if (!mutations.isEmpty()) {
-        long newSize = this.addAndGetMemstoreSize(memstoreSize);
+        long newSize = this.addAndGetMemStoreSize(memstoreAccounting);
         requestFlushIfNeeded(newSize);
       }
     }
@@ -7159,28 +7396,27 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
       try {
         processor.process(now, region, mutations, walEdit);
       } catch (IOException e) {
+        String row = processor.getRowsToLock().isEmpty() ? "" :
+          " on row(s):" + Bytes.toStringBinary(processor.getRowsToLock().iterator().next()) + "...";
         LOG.warn("RowProcessor:" + processor.getClass().getName() +
-            " throws Exception on row(s):" +
-            Bytes.toStringBinary(
-              processor.getRowsToLock().iterator().next()) + "...", e);
+            " throws Exception" + row, e);
         throw e;
       }
       return;
     }
 
     // Case with time bound
-    FutureTask<Void> task =
-      new FutureTask<Void>(new Callable<Void>() {
+    FutureTask<Void> task = new FutureTask<>(new Callable<Void>() {
         @Override
         public Void call() throws IOException {
           try {
             processor.process(now, region, mutations, walEdit);
             return null;
           } catch (IOException e) {
+            String row = processor.getRowsToLock().isEmpty() ? "" :
+              " on row(s):" + Bytes.toStringBinary(processor.getRowsToLock().iterator().next()) + "...";
             LOG.warn("RowProcessor:" + processor.getClass().getName() +
-                " throws Exception on row(s):" +
-                Bytes.toStringBinary(
-                    processor.getRowsToLock().iterator().next()) + "...", e);
+                " throws Exception" + row, e);
             throw e;
           }
         }
@@ -7189,54 +7425,30 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     try {
       task.get(timeout, TimeUnit.MILLISECONDS);
     } catch (TimeoutException te) {
-      LOG.error("RowProcessor timeout:" + timeout + " ms on row(s):" +
-          Bytes.toStringBinary(processor.getRowsToLock().iterator().next()) +
-          "...");
+      String row = processor.getRowsToLock().isEmpty() ? "" :
+        " on row(s):" + Bytes.toStringBinary(processor.getRowsToLock().iterator().next()) + "...";
+      LOG.error("RowProcessor timeout:" + timeout + " ms" + row);
       throw new IOException(te);
     } catch (Exception e) {
       throw new IOException(e);
     }
   }
 
+  @Override
   public Result append(Append append) throws IOException {
     return append(append, HConstants.NO_NONCE, HConstants.NO_NONCE);
   }
 
-  @Override
   public Result append(Append mutation, long nonceGroup, long nonce) throws IOException {
     return doDelta(Operation.APPEND, mutation, nonceGroup, nonce, mutation.isReturnResults());
   }
 
+  @Override
   public Result increment(Increment increment) throws IOException {
     return increment(increment, HConstants.NO_NONCE, HConstants.NO_NONCE);
   }
 
-  // dropMemstoreContentsForSeqId() would acquire write lock of updatesLock
-  // We perform this operation outside of the read lock of updatesLock to avoid dead lock
-  // See HBASE-16304
-  @SuppressWarnings("unchecked")
-  private void dropMemstoreContents() throws IOException {
-    MemstoreSize totalFreedSize = new MemstoreSize();
-    while (!storeSeqIds.isEmpty()) {
-      Map<Store, Long> map = null;
-      synchronized (storeSeqIds) {
-        if (storeSeqIds.isEmpty()) break;
-        map = storeSeqIds.remove(storeSeqIds.size()-1);
-      }
-      for (Map.Entry<Store, Long> entry : map.entrySet()) {
-        // Drop the memstore contents if they are now smaller than the latest seen flushed file
-        totalFreedSize
-            .incMemstoreSize(dropMemstoreContentsForSeqId(entry.getValue(), entry.getKey()));
-      }
-    }
-    if (totalFreedSize.getDataSize() > 0) {
-      LOG.debug("Freed " + totalFreedSize.getDataSize() + " bytes from memstore");
-    }
-  }
-
-  @Override
-  public Result increment(Increment mutation, long nonceGroup, long nonce)
-  throws IOException {
+  public Result increment(Increment mutation, long nonceGroup, long nonce) throws IOException {
     return doDelta(Operation.INCREMENT, mutation, nonceGroup, nonce, mutation.isReturnResults());
   }
 
@@ -7259,19 +7471,20 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     this.writeRequestsCount.increment();
     WriteEntry writeEntry = null;
     startRegionOperation(op);
-    List<Cell> results = returnResults? new ArrayList<Cell>(mutation.size()): null;
-    RowLock rowLock = getRowLockInternal(mutation.getRow(), false);
-    MemstoreSize memstoreSize = new MemstoreSize();
+    List<Cell> results = returnResults? new ArrayList<>(mutation.size()): null;
+    RowLock rowLock = null;
+    MemStoreSizing memstoreAccounting = new MemStoreSizing();
     try {
+      rowLock = getRowLockInternal(mutation.getRow(), false, null);
       lock(this.updatesLock.readLock());
       try {
         Result cpResult = doCoprocessorPreCall(op, mutation);
         if (cpResult != null) {
+          // Metrics updated below in the finally block.
           return returnResults? cpResult: null;
         }
         Durability effectiveDurability = getEffectiveDurability(mutation.getDurability());
-        Map<Store, List<Cell>> forMemStore =
-            new HashMap<Store, List<Cell>>(mutation.getFamilyCellMap().size());
+        Map<HStore, List<Cell>> forMemStore = new HashMap<>(mutation.getFamilyCellMap().size());
         // Reckon Cells to apply to WAL --  in returned walEdit -- and what to add to memstore and
         // what to return back to the client (in 'forMemStore' and 'results' respectively).
         WALEdit walEdit = reckonDeltas(op, mutation, effectiveDurability, forMemStore, results);
@@ -7286,8 +7499,8 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
           updateSequenceId(forMemStore.values(), writeEntry.getWriteNumber());
         }
         // Now write to MemStore. Do it a column family at a time.
-        for (Map.Entry<Store, List<Cell>> e : forMemStore.entrySet()) {
-          applyToMemstore(e.getKey(), e.getValue(), true, memstoreSize);
+        for (Map.Entry<HStore, List<Cell>> e : forMemStore.entrySet()) {
+          applyToMemStore(e.getKey(), e.getValue(), true, memstoreAccounting);
         }
         mvcc.completeAndWait(writeEntry);
         if (rsServices != null && rsServices.getNonceManager() != null) {
@@ -7297,10 +7510,6 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
         writeEntry = null;
       } finally {
         this.updatesLock.readLock().unlock();
-        // For increment/append, a region scanner for doing a get operation could throw
-        // FileNotFoundException. So we call dropMemstoreContents() in finally block
-        // after releasing read lock
-        dropMemstoreContents();
       }
       // If results is null, then client asked that we not return the calculated results.
       return results != null && returnResults? Result.create(results): Result.EMPTY_RESULT;
@@ -7310,9 +7519,11 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
       // the client. Means only way to read-your-own-increment or append is to come in with an
       // a 0 increment.
       if (writeEntry != null) mvcc.complete(writeEntry);
-      rowLock.release();
+      if (rowLock != null) {
+        rowLock.release();
+      }
       // Request a cache flush if over the limit.  Do it outside update lock.
-      if (isFlushSize(addAndGetMemstoreSize(memstoreSize))) {
+      if (isFlushSize(addAndGetMemStoreSize(memstoreAccounting))) {
         requestFlush();
       }
       closeRegionOperation(op);
@@ -7338,27 +7549,46 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
       nonceGroup, nonce);
   }
 
+  private WriteEntry doWALAppend(WALEdit walEdit, Durability durability, List<UUID> clusterIds,
+      long now, long nonceGroup, long nonce) throws IOException {
+    return doWALAppend(walEdit, durability, clusterIds, now, nonceGroup, nonce,
+        SequenceId.NO_SEQUENCE_ID);
+  }
+
   /**
    * @return writeEntry associated with this append
    */
   private WriteEntry doWALAppend(WALEdit walEdit, Durability durability, List<UUID> clusterIds,
-      long now, long nonceGroup, long nonce)
-  throws IOException {
-    WriteEntry writeEntry = null;
+      long now, long nonceGroup, long nonce, long origLogSeqNum) throws IOException {
+    Preconditions.checkArgument(walEdit != null && !walEdit.isEmpty(),
+        "WALEdit is null or empty!");
+    Preconditions.checkArgument(!walEdit.isReplay() || origLogSeqNum != SequenceId.NO_SEQUENCE_ID,
+        "Invalid replay sequence Id for replay WALEdit!");
     // Using default cluster id, as this can only happen in the originating cluster.
     // A slave cluster receives the final value (not the delta) as a Put. We use HLogKey
-    // here instead of WALKey directly to support legacy coprocessors.
-    WALKey walKey = new WALKey(this.getRegionInfo().getEncodedNameAsBytes(),
-      this.htableDescriptor.getTableName(), WALKey.NO_SEQUENCE_ID, now, clusterIds,
-      nonceGroup, nonce, mvcc, this.getReplicationScope());
+    // here instead of WALKeyImpl directly to support legacy coprocessors.
+    WALKeyImpl walKey = walEdit.isReplay()?
+        new WALKeyImpl(this.getRegionInfo().getEncodedNameAsBytes(),
+          this.htableDescriptor.getTableName(), SequenceId.NO_SEQUENCE_ID, now, clusterIds,
+            nonceGroup, nonce, mvcc) :
+        new WALKeyImpl(this.getRegionInfo().getEncodedNameAsBytes(),
+            this.htableDescriptor.getTableName(), SequenceId.NO_SEQUENCE_ID, now, clusterIds,
+            nonceGroup, nonce, mvcc, this.getReplicationScope());
+    if (walEdit.isReplay()) {
+      walKey.setOrigLogSeqNum(origLogSeqNum);
+    }
+    WriteEntry writeEntry = null;
     try {
-      long txid =
-        this.wal.append(this.getRegionInfo(), walKey, walEdit, true);
+      long txid = this.wal.append(this.getRegionInfo(), walKey, walEdit, true);
       // Call sync on our edit.
-      if (txid != 0) sync(txid, durability);
+      if (txid != 0) {
+        sync(txid, durability);
+      }
       writeEntry = walKey.getWriteEntry();
     } catch (IOException ioe) {
-      if (walKey != null) mvcc.complete(walKey.getWriteEntry());
+      if (walKey != null && walKey.getWriteEntry() != null) {
+        mvcc.complete(walKey.getWriteEntry());
+      }
       throw ioe;
     }
     return writeEntry;
@@ -7396,18 +7626,16 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
    * @param forMemStore Fill in here what to apply to the MemStore (by Store).
    * @return A WALEdit to apply to WAL or null if we are to skip the WAL.
    */
-  private WALEdit reckonDeltas(final Operation op, final Mutation mutation,
-      final Durability effectiveDurability, final Map<Store, List<Cell>> forMemStore,
-      final List<Cell> results)
-  throws IOException {
+  private WALEdit reckonDeltas(Operation op, Mutation mutation, Durability effectiveDurability,
+      Map<HStore, List<Cell>> forMemStore, List<Cell> results) throws IOException {
     WALEdit walEdit = null;
     long now = EnvironmentEdgeManager.currentTime();
     final boolean writeToWAL = effectiveDurability != Durability.SKIP_WAL;
     // Process a Store/family at a time.
     for (Map.Entry<byte [], List<Cell>> entry: mutation.getFamilyCellMap().entrySet()) {
-      final byte [] columnFamilyName = entry.getKey();
+      final byte[] columnFamilyName = entry.getKey();
       List<Cell> deltas = entry.getValue();
-      Store store = this.stores.get(columnFamilyName);
+      HStore store = this.stores.get(columnFamilyName);
       // Reckon for the Store what to apply to WAL and MemStore.
       List<Cell> toApply =
         reckonDeltasByStore(store, op, mutation, effectiveDurability, now, deltas, results);
@@ -7439,28 +7667,39 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
    * @return Resulting Cells after <code>deltas</code> have been applied to current
    *  values. Side effect is our filling out of the <code>results</code> List.
    */
-  private List<Cell> reckonDeltasByStore(final Store store, final Operation op,
-      final Mutation mutation, final Durability effectiveDurability, final long now,
-      final List<Cell> deltas, final List<Cell> results)
-  throws IOException {
-    byte [] columnFamily = store.getFamily().getName();
-    List<Cell> toApply = new ArrayList<Cell>(deltas.size());
+  private List<Cell> reckonDeltasByStore(HStore store, Operation op, Mutation mutation,
+      Durability effectiveDurability, long now, List<Cell> deltas, List<Cell> results)
+      throws IOException {
+    byte[] columnFamily = store.getColumnFamilyDescriptor().getName();
+    List<Cell> toApply = new ArrayList<>(deltas.size());
     // Get previous values for all columns in this family.
-    List<Cell> currentValues = get(mutation, store, deltas,
-        null/*Default IsolationLevel*/,
-        op == Operation.INCREMENT? ((Increment)mutation).getTimeRange(): null);
+    TimeRange tr = null;
+    switch (op) {
+      case INCREMENT:
+        tr = ((Increment)mutation).getTimeRange();
+        break;
+      case APPEND:
+        tr = ((Append)mutation).getTimeRange();
+        break;
+      default:
+        break;
+    }
+    List<Cell> currentValues = get(mutation, store, deltas,null, tr);
     // Iterate the input columns and update existing values if they were found, otherwise
     // add new column initialized to the delta amount
     int currentValuesIndex = 0;
     for (int i = 0; i < deltas.size(); i++) {
       Cell delta = deltas.get(i);
       Cell currentValue = null;
+      boolean firstWrite = false;
       if (currentValuesIndex < currentValues.size() &&
           CellUtil.matchingQualifier(currentValues.get(currentValuesIndex), delta)) {
         currentValue = currentValues.get(currentValuesIndex);
         if (i < (deltas.size() - 1) && !CellUtil.matchingQualifier(delta, deltas.get(i + 1))) {
           currentValuesIndex++;
         }
+      } else {
+        firstWrite = true;
       }
       // Switch on whether this an increment or an append building the new Cell to apply.
       Cell newCell = null;
@@ -7471,14 +7710,20 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
           mutationType = MutationType.INCREMENT;
           // If delta amount to apply is 0, don't write WAL or MemStore.
           long deltaAmount = getLongValue(delta);
+          // TODO: Does zero value mean reset Cell? For example, the ttl.
           apply = deltaAmount != 0;
-          newCell = reckonIncrement(delta, deltaAmount, currentValue, columnFamily, now,
-            (Increment)mutation);
+          final long newValue = currentValue == null ? deltaAmount : getLongValue(currentValue) + deltaAmount;
+          newCell = reckonDelta(delta, currentValue, columnFamily, now, mutation, (oldCell) -> Bytes.toBytes(newValue));
           break;
         case APPEND:
           mutationType = MutationType.APPEND;
           // Always apply Append. TODO: Does empty delta value mean reset Cell? It seems to.
-          newCell = reckonAppend(delta, currentValue, now, (Append)mutation);
+          newCell = reckonDelta(delta, currentValue, columnFamily, now, mutation, (oldCell) ->
+            ByteBuffer.wrap(new byte[delta.getValueLength() + oldCell.getValueLength()])
+                    .put(oldCell.getValueArray(), oldCell.getValueOffset(), oldCell.getValueLength())
+                    .put(delta.getValueArray(), delta.getValueOffset(), delta.getValueLength())
+                    .array()
+          );
           break;
         default: throw new UnsupportedOperationException(op.toString());
       }
@@ -7489,7 +7734,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
             coprocessorHost.postMutationBeforeWAL(mutationType, mutation, currentValue, newCell);
       }
       // If apply, we need to update memstore/WAL with new value; add it toApply.
-      if (apply) {
+      if (apply || firstWrite) {
         toApply.add(newCell);
       }
       // Add to results to get returned to the Client. If null, cilent does not want results.
@@ -7500,82 +7745,29 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     return toApply;
   }
 
-  /**
-   * Calculate new Increment Cell.
-   * @return New Increment Cell with delta applied to currentValue if currentValue is not null;
-   *  otherwise, a new Cell with the delta set as its value.
-   */
-  private Cell reckonIncrement(final Cell delta, final long deltaAmount, final Cell currentValue,
-      byte [] columnFamily, final long now, Mutation mutation)
-  throws IOException {
+  private static Cell reckonDelta(final Cell delta, final Cell currentCell,
+                                  final byte[] columnFamily, final long now,
+                                  Mutation mutation, Function<Cell, byte[]> supplier) throws IOException {
     // Forward any tags found on the delta.
     List<Tag> tags = TagUtil.carryForwardTags(delta);
-    long newValue = deltaAmount;
-    long ts = now;
-    if (currentValue != null) {
-      tags = TagUtil.carryForwardTags(tags, currentValue);
-      ts = Math.max(now, currentValue.getTimestamp());
-      newValue += getLongValue(currentValue);
-    }
-    // Now make up the new Cell. TODO: FIX. This is carnel knowledge of how KeyValues are made...
-    // doesn't work well with offheaping or if we are doing a different Cell type.
-    byte [] incrementAmountInBytes = Bytes.toBytes(newValue);
     tags = TagUtil.carryForwardTTLTag(tags, mutation.getTTL());
-    byte [] row = mutation.getRow();
-    return new KeyValue(row, 0, row.length,
-      columnFamily, 0, columnFamily.length,
-      delta.getQualifierArray(), delta.getQualifierOffset(), delta.getQualifierLength(),
-      ts, KeyValue.Type.Put,
-      incrementAmountInBytes, 0, incrementAmountInBytes.length,
-      tags);
-  }
-
-  private Cell reckonAppend(final Cell delta, final Cell currentValue, final long now,
-      Append mutation)
-  throws IOException {
-    // Forward any tags found on the delta.
-    List<Tag> tags = TagUtil.carryForwardTags(delta);
-    long ts = now;
-    Cell newCell = null;
-    byte [] row = mutation.getRow();
-    if (currentValue != null) {
-      tags = TagUtil.carryForwardTags(tags, currentValue);
-      ts = Math.max(now, currentValue.getTimestamp());
-      tags = TagUtil.carryForwardTTLTag(tags, mutation.getTTL());
-      byte[] tagBytes = TagUtil.fromList(tags);
-      // Allocate an empty cell and copy in all parts.
-      // TODO: This is intimate knowledge of how a KeyValue is made. Undo!!! Prevents our doing
-      // other Cell types. Copying on-heap too if an off-heap Cell.
-      newCell = new KeyValue(row.length, delta.getFamilyLength(),
-        delta.getQualifierLength(), ts, KeyValue.Type.Put,
-        delta.getValueLength() + currentValue.getValueLength(),
-        tagBytes == null? 0: tagBytes.length);
-      // Copy in row, family, and qualifier
-      System.arraycopy(row, 0, newCell.getRowArray(), newCell.getRowOffset(), row.length);
-      System.arraycopy(delta.getFamilyArray(), delta.getFamilyOffset(),
-          newCell.getFamilyArray(), newCell.getFamilyOffset(), delta.getFamilyLength());
-      System.arraycopy(delta.getQualifierArray(), delta.getQualifierOffset(),
-          newCell.getQualifierArray(), newCell.getQualifierOffset(), delta.getQualifierLength());
-      // Copy in the value
-      CellUtil.copyValueTo(currentValue, newCell.getValueArray(), newCell.getValueOffset());
-      System.arraycopy(delta.getValueArray(), delta.getValueOffset(),
-          newCell.getValueArray(), newCell.getValueOffset() + currentValue.getValueLength(),
-          delta.getValueLength());
-      // Copy in tag data
-      if (tagBytes != null) {
-        System.arraycopy(tagBytes, 0,
-            newCell.getTagsArray(), newCell.getTagsOffset(), tagBytes.length);
-      }
+    if (currentCell != null) {
+      tags = TagUtil.carryForwardTags(tags, currentCell);
+      byte[] newValue = supplier.apply(currentCell);
+      return ExtendedCellBuilderFactory.create(CellBuilderType.SHALLOW_COPY)
+              .setRow(mutation.getRow(), 0, mutation.getRow().length)
+              .setFamily(columnFamily, 0, columnFamily.length)
+              // copy the qualifier if the cell is located in shared memory.
+              .setQualifier(CellUtil.cloneQualifier(delta))
+              .setTimestamp(Math.max(currentCell.getTimestamp() + 1, now))
+              .setType(KeyValue.Type.Put.getCode())
+              .setValue(newValue, 0, newValue.length)
+              .setTags(TagUtil.fromList(tags))
+              .build();
     } else {
-      // Append's KeyValue.Type==Put and ts==HConstants.LATEST_TIMESTAMP
-      CellUtil.updateLatestStamp(delta, now);
-      newCell = delta;
-      tags = TagUtil.carryForwardTTLTag(tags, mutation.getTTL());
-      if (tags != null) {
-        newCell = CellUtil.createCell(delta, tags);
-      }
+      PrivateCellUtil.updateLatestStamp(delta, now);
+      return CollectionUtils.isEmpty(tags) ? delta : PrivateCellUtil.createCell(delta, tags);
     }
-    return newCell;
   }
 
   /**
@@ -7587,7 +7779,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
       // throw DoNotRetryIOException instead of IllegalArgumentException
       throw new DoNotRetryIOException("Field is not a long, it's " + len + " bytes wide");
     }
-    return Bytes.toLong(cell.getValueArray(), cell.getValueOffset(), len);
+    return PrivateCellUtil.getValueAsLong(cell);
   }
 
   /**
@@ -7597,9 +7789,8 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
    * @param coordinates Cells from <code>mutation</code> used as coordinates applied to Get.
    * @return Return list of Cells found.
    */
-  private List<Cell> get(final Mutation mutation, final Store store,
-          final List<Cell> coordinates, final IsolationLevel isolation, final TimeRange tr)
-  throws IOException {
+  private List<Cell> get(Mutation mutation, HStore store, List<Cell> coordinates,
+      IsolationLevel isolation, TimeRange tr) throws IOException {
     // Sort the cells so that they match the order that they appear in the Get results. Otherwise,
     // we won't be able to find the existing values if the cells are not specified in order by the
     // client since cells are in an array list.
@@ -7610,7 +7801,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
       get.setIsolationLevel(isolation);
     }
     for (Cell cell: coordinates) {
-      get.addColumn(store.getFamily().getName(), CellUtil.cloneQualifier(cell));
+      get.addColumn(store.getColumnFamilyDescriptor().getName(), CellUtil.cloneQualifier(cell));
     }
     // Increments carry time range. If an Increment instance, put it on the Get.
     if (tr != null) {
@@ -7622,8 +7813,8 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
   /**
    * @return Sorted list of <code>cells</code> using <code>comparator</code>
    */
-  private static List<Cell> sort(List<Cell> cells, final Comparator<Cell> comparator) {
-    Collections.sort(cells, comparator);
+  private static List<Cell> sort(List<Cell> cells, final CellComparator comparator) {
+    cells.sort(comparator);
     return cells;
   }
 
@@ -7633,7 +7824,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
 
   void checkFamily(final byte [] family)
   throws NoSuchColumnFamilyException {
-    if (!this.htableDescriptor.hasFamily(family)) {
+    if (!this.htableDescriptor.hasColumnFamily(family)) {
       throw new NoSuchColumnFamilyException("Column family " +
           Bytes.toString(family) + " does not exist in region " + this
           + " in table " + this.htableDescriptor);
@@ -7643,9 +7834,9 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
   public static final long FIXED_OVERHEAD = ClassSize.align(
       ClassSize.OBJECT +
       ClassSize.ARRAY +
-      50 * ClassSize.REFERENCE + 2 * Bytes.SIZEOF_INT +
+      50 * ClassSize.REFERENCE + 3 * Bytes.SIZEOF_INT +
       (14 * Bytes.SIZEOF_LONG) +
-      6 * Bytes.SIZEOF_BOOLEAN);
+      3 * Bytes.SIZEOF_BOOLEAN);
 
   // woefully out of date - currently missing:
   // 1 x HashMap - coprocessorServiceHandlers
@@ -7674,15 +7865,25 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
 
   @Override
   public long heapSize() {
-    long heapSize = DEEP_OVERHEAD;
-    for (Store store : this.stores.values()) {
-      heapSize += store.heapSize();
-    }
     // this does not take into account row locks, recent flushes, mvcc entries, and more
-    return heapSize;
+    return DEEP_OVERHEAD + stores.values().stream().mapToLong(HStore::heapSize).sum();
   }
 
-  @Override
+  /**
+   * Registers a new protocol buffer {@link Service} subclass as a coprocessor endpoint to
+   * be available for handling Region#execService(com.google.protobuf.RpcController,
+   *    org.apache.hadoop.hbase.protobuf.generated.ClientProtos.CoprocessorServiceCall) calls.
+   *
+   * <p>
+   * Only a single instance may be registered per region for a given {@link Service} subclass (the
+   * instances are keyed on {@link com.google.protobuf.Descriptors.ServiceDescriptor#getFullName()}.
+   * After the first registration, subsequent calls with the same service name will fail with
+   * a return value of {@code false}.
+   * </p>
+   * @param instance the {@code Service} subclass instance to expose as a coprocessor endpoint
+   * @return {@code true} if the registration was successful, {@code false}
+   * otherwise
+   */
   public boolean registerService(com.google.protobuf.Service instance) {
     /*
      * No stacking of instances is allowed for a single service name
@@ -7705,10 +7906,22 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     return true;
   }
 
-  @Override
+  /**
+   * Executes a single protocol buffer coprocessor endpoint {@link Service} method using
+   * the registered protocol handlers.  {@link Service} implementations must be registered via the
+   * {@link #registerService(com.google.protobuf.Service)}
+   * method before they are available.
+   *
+   * @param controller an {@code RpcContoller} implementation to pass to the invoked service
+   * @param call a {@code CoprocessorServiceCall} instance identifying the service, method,
+   *     and parameters for the method invocation
+   * @return a protocol buffer {@code Message} instance containing the method's result
+   * @throws IOException if no registered service handler is found or an error
+   *     occurs during the invocation
+   * @see #registerService(com.google.protobuf.Service)
+   */
   public com.google.protobuf.Message execService(com.google.protobuf.RpcController controller,
-      CoprocessorServiceCall call)
-  throws IOException {
+      CoprocessorServiceCall call) throws IOException {
     String serviceName = call.getServiceName();
     com.google.protobuf.Service service = coprocessorServiceHandlers.get(serviceName);
     if (service == null) {
@@ -7780,13 +7993,6 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
   }
 
   /**
-   * Give the region a chance to prepare before it is split.
-   */
-  protected void prepareToSplit() {
-    // nothing
-  }
-
-  /**
    * Return the splitpoint. null indicates the region isn't splittable
    * If the splitpoint isn't explicitly specified, it will go over the stores
    * to find the best splitpoint. Currently the criteria of best splitpoint
@@ -7794,7 +8000,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
    */
   public byte[] checkSplit() {
     // Can't split META
-    if (this.getRegionInfo().isMetaTable() ||
+    if (this.getRegionInfo().isMetaRegion() ||
         TableName.NAMESPACE_TABLE_NAME.equals(this.getRegionInfo().getTable())) {
       if (shouldForceSplit()) {
         LOG.warn("Cannot split meta region in HBase 0.20 and above");
@@ -7802,9 +8008,8 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
       return null;
     }
 
-    // Can't split region which is in recovering state
-    if (this.isRecovering()) {
-      LOG.info("Cannot split region " + this.getRegionInfo().getEncodedName() + " in recovery.");
+    // Can't split a region that is closing.
+    if (this.isClosing()) {
       return null;
     }
 
@@ -7829,21 +8034,17 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
    * @return The priority that this region should have in the compaction queue
    */
   public int getCompactPriority() {
-    int count = Integer.MAX_VALUE;
-    for (Store store : stores.values()) {
-      count = Math.min(count, store.getCompactPriority());
-    }
-    return count;
+    return stores.values().stream().mapToInt(HStore::getCompactPriority).min()
+        .orElse(Store.NO_PRIORITY);
   }
 
-
   /** @return the coprocessor host */
-  @Override
   public RegionCoprocessorHost getCoprocessorHost() {
     return coprocessorHost;
   }
 
   /** @param coprocessorHost the new coprocessor host */
+  @VisibleForTesting
   public void setCoprocessorHost(final RegionCoprocessorHost coprocessorHost) {
     this.coprocessorHost = coprocessorHost;
   }
@@ -7861,21 +8062,6 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
       case GET:  // read operations
       case SCAN:
         checkReadsEnabled();
-      case INCREMENT: // write operations
-      case APPEND:
-      case SPLIT_REGION:
-      case MERGE_REGION:
-      case PUT:
-      case DELETE:
-      case BATCH_MUTATE:
-      case COMPACT_REGION:
-        // when a region is in recovering state, no read, split or merge is allowed
-        if (isRecovering() && (this.disallowWritesInRecovering ||
-              (op != Operation.PUT && op != Operation.DELETE && op != Operation.BATCH_MUTATE))) {
-          throw new RegionInRecoveryException(getRegionInfo().getRegionNameAsString() +
-            " is recovering; cannot take reads");
-        }
-        break;
       default:
         break;
     }
@@ -7893,6 +8079,11 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
       lock.readLock().unlock();
       throw new NotServingRegionException(getRegionInfo().getRegionNameAsString() + " is closed");
     }
+    // The unit for snapshot is a region. So, all stores for this region must be
+    // prepared for snapshot operation before proceeding.
+    if (op == Operation.SNAPSHOT) {
+      stores.values().forEach(HStore::preSnapshotOperation);
+    }
     try {
       if (coprocessorHost != null) {
         coprocessorHost.postStartRegionOperation(op);
@@ -7908,12 +8099,11 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     closeRegionOperation(Operation.ANY);
   }
 
-  /**
-   * Closes the lock. This needs to be called in the finally block corresponding
-   * to the try block of {@link #startRegionOperation(Operation)}
-   * @throws IOException
-   */
+  @Override
   public void closeRegionOperation(Operation operation) throws IOException {
+    if (operation == Operation.SNAPSHOT) {
+      stores.values().forEach(HStore::postSnapshotOperation);
+    }
     lock.readLock().unlock();
     if (coprocessorHost != null) {
       coprocessorHost.postCloseRegionOperation(operation);
@@ -7965,6 +8155,8 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
 
     long mutationSize = 0;
     for (List<Cell> cells: familyMap.values()) {
+      // Optimization: 'foreach' loop is not used. See:
+      // HBASE-12023 HRegion.applyFamilyMapToMemstore creates too many iterator objects
       assert cells instanceof RandomAccess;
       int listSize = cells.size();
       for (int i=0; i < listSize; i++) {
@@ -7992,11 +8184,12 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
       final long waitTime = Math.min(maxBusyWaitDuration,
           busyWaitDuration * Math.min(multiplier, maxBusyWaitMultiplier));
       if (!lock.tryLock(waitTime, TimeUnit.MILLISECONDS)) {
-        throw new RegionTooBusyException(
-            "failed to get a lock in " + waitTime + " ms. " +
-                "regionName=" + (this.getRegionInfo() == null ? "unknown" :
+        // Don't print millis. Message is used as a key over in
+        // RetriesExhaustedWithDetailsException processing.
+        throw new RegionTooBusyException("Failed to obtain lock; regionName=" +
+            (this.getRegionInfo() == null? "unknown":
                 this.getRegionInfo().getRegionNameAsString()) +
-                ", server=" + (this.getRegionServerServices() == null ? "unknown" :
+            ", server=" + (this.getRegionServerServices() == null? "unknown":
                 this.getRegionServerServices().getServerName()));
       }
     } catch (InterruptedException ie) {
@@ -8044,7 +8237,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
    * Check whether we should sync the wal from the table's durability settings
    */
   private boolean shouldSyncWAL() {
-    return durability.ordinal() >  Durability.ASYNC_WAL.ordinal();
+    return regionDurability.ordinal() >  Durability.ASYNC_WAL.ordinal();
   }
 
   /**
@@ -8073,7 +8266,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     }
   };
 
-  @Override
+  /** @return the latest sequence number that was read from storage when this region was opened */
   public long getOpenSeqNum() {
     return this.openSeqNum;
   }
@@ -8083,9 +8276,8 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     return this.maxSeqIdInStores;
   }
 
-  @Override
   public long getOldestSeqIdOfStore(byte[] familyName) {
-    return wal.getEarliestMemstoreSeqNum(getRegionInfo().getEncodedNameAsBytes(), familyName);
+    return wal.getEarliestMemStoreSeqNum(getRegionInfo().getEncodedNameAsBytes(), familyName);
   }
 
   @Override
@@ -8103,15 +8295,27 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
     int newValue = (isMajor ? majorInProgress : minorInProgress).decrementAndGet();
 
     // metrics
-    compactionsFinished.incrementAndGet();
-    compactionNumFilesCompacted.addAndGet(numFiles);
-    compactionNumBytesCompacted.addAndGet(filesSizeCompacted);
+    compactionsFinished.increment();
+    compactionNumFilesCompacted.add(numFiles);
+    compactionNumBytesCompacted.add(filesSizeCompacted);
 
     assert newValue >= 0;
   }
 
   public void reportCompactionRequestFailure() {
-    compactionsFailed.incrementAndGet();
+    compactionsFailed.increment();
+  }
+
+  public void incrementCompactionsQueuedCount() {
+    compactionsQueued.increment();
+  }
+
+  public void decrementCompactionsQueuedCount() {
+    compactionsQueued.decrement();
+  }
+
+  public void incrementFlushesQueuedCount() {
+    flushesQueued.increment();
   }
 
   @VisibleForTesting
@@ -8133,9 +8337,7 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
   @Override
   public void registerChildren(ConfigurationManager manager) {
     configurationManager = Optional.of(manager);
-    for (Store s : this.stores.values()) {
-      configurationManager.get().registerObserver(s);
-    }
+    stores.values().forEach(manager::registerObserver);
   }
 
   /**
@@ -8143,40 +8345,99 @@ public class HRegion implements HeapSize, PropagatingConfigurationObserver, Regi
    */
   @Override
   public void deregisterChildren(ConfigurationManager manager) {
-    for (Store s : this.stores.values()) {
-      configurationManager.get().deregisterObserver(s);
-    }
+    stores.values().forEach(configurationManager.get()::deregisterObserver);
   }
 
   @Override
-  public CellComparator getCellCompartor() {
-    return this.getRegionInfo().isMetaRegion() ? CellComparator.META_COMPARATOR
-        : CellComparator.COMPARATOR;
+  public CellComparator getCellComparator() {
+    return this.getRegionInfo().isMetaRegion() ? CellComparatorImpl.META_COMPARATOR
+        : CellComparatorImpl.COMPARATOR;
   }
 
-  public long getMemstoreFlushSize() {
+  public long getMemStoreFlushSize() {
     return this.memstoreFlushSize;
   }
 
   //// method for debugging tests
   void throwException(String title, String regionName) {
-    StringBuffer buf = new StringBuffer();
+    StringBuilder buf = new StringBuilder();
     buf.append(title + ", ");
     buf.append(getRegionInfo().toString());
     buf.append(getRegionInfo().isMetaRegion() ? " meta region " : " ");
-    buf.append(getRegionInfo().isMetaTable() ? " meta table " : " ");
     buf.append("stores: ");
-    for (Store s : getStores()) {
-      buf.append(s.getFamily().getNameAsString());
+    for (HStore s : stores.values()) {
+      buf.append(s.getColumnFamilyDescriptor().getNameAsString());
       buf.append(" size: ");
-      buf.append(s.getSizeOfMemStore().getDataSize());
+      buf.append(s.getMemStoreSize().getDataSize());
       buf.append(" ");
     }
     buf.append("end-of-stores");
     buf.append(", memstore size ");
-    buf.append(getMemstoreSize());
+    buf.append(getMemStoreSize());
     if (getRegionInfo().getRegionNameAsString().startsWith(regionName)) {
       throw new RuntimeException(buf.toString());
     }
+  }
+
+  @Override
+  public void requestCompaction(String why, int priority, boolean major,
+      CompactionLifeCycleTracker tracker) throws IOException {
+    if (major) {
+      stores.values().forEach(HStore::triggerMajorCompaction);
+    }
+    rsServices.getCompactionRequestor().requestCompaction(this, why, priority, tracker,
+      RpcServer.getRequestUser().orElse(null));
+  }
+
+  @Override
+  public void requestCompaction(byte[] family, String why, int priority, boolean major,
+      CompactionLifeCycleTracker tracker) throws IOException {
+    HStore store = stores.get(family);
+    if (store == null) {
+      throw new NoSuchColumnFamilyException("column family " + Bytes.toString(family) +
+          " does not exist in region " + getRegionInfo().getRegionNameAsString());
+    }
+    if (major) {
+      store.triggerMajorCompaction();
+    }
+    rsServices.getCompactionRequestor().requestCompaction(this, store, why, priority, tracker,
+      RpcServer.getRequestUser().orElse(null));
+  }
+
+  private void requestFlushIfNeeded(long memstoreTotalSize) throws RegionTooBusyException {
+    if (memstoreTotalSize > this.getMemStoreFlushSize()) {
+      requestFlush();
+    }
+  }
+
+  private void requestFlush() {
+    if (this.rsServices == null) {
+      return;
+    }
+    requestFlush0(FlushLifeCycleTracker.DUMMY);
+  }
+
+  private void requestFlush0(FlushLifeCycleTracker tracker) {
+    boolean shouldFlush = false;
+    synchronized (writestate) {
+      if (!this.writestate.isFlushRequested()) {
+        shouldFlush = true;
+        writestate.flushRequested = true;
+      }
+    }
+    if (shouldFlush) {
+      // Make request outside of synchronize block; HBASE-818.
+      this.rsServices.getFlushRequester().requestFlush(this, false, tracker);
+      if (LOG.isDebugEnabled()) {
+        LOG.debug("Flush requested on " + this.getRegionInfo().getEncodedName());
+      }
+    } else {
+      tracker.notExecuted("Flush already requested on " + this);
+    }
+  }
+
+  @Override
+  public void requestFlush(FlushLifeCycleTracker tracker) throws IOException {
+    requestFlush0(tracker);
   }
 }

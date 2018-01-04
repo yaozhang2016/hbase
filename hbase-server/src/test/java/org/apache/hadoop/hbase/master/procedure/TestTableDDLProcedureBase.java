@@ -18,25 +18,24 @@
 
 package org.apache.hadoop.hbase.master.procedure;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HTableDescriptor;
+import org.apache.hadoop.hbase.master.HMaster;
 import org.apache.hadoop.hbase.procedure2.ProcedureExecutor;
 import org.apache.hadoop.hbase.procedure2.ProcedureTestingUtility;
 import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.Before;
 import org.junit.BeforeClass;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import static org.junit.Assert.assertTrue;
 
 public abstract class TestTableDDLProcedureBase {
-  private static final Log LOG = LogFactory.getLog(TestTableDDLProcedureBase.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestTableDDLProcedureBase.class);
   protected static final HBaseTestingUtility UTIL = new HBaseTestingUtility();
-
-  protected static long nonceGroup;
-  protected static long nonce;
 
   private static void setupConf(Configuration conf) {
     conf.setInt(MasterProcedureConstants.MASTER_PROCEDURE_THREADS, 1);
@@ -60,15 +59,12 @@ public abstract class TestTableDDLProcedureBase {
   @Before
   public void setup() throws Exception {
     resetProcExecutorTestingKillFlag();
-    nonceGroup =
-        MasterProcedureTestingUtility.generateNonceGroup(UTIL.getHBaseCluster().getMaster());
-    nonce = MasterProcedureTestingUtility.generateNonce(UTIL.getHBaseCluster().getMaster());
   }
 
   @After
   public void tearDown() throws Exception {
     resetProcExecutorTestingKillFlag();
-    for (HTableDescriptor htd: UTIL.getHBaseAdmin().listTables()) {
+    for (HTableDescriptor htd: UTIL.getAdmin().listTables()) {
       LOG.info("Tear down, remove table=" + htd.getTableName());
       UTIL.deleteTable(htd.getTableName());
     }
@@ -81,6 +77,10 @@ public abstract class TestTableDDLProcedureBase {
   }
 
   protected ProcedureExecutor<MasterProcedureEnv> getMasterProcedureExecutor() {
-    return UTIL.getHBaseCluster().getMaster().getMasterProcedureExecutor();
+    return getMaster().getMasterProcedureExecutor();
+  }
+
+  protected HMaster getMaster() {
+    return UTIL.getHBaseCluster().getMaster();
   }
 }

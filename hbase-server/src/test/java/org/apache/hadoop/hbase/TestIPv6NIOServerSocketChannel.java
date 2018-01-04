@@ -26,8 +26,6 @@ import java.net.ServerSocket;
 import java.nio.channels.ServerSocketChannel;
 import java.util.Locale;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.testclassification.MiscTests;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.junit.Assert;
@@ -35,6 +33,8 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.junit.rules.TestRule;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * This tests whether ServerSocketChannel works over ipv6, which ZooKeeper
@@ -49,8 +49,7 @@ import org.junit.rules.TestRule;
  */
 @Category({MiscTests.class, SmallTests.class})
 public class TestIPv6NIOServerSocketChannel {
-
-  private static final Log LOG = LogFactory.getLog(TestIPv6NIOServerSocketChannel.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestIPv6NIOServerSocketChannel.class);
 
   @Rule
   public final TestRule timeout = CategoryBasedTimeout.builder().
@@ -69,6 +68,7 @@ public class TestIPv6NIOServerSocketChannel {
         break;
       } catch (BindException ex) {
         //continue
+        LOG.info("Failed on " + addr + ", inedAddr=" + inetAddr, ex);
       } finally {
         if (serverSocket != null) {
           serverSocket.close();
@@ -103,7 +103,7 @@ public class TestIPv6NIOServerSocketChannel {
         if (channel != null) {
           channel.close();
         }
-      }  
+      }
     }
   }
 
@@ -124,10 +124,9 @@ public class TestIPv6NIOServerSocketChannel {
       //On Windows JDK6, we will get expected exception:
       //java.net.SocketException: Address family not supported by protocol family
       //or java.net.SocketException: Protocol family not supported
-      Assert.assertFalse(ex.getClass().isInstance(BindException.class));
+      Assert.assertFalse(ex instanceof BindException);
       Assert.assertTrue(ex.getMessage().toLowerCase(Locale.ROOT).contains("protocol family"));
-      LOG.info("Received expected exception:");
-      LOG.info(ex);
+      LOG.info("Received expected exception:", ex);
 
       //if this is the case, ensure that we are running on preferIPv4=true
       ensurePreferIPv4();
@@ -151,9 +150,9 @@ public class TestIPv6NIOServerSocketChannel {
    */
   @Test
   public void testServerSocketFromLocalhostResolution() throws IOException {
-    InetAddress[] addrs = InetAddress.getAllByName("localhost");
+    InetAddress[] addrs = {InetAddress.getLocalHost()};
     for (InetAddress addr : addrs) {
-      LOG.info("resolved localhost as:" + addr);
+      LOG.info("Resolved localhost as: " + addr);
       bindServerSocket(addr);
       bindNIOServerSocket(addr);
     }

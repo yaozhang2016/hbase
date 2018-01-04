@@ -23,7 +23,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.TreeMap;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos;
 import org.apache.hadoop.hbase.util.Bytes;
 
@@ -41,7 +41,7 @@ public class MultiResponse extends AbstractResponse {
    * It's a part of the protobuf definition.
    */
   private Map<byte[], Throwable> exceptions =
-      new TreeMap<byte[], Throwable>(Bytes.BYTES_COMPARATOR);
+      new TreeMap<>(Bytes.BYTES_COMPARATOR);
 
   public MultiResponse() {
     super();

@@ -17,29 +17,31 @@
  */
 package org.apache.hadoop.hbase.client;
 
-import com.google.common.annotations.VisibleForTesting;
-import org.apache.hadoop.hbase.shaded.com.google.protobuf.Descriptors.MethodDescriptor;
-import org.apache.hadoop.hbase.shaded.com.google.protobuf.Message;
+import static com.codahale.metrics.MetricRegistry.name;
+import static org.apache.hadoop.hbase.util.CollectionUtils.computeIfAbsent;
+
 import com.codahale.metrics.Counter;
 import com.codahale.metrics.Histogram;
-import com.codahale.metrics.MetricRegistry;
-import com.codahale.metrics.Timer;
 import com.codahale.metrics.JmxReporter;
+import com.codahale.metrics.MetricRegistry;
 import com.codahale.metrics.RatioGauge;
+import com.codahale.metrics.Timer;
+import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
+
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.ConcurrentSkipListMap;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+
 import org.apache.hadoop.hbase.ServerName;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.apache.hbase.thirdparty.com.google.protobuf.Descriptors.MethodDescriptor;
+import org.apache.hbase.thirdparty.com.google.protobuf.Message;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos.ClientService;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos.MutateRequest;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos.MutationProto.MutationType;
 import org.apache.hadoop.hbase.util.Bytes;
-
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentSkipListMap;
-import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
-
-import static com.codahale.metrics.MetricRegistry.name;
 
 /**
  * This class is for maintaining the various connection statistics and publishing them through
@@ -71,6 +73,7 @@ public class MetricsConnection implements StatisticTrackable {
     private long responseSizeBytes = 0;
     private long startTime = 0;
     private long callTimeMs = 0;
+    private int concurrentCallsPerServer = 0;
 
     public long getRequestSizeBytes() {
       return requestSizeBytes;
@@ -102,6 +105,14 @@ public class MetricsConnection implements StatisticTrackable {
 
     public void setCallTimeMs(long callTimeMs) {
       this.callTimeMs = callTimeMs;
+    }
+
+    public int getConcurrentCallsPerServer() {
+      return concurrentCallsPerServer;
+    }
+
+    public void setConcurrentCallsPerServer(int callsPerServer) {
+      this.concurrentCallsPerServer = callsPerServer;
     }
   }
 
@@ -156,7 +167,7 @@ public class MetricsConnection implements StatisticTrackable {
     }
 
     public void update(RegionLoadStats regionStatistics) {
-      this.memstoreLoadHist.update(regionStatistics.getMemstoreLoad());
+      this.memstoreLoadHist.update(regionStatistics.getMemStoreLoad());
       this.heapOccupancyHist.update(regionStatistics.getHeapOccupancy());
     }
   }
@@ -191,7 +202,7 @@ public class MetricsConnection implements StatisticTrackable {
 
   @VisibleForTesting
   protected ConcurrentHashMap<ServerName, ConcurrentMap<byte[], RegionStats>> serverStats
-          = new ConcurrentHashMap<ServerName, ConcurrentMap<byte[], RegionStats>>();
+          = new ConcurrentHashMap<>();
 
   public void updateServerStats(ServerName serverName, byte[] regionName,
                                 Object r) {
@@ -207,31 +218,14 @@ public class MetricsConnection implements StatisticTrackable {
   }
 
   @Override
-  public void updateRegionStats(ServerName serverName, byte[] regionName,
-    RegionLoadStats stats) {
+  public void updateRegionStats(ServerName serverName, byte[] regionName, RegionLoadStats stats) {
     String name = serverName.getServerName() + "," + Bytes.toStringBinary(regionName);
-    ConcurrentMap<byte[], RegionStats> rsStats = null;
-    if (serverStats.containsKey(serverName)) {
-      rsStats = serverStats.get(serverName);
-    } else {
-      rsStats = serverStats.putIfAbsent(serverName,
-          new ConcurrentSkipListMap<byte[], RegionStats>(Bytes.BYTES_COMPARATOR));
-      if (rsStats == null) {
-        rsStats = serverStats.get(serverName);
-      }
-    }
-    RegionStats regionStats = null;
-    if (rsStats.containsKey(regionName)) {
-      regionStats = rsStats.get(regionName);
-    } else {
-      regionStats = rsStats.putIfAbsent(regionName, new RegionStats(this.registry, name));
-      if (regionStats == null) {
-        regionStats = rsStats.get(regionName);
-      }
-    }
+    ConcurrentMap<byte[], RegionStats> rsStats = computeIfAbsent(serverStats, serverName,
+      () -> new ConcurrentSkipListMap<>(Bytes.BYTES_COMPARATOR));
+    RegionStats regionStats =
+        computeIfAbsent(rsStats, regionName, () -> new RegionStats(this.registry, name));
     regionStats.update(stats);
   }
-
 
   /** A lambda for dispatching to the appropriate metric factory method */
   private static interface NewMetric<T> {
@@ -284,6 +278,9 @@ public class MetricsConnection implements StatisticTrackable {
   @VisibleForTesting protected final RunnerStats runnerStats;
   @VisibleForTesting protected final Counter metaCacheNumClearServer;
   @VisibleForTesting protected final Counter metaCacheNumClearRegion;
+  @VisibleForTesting protected final Counter hedgedReadOps;
+  @VisibleForTesting protected final Counter hedgedReadWin;
+  @VisibleForTesting protected final Histogram concurrentCallsPerServerHist;
 
   // dynamic metrics
 
@@ -330,6 +327,8 @@ public class MetricsConnection implements StatisticTrackable {
       "metaCacheNumClearServer", scope));
     this.metaCacheNumClearRegion = registry.counter(name(this.getClass(),
       "metaCacheNumClearRegion", scope));
+    this.hedgedReadOps = registry.counter(name(this.getClass(), "hedgedReadOps", scope));
+    this.hedgedReadWin = registry.counter(name(this.getClass(), "hedgedReadWin", scope));
     this.getTracker = new CallTracker(this.registry, "Get", scope);
     this.scanTracker = new CallTracker(this.registry, "Scan", scope);
     this.appendTracker = new CallTracker(this.registry, "Mutate", "Append", scope);
@@ -338,6 +337,8 @@ public class MetricsConnection implements StatisticTrackable {
     this.putTracker = new CallTracker(this.registry, "Mutate", "Put", scope);
     this.multiTracker = new CallTracker(this.registry, "Multi", scope);
     this.runnerStats = new RunnerStats(this.registry);
+    this.concurrentCallsPerServerHist = registry.histogram(name(MetricsConnection.class, 
+      "concurrentCallsPerServer", scope));
 
     this.reporter = JmxReporter.forRegistry(this.registry).build();
     this.reporter.start();
@@ -388,6 +389,16 @@ public class MetricsConnection implements StatisticTrackable {
     metaCacheNumClearRegion.inc();
   }
 
+  /** Increment the number of hedged read that have occurred. */
+  public void incrHedgedReadOps() {
+    hedgedReadOps.inc();
+  }
+
+  /** Increment the number of hedged read returned faster than the original read. */
+  public void incrHedgedReadWin() {
+    hedgedReadWin.inc();
+  }
+
   /** Increment the number of normal runner counts. */
   public void incrNormalRunners() {
     this.runnerStats.incrNormalRunners();
@@ -407,13 +418,7 @@ public class MetricsConnection implements StatisticTrackable {
    * Get a metric for {@code key} from {@code map}, or create it with {@code factory}.
    */
   private <T> T getMetric(String key, ConcurrentMap<String, T> map, NewMetric<T> factory) {
-    T t = map.get(key);
-    if (t == null) {
-      t = factory.newMetric(this.getClass(), key, scope);
-      T tmp = map.putIfAbsent(key, t);
-      t = (tmp == null) ? t : tmp;
-    }
-    return t;
+    return computeIfAbsent(map, key, () -> factory.newMetric(getClass(), key, scope));
   }
 
   /** Update call stats for non-critical-path methods */
@@ -429,6 +434,10 @@ public class MetricsConnection implements StatisticTrackable {
 
   /** Report RPC context to metrics system. */
   public void updateRpc(MethodDescriptor method, Message param, CallStats stats) {
+    int callsPerServer = stats.getConcurrentCallsPerServer();
+    if (callsPerServer > 0) {
+      concurrentCallsPerServerHist.update(callsPerServer);
+    }
     // this implementation is tied directly to protobuf implementation details. would be better
     // if we could dispatch based on something static, ie, request Message type.
     if (method.getService() == ClientService.getDescriptor()) {

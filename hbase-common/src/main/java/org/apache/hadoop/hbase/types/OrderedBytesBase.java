@@ -17,37 +17,45 @@
  */
 package org.apache.hadoop.hbase.types;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
 import org.apache.hadoop.hbase.util.Order;
 import org.apache.hadoop.hbase.util.OrderedBytes;
 import org.apache.hadoop.hbase.util.PositionedByteRange;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * Base class for data types backed by the {@link OrderedBytes} encoding
  * implementations.
  */
 @InterfaceAudience.Public
-@InterfaceStability.Evolving
 public abstract class OrderedBytesBase<T> implements DataType<T> {
 
   protected final Order order;
 
-  protected OrderedBytesBase(Order order) { this.order = order; }
+  protected OrderedBytesBase(Order order) {
+    this.order = order;
+  }
 
   @Override
-  public boolean isOrderPreserving() { return true; }
+  public boolean isOrderPreserving() {
+    return true;
+  }
 
   @Override
-  public Order getOrder() { return order; }
+  public Order getOrder() {
+    return order;
+  }
 
   // almost all OrderedBytes implementations are nullable.
   @Override
-  public boolean isNullable() { return true; }
+  public boolean isNullable() {
+    return true;
+  }
 
   // almost all OrderedBytes implementations are skippable.
   @Override
-  public boolean isSkippable() { return true; }
+  public boolean isSkippable() {
+    return true;
+  }
 
   @Override
   public int skip(PositionedByteRange src) {

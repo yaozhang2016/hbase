@@ -23,8 +23,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.concurrent.ThreadPoolExecutor;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.errorhandling.ForeignException;
 import org.apache.hadoop.hbase.errorhandling.ForeignExceptionDispatcher;
@@ -32,13 +30,15 @@ import org.apache.hadoop.hbase.master.MasterServices;
 import org.apache.hadoop.hbase.master.MetricsMaster;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos.ProcedureDescription;
 import org.apache.zookeeper.KeeperException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class SimpleMasterProcedureManager extends MasterProcedureManager {
 
-  public static final String SIMPLE_SIGNATURE = "simle_test";
+  public static final String SIMPLE_SIGNATURE = "simple_test";
   public static final String SIMPLE_DATA = "simple_test_data";
 
-  private static final Log LOG = LogFactory.getLog(SimpleMasterProcedureManager.class);
+  private static final Logger LOG = LoggerFactory.getLogger(SimpleMasterProcedureManager.class);
 
   private MasterServices master;
   private ProcedureCoordinator coordinator;
@@ -64,7 +64,7 @@ public class SimpleMasterProcedureManager extends MasterProcedureManager {
     // setup the default procedure coordinator
     String name = master.getServerName().toString();
     ThreadPoolExecutor tpool = ProcedureCoordinator.defaultPool(name, 1);
-    ProcedureCoordinatorRpcs comms = new ZKProcedureCoordinatorRpcs(
+    ProcedureCoordinatorRpcs comms = new ZKProcedureCoordinator(
         master.getZooKeeper(), getProcedureSignature(), name);
 
     this.coordinator = new ProcedureCoordinator(comms, tpool);
@@ -82,7 +82,7 @@ public class SimpleMasterProcedureManager extends MasterProcedureManager {
     ForeignExceptionDispatcher monitor = new ForeignExceptionDispatcher(desc.getInstance());
 
     List<ServerName> serverNames = master.getServerManager().getOnlineServersList();
-    List<String> servers = new ArrayList<String>();
+    List<String> servers = new ArrayList<>();
     for (ServerName sn : serverNames) {
       servers.add(sn.toString());
     }

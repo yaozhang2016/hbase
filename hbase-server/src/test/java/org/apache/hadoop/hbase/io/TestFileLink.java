@@ -37,7 +37,9 @@ import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.testclassification.IOTests;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.util.FSUtils;
+import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
+import org.apache.hadoop.ipc.RemoteException;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 
@@ -105,6 +107,35 @@ public class TestFileLink {
     }
   }
 
+  private static class MyDistributedFileSystem extends DistributedFileSystem {
+    MyDistributedFileSystem() {
+    }
+    @Override
+    public FSDataInputStream open(Path f, final int bufferSize)
+        throws IOException {
+      throw new RemoteException(FileNotFoundException.class.getName(), "");
+    }
+    @Override
+    public Configuration getConf() {
+      return new Configuration();
+    }
+  }
+  @Test(expected = FileNotFoundException.class)
+  public void testLinkReadWithMissingFile() throws Exception {
+    HBaseTestingUtility testUtil = new HBaseTestingUtility();
+    FileSystem fs = new MyDistributedFileSystem();
+
+    Path originalPath = new Path(testUtil.getDefaultRootDirPath(), "test.file");
+    Path archivedPath = new Path(testUtil.getDefaultRootDirPath(), "archived.file");
+
+    List<Path> files = new ArrayList<Path>();
+    files.add(originalPath);
+    files.add(archivedPath);
+
+    FileLink link = new FileLink(files);
+    link.open(fs);
+  }
+
   /**
    * Test, on a local filesystem, that the FileLink is still readable
    * even when the current file gets renamed.
@@ -126,7 +157,7 @@ public class TestFileLink {
 
     writeSomeData(fs, originalPath, 256 << 20, (byte)2);
 
-    List<Path> files = new ArrayList<Path>();
+    List<Path> files = new ArrayList<>();
     files.add(originalPath);
     files.add(archivedPath);
 
@@ -194,7 +225,7 @@ public class TestFileLink {
     assertEquals("hdfs", fs.getUri().getScheme());
 
     try {
-      List<Path> files = new ArrayList<Path>();
+      List<Path> files = new ArrayList<>();
       for (int i = 0; i < 3; i++) {
         Path path = new Path(String.format("test-data-%d", i));
         writeSomeData(fs, path, 1 << 20, (byte)i);

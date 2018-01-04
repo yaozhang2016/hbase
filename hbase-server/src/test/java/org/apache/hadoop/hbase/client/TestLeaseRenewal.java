@@ -24,8 +24,6 @@ import static org.junit.Assert.assertTrue;
 
 import java.util.Arrays;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.CompatibilityFactory;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HConstants;
@@ -39,14 +37,18 @@ import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.Before;
 import org.junit.BeforeClass;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.junit.rules.TestName;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Category(LargeTests.class)
 public class TestLeaseRenewal {
   public MetricsAssertHelper HELPER = CompatibilityFactory.getInstance(MetricsAssertHelper.class);
 
-  final Log LOG = LogFactory.getLog(getClass());
+  final Logger LOG = LoggerFactory.getLogger(getClass());
   private final static HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
   private static byte[] FAMILY = Bytes.toBytes("testFamily");
   private static final byte[] ANOTHERROW = Bytes.toBytes("anotherrow");
@@ -55,6 +57,9 @@ public class TestLeaseRenewal {
   private final static byte[] ROW_BYTES = Bytes.toBytes("r1");
   private final static int leaseTimeout =
       HConstants.DEFAULT_HBASE_CLIENT_SCANNER_TIMEOUT_PERIOD / 4;
+
+  @Rule
+  public TestName name = new TestName();
 
   /**
    * @throws java.lang.Exception
@@ -87,7 +92,7 @@ public class TestLeaseRenewal {
    */
   @After
   public void tearDown() throws Exception {
-    for (HTableDescriptor htd : TEST_UTIL.getHBaseAdmin().listTables()) {
+    for (HTableDescriptor htd : TEST_UTIL.getAdmin().listTables()) {
       LOG.info("Tear down, remove table=" + htd.getTableName());
       TEST_UTIL.deleteTable(htd.getTableName());
     }
@@ -95,8 +100,7 @@ public class TestLeaseRenewal {
 
   @Test
   public void testLeaseRenewal() throws Exception {
-    Table table = TEST_UTIL.createTable(
-      TableName.valueOf("testLeaseRenewal"), FAMILY);
+    Table table = TEST_UTIL.createTable(TableName.valueOf(name.getMethodName()), FAMILY);
     Put p = new Put(ROW_BYTES);
     p.addColumn(FAMILY, COL_QUAL, VAL_BYTES);
     table.put(p);
@@ -106,8 +110,8 @@ public class TestLeaseRenewal {
     Scan s = new Scan();
     s.setCaching(1);
     ResultScanner rs = table.getScanner(s);
-    // make sure that calling renewLease does not impact the scan results
-    assertTrue(rs.renewLease());
+    // we haven't open the scanner yet so nothing happens
+    assertFalse(rs.renewLease());
     assertTrue(Arrays.equals(rs.next().getRow(), ANOTHERROW));
     // renew the lease a few times, long enough to be sure
     // the lease would have expired otherwise
@@ -119,7 +123,8 @@ public class TestLeaseRenewal {
     assertTrue(rs.renewLease());
     // make sure we haven't advanced the scanner
     assertTrue(Arrays.equals(rs.next().getRow(), ROW_BYTES));
-    assertTrue(rs.renewLease());
+    // renewLease should return false now as we have read all the data already
+    assertFalse(rs.renewLease());
     // make sure scanner is exhausted now
     assertNull(rs.next());
     // renewLease should return false now

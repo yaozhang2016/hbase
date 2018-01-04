@@ -21,9 +21,8 @@ package org.apache.hadoop.hbase.regionserver;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
@@ -40,6 +39,7 @@ import org.apache.hadoop.hbase.client.Durability;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.Scan;
+import org.apache.hadoop.hbase.client.TableDescriptorBuilder;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.testclassification.RegionServerTests;
 import org.apache.hadoop.hbase.util.Bytes;
@@ -48,6 +48,8 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.junit.rules.TestName;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
@@ -59,7 +61,7 @@ import static org.junit.Assert.assertTrue;
 @Category({RegionServerTests.class, MediumTests.class})
 public class TestGetClosestAtOrBefore  {
   @Rule public TestName testName = new TestName();
-  private static final Log LOG = LogFactory.getLog(TestGetClosestAtOrBefore.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestGetClosestAtOrBefore.class);
 
   private static final byte[] T00 = Bytes.toBytes("000");
   private static final byte[] T10 = Bytes.toBytes("010");
@@ -79,10 +81,11 @@ public class TestGetClosestAtOrBefore  {
     FileSystem filesystem = FileSystem.get(conf);
     Path rootdir = UTIL.getDataTestDirOnTestFS();
     // Up flush size else we bind up when we use default catalog flush of 16k.
-    UTIL.getMetaTableDescriptor().setMemStoreFlushSize(64 * 1024 * 1024);
+    TableDescriptorBuilder metaBuilder = UTIL.getMetaTableDescriptorBuilder()
+            .setMemStoreFlushSize(64 * 1024 * 1024);
 
-    Region mr = HBaseTestingUtility.createRegionAndWAL(HRegionInfo.FIRST_META_REGIONINFO,
-        rootdir, this.conf, UTIL.getMetaTableDescriptor());
+    HRegion mr = HBaseTestingUtility.createRegionAndWAL(HRegionInfo.FIRST_META_REGIONINFO,
+        rootdir, this.conf, metaBuilder.build());
     try {
     // Write rows for three tables 'A', 'B', and 'C'.
     for (char c = 'A'; c < 'D'; c++) {
@@ -101,9 +104,9 @@ public class TestGetClosestAtOrBefore  {
     }
     InternalScanner s = mr.getScanner(new Scan());
     try {
-      List<Cell> keys = new ArrayList<Cell>();
-        while (s.next(keys)) {
-        LOG.info(keys);
+      List<Cell> keys = new ArrayList<>();
+      while (s.next(keys)) {
+        LOG.info(Objects.toString(keys));
         keys.clear();
       }
     } finally {
@@ -125,7 +128,7 @@ public class TestGetClosestAtOrBefore  {
     Scan scan = new Scan(firstRowInC);
     s = mr.getScanner(scan);
     try {
-      List<Cell> keys = new ArrayList<Cell>();
+      List<Cell> keys = new ArrayList<>();
         while (s.next(keys)) {
         mr.delete(new Delete(CellUtil.cloneRow(keys.get(0))));
         keys.clear();
@@ -193,7 +196,7 @@ public class TestGetClosestAtOrBefore  {
    */
   @Test
   public void testGetClosestRowBefore3() throws IOException{
-    Region region = null;
+    HRegion region = null;
     byte [] c0 = UTIL.COLUMNS[0];
     byte [] c1 = UTIL.COLUMNS[1];
     try {
@@ -291,8 +294,8 @@ public class TestGetClosestAtOrBefore  {
     } finally {
       if (region != null) {
         try {
-          WAL wal = ((HRegion)region).getWAL();
-          ((HRegion)region).close();
+          WAL wal = region.getWAL();
+          region.close();
           wal.close();
         } catch (Exception e) {
           e.printStackTrace();
@@ -304,7 +307,7 @@ public class TestGetClosestAtOrBefore  {
   /** For HBASE-694 */
   @Test
   public void testGetClosestRowBefore2() throws IOException{
-    Region region = null;
+    HRegion region = null;
     byte [] c0 = UTIL.COLUMNS[0];
     try {
       TableName tn = TableName.valueOf(testName.getMethodName());
@@ -349,8 +352,8 @@ public class TestGetClosestAtOrBefore  {
     } finally {
       if (region != null) {
         try {
-          WAL wal = ((HRegion)region).getWAL();
-          ((HRegion)region).close();
+          WAL wal = region.getWAL();
+          region.close();
           wal.close();
         } catch (Exception e) {
           e.printStackTrace();

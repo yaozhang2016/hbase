@@ -17,6 +17,7 @@
  */
 package org.apache.hadoop.hbase.wal;
 
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -24,24 +25,26 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Pattern;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.ServerName;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceStability;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.hbase.regionserver.wal.AbstractFSWAL;
 import org.apache.hadoop.hbase.regionserver.wal.WALActionsListener;
-
-import com.google.common.annotations.VisibleForTesting;
+import org.apache.hadoop.hbase.util.CancelableProgressable;
+import org.apache.hadoop.hbase.util.FSUtils;
+import org.apache.hadoop.hbase.util.LeaseNotRecoveredException;
+import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
 
 /**
- * Base class of a WAL Provider that returns a single thread safe WAL that writes to HDFS. By
- * default, this implementation picks a directory in HDFS based on a combination of
+ * Base class of a WAL Provider that returns a single thread safe WAL that writes to Hadoop FS. By
+ * default, this implementation picks a directory in Hadoop FS based on a combination of
  * <ul>
  * <li>the HBase root directory
  * <li>HConstants.HREGION_LOGDIR_NAME
@@ -53,7 +56,11 @@ import com.google.common.annotations.VisibleForTesting;
 @InterfaceStability.Evolving
 public abstract class AbstractFSWALProvider<T extends AbstractFSWAL<?>> implements WALProvider {
 
-  private static final Log LOG = LogFactory.getLog(AbstractFSWALProvider.class);
+  private static final Logger LOG = LoggerFactory.getLogger(AbstractFSWALProvider.class);
+
+  /** Separate old log into different dir by regionserver name **/
+  public static final String SEPARATE_OLDLOGDIR = "hbase.separate.oldlogdir.by.regionserver";
+  public static final boolean DEFAULT_SEPARATE_OLDLOGDIR = false;
 
   // Only public so classes back in regionserver.wal can access
   public interface Reader extends WAL.Reader {
@@ -111,11 +118,11 @@ public abstract class AbstractFSWALProvider<T extends AbstractFSWAL<?>> implemen
   }
 
   @Override
-  public List<WAL> getWALs() throws IOException {
+  public List<WAL> getWALs() {
     if (wal == null) {
       return Collections.emptyList();
     }
-    List<WAL> wals = new ArrayList<WAL>();
+    List<WAL> wals = new ArrayList<>(1);
     wals.add(wal);
     return wals;
   }
@@ -255,7 +262,8 @@ public abstract class AbstractFSWALProvider<T extends AbstractFSWAL<?>> implemen
   }
 
   /**
-   * Construct the directory name for all WALs on a given server.
+   * Construct the directory name for all WALs on a given server. Dir names currently look like
+   * this for WALs: <code>hbase//WALs/kalashnikov.att.net,61634,1486865297088</code>.
    * @param serverName Server name formatted as described in {@link ServerName}
    * @return the relative WAL directory name, e.g. <code>.logs/1.example.org,60030,12345</code> if
    *         <code>serverName</code> passed is <code>1.example.org,60030,12345</code>
@@ -264,6 +272,23 @@ public abstract class AbstractFSWALProvider<T extends AbstractFSWAL<?>> implemen
     StringBuilder dirName = new StringBuilder(HConstants.HREGION_LOGDIR_NAME);
     dirName.append("/");
     dirName.append(serverName);
+    return dirName.toString();
+  }
+
+  /**
+   * Construct the directory name for all old WALs on a given server. The default old WALs dir
+   * looks like: <code>hbase/oldWALs</code>. If you config hbase.separate.oldlogdir.by.regionserver
+   * to true, it looks like <code>hbase//oldWALs/kalashnikov.att.net,61634,1486865297088</code>.
+   * @param conf
+   * @param serverName Server name formatted as described in {@link ServerName}
+   * @return the relative WAL directory name
+   */
+  public static String getWALArchiveDirectoryName(Configuration conf, final String serverName) {
+    StringBuilder dirName = new StringBuilder(HConstants.HREGION_OLDLOGDIR_NAME);
+    if (conf.getBoolean(SEPARATE_OLDLOGDIR, DEFAULT_SEPARATE_OLDLOGDIR)) {
+      dirName.append(Path.SEPARATOR);
+      dirName.append(serverName);
+    }
     return dirName.toString();
   }
 
@@ -345,7 +370,7 @@ public abstract class AbstractFSWALProvider<T extends AbstractFSWAL<?>> implemen
     }
     try {
       serverName = ServerName.parseServerName(logDirName);
-    } catch (IllegalArgumentException ex) {
+    } catch (IllegalArgumentException|IllegalStateException ex) {
       serverName = null;
       LOG.warn("Cannot parse a server name from path=" + logFile + "; " + ex.getMessage());
     }
@@ -366,6 +391,116 @@ public abstract class AbstractFSWALProvider<T extends AbstractFSWAL<?>> implemen
     }
     return false;
   }
+
+  public static boolean isArchivedLogFile(Path p) {
+    String oldLog = Path.SEPARATOR + HConstants.HREGION_OLDLOGDIR_NAME + Path.SEPARATOR;
+    return p.toString().contains(oldLog);
+  }
+
+  /**
+   * Get the archived WAL file path
+   * @param path - active WAL file path
+   * @param conf - configuration
+   * @return archived path if exists, path - otherwise
+   * @throws IOException exception
+   */
+  public static Path getArchivedLogPath(Path path, Configuration conf) throws IOException {
+    Path rootDir = FSUtils.getRootDir(conf);
+    Path oldLogDir = new Path(rootDir, HConstants.HREGION_OLDLOGDIR_NAME);
+    if (conf.getBoolean(SEPARATE_OLDLOGDIR, DEFAULT_SEPARATE_OLDLOGDIR)) {
+      ServerName serverName = getServerNameFromWALDirectoryName(path);
+      if (serverName == null) {
+        LOG.error("Couldn't locate log: " + path);
+        return path;
+      }
+      oldLogDir = new Path(oldLogDir, serverName.getServerName());
+    }
+    Path archivedLogLocation = new Path(oldLogDir, path.getName());
+    final FileSystem fs = FSUtils.getCurrentFileSystem(conf);
+
+    if (fs.exists(archivedLogLocation)) {
+      LOG.info("Log " + path + " was moved to " + archivedLogLocation);
+      return archivedLogLocation;
+    } else {
+      LOG.error("Couldn't locate log: " + path);
+      return path;
+    }
+  }
+
+  /**
+   * Opens WAL reader with retries and
+   * additional exception handling
+   * @param path path to WAL file
+   * @param conf configuration
+   * @return WAL Reader instance
+   * @throws IOException
+   */
+  public static org.apache.hadoop.hbase.wal.WAL.Reader
+    openReader(Path path, Configuration conf)
+        throws IOException
+
+  {
+    long retryInterval = 2000; // 2 sec
+    int maxAttempts = 30;
+    int attempt = 0;
+    Exception ee = null;
+    org.apache.hadoop.hbase.wal.WAL.Reader reader = null;
+    while (reader == null && attempt++ < maxAttempts) {
+      try {
+        // Detect if this is a new file, if so get a new reader else
+        // reset the current reader so that we see the new data
+        reader = WALFactory.createReader(path.getFileSystem(conf), path, conf);
+        return reader;
+      } catch (FileNotFoundException fnfe) {
+        // If the log was archived, continue reading from there
+        Path archivedLog = AbstractFSWALProvider.getArchivedLogPath(path, conf);
+        if (path != archivedLog) {
+          return openReader(archivedLog, conf);
+        } else {
+          throw fnfe;
+        }
+      } catch (LeaseNotRecoveredException lnre) {
+        // HBASE-15019 the WAL was not closed due to some hiccup.
+        LOG.warn("Try to recover the WAL lease " + path, lnre);
+        recoverLease(conf, path);
+        reader = null;
+        ee = lnre;
+      } catch (NullPointerException npe) {
+        // Workaround for race condition in HDFS-4380
+        // which throws a NPE if we open a file before any data node has the most recent block
+        // Just sleep and retry. Will require re-reading compressed WALs for compressionContext.
+        LOG.warn("Got NPE opening reader, will retry.");
+        reader = null;
+        ee = npe;
+      }
+      if (reader == null) {
+        // sleep before next attempt
+        try {
+          Thread.sleep(retryInterval);
+        } catch (InterruptedException e) {
+        }
+      }
+    }
+    throw new IOException("Could not open reader", ee);
+  }
+
+  // For HBASE-15019
+  private static void recoverLease(final Configuration conf, final Path path) {
+    try {
+      final FileSystem dfs = FSUtils.getCurrentFileSystem(conf);
+      FSUtils fsUtils = FSUtils.getInstance(dfs, conf);
+      fsUtils.recoverFileLease(dfs, path, conf, new CancelableProgressable() {
+        @Override
+        public boolean progress() {
+          LOG.debug("Still trying to recover WAL lease: " + path);
+          return true;
+        }
+      });
+    } catch (IOException e) {
+      LOG.warn("unable to recover lease for WAL: " + path, e);
+    }
+  }
+
 
   /**
    * Get prefix of the log from its name, assuming WAL name in format of

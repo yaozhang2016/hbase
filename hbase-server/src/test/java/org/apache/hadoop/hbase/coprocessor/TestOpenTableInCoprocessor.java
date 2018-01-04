@@ -1,4 +1,4 @@
-/**
+/*
  *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -29,7 +29,7 @@ import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.ResultScanner;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.client.Table;
-import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
+import org.apache.hadoop.hbase.wal.WALEdit;
 import org.apache.hadoop.hbase.testclassification.CoprocessorTests;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.util.Threads;
@@ -41,6 +41,7 @@ import org.junit.experimental.categories.Category;
 
 import java.io.IOException;
 import java.util.Collections;
+import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -63,15 +64,21 @@ public class TestOpenTableInCoprocessor {
   /**
    * Custom coprocessor that just copies the write to another table.
    */
-  public static class SendToOtherTableCoprocessor extends BaseRegionObserver {
+  public static class SendToOtherTableCoprocessor implements RegionCoprocessor, RegionObserver {
+
+    @Override
+    public Optional<RegionObserver> getRegionObserver() {
+      return Optional.of(this);
+    }
 
     @Override
     public void prePut(final ObserverContext<RegionCoprocessorEnvironment> e, final Put put,
         final WALEdit edit, final Durability durability) throws IOException {
-      Table table = e.getEnvironment().getTable(otherTable);
-      table.put(put);
-      completed[0] = true;
-      table.close();
+      try (Table table = e.getEnvironment().getConnection().
+          getTable(otherTable)) {
+        table.put(put);
+        completed[0] = true;
+      }
     }
 
   }
@@ -80,7 +87,7 @@ public class TestOpenTableInCoprocessor {
   /**
    * Coprocessor that creates an HTable with a pool to write to another table
    */
-  public static class CustomThreadPoolCoprocessor extends BaseRegionObserver {
+  public static class CustomThreadPoolCoprocessor implements RegionCoprocessor, RegionObserver {
 
     /**
      * Get a pool that has only ever one thread. A second action added to the pool (running
@@ -92,24 +99,29 @@ public class TestOpenTableInCoprocessor {
       long keepAliveTime = 60;
       ThreadPoolExecutor pool =
           new ThreadPoolExecutor(1, maxThreads, keepAliveTime, TimeUnit.SECONDS,
-              new SynchronousQueue<Runnable>(), Threads.newDaemonThreadFactory("hbase-table"));
+              new SynchronousQueue<>(), Threads.newDaemonThreadFactory("hbase-table"));
       pool.allowCoreThreadTimeOut(true);
       return pool;
     }
 
     @Override
+    public Optional<RegionObserver> getRegionObserver() {
+      return Optional.of(this);
+    }
+
+    @Override
     public void prePut(final ObserverContext<RegionCoprocessorEnvironment> e, final Put put,
         final WALEdit edit, final Durability durability) throws IOException {
-      Table table = e.getEnvironment().getTable(otherTable, getPool());
-      Put p = new Put(new byte[] { 'a' });
-      p.addColumn(family, null, new byte[]{'a'});
-      try {
-        table.batch(Collections.singletonList(put), null);
-      } catch (InterruptedException e1) {
-        throw new IOException(e1);
+      try (Table table = e.getEnvironment().getConnection().getTable(otherTable, getPool())) {
+        Put p = new Put(new byte[]{'a'});
+        p.addColumn(family, null, new byte[]{'a'});
+        try {
+          table.batch(Collections.singletonList(put), null);
+        } catch (InterruptedException e1) {
+          throw new IOException(e1);
+        }
+        completedWithPool[0] = true;
       }
-      completedWithPool[0] = true;
-      table.close();
     }
   }
 
@@ -122,11 +134,11 @@ public class TestOpenTableInCoprocessor {
 
   @After
   public void cleanupTestTable() throws Exception {
-    UTIL.getHBaseAdmin().disableTable(primaryTable);
-    UTIL.getHBaseAdmin().deleteTable(primaryTable);
+    UTIL.getAdmin().disableTable(primaryTable);
+    UTIL.getAdmin().deleteTable(primaryTable);
 
-    UTIL.getHBaseAdmin().disableTable(otherTable);
-    UTIL.getHBaseAdmin().deleteTable(otherTable);
+    UTIL.getAdmin().disableTable(otherTable);
+    UTIL.getAdmin().deleteTable(otherTable);
 
   }
 
@@ -145,8 +157,10 @@ public class TestOpenTableInCoprocessor {
     runCoprocessorConnectionToRemoteTable(CustomThreadPoolCoprocessor.class, completedWithPool);
   }
 
-  private void runCoprocessorConnectionToRemoteTable(Class<? extends BaseRegionObserver> clazz,
-      boolean[] completeCheck) throws Throwable {
+  private void runCoprocessorConnectionToRemoteTable(Class clazz, boolean[] completeCheck)
+      throws Throwable {
+    // Check if given class implements RegionObserver.
+    assert(RegionObserver.class.isAssignableFrom(clazz));
     HTableDescriptor primary = new HTableDescriptor(primaryTable);
     primary.addFamily(new HColumnDescriptor(family));
     // add our coprocessor
@@ -156,7 +170,7 @@ public class TestOpenTableInCoprocessor {
     other.addFamily(new HColumnDescriptor(family));
 
 
-    Admin admin = UTIL.getHBaseAdmin();
+    Admin admin = UTIL.getAdmin();
     admin.createTable(primary);
     admin.createTable(other);
 

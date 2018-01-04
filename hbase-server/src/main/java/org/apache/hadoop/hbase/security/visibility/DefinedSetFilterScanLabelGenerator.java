@@ -22,9 +22,9 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.security.User;
 
@@ -36,8 +36,8 @@ import org.apache.hadoop.hbase.security.User;
  */
 @InterfaceAudience.Private
 public class DefinedSetFilterScanLabelGenerator implements ScanLabelGenerator {
-
-  private static final Log LOG = LogFactory.getLog(DefinedSetFilterScanLabelGenerator.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(DefinedSetFilterScanLabelGenerator.class);
 
   private Configuration conf;
 
@@ -62,18 +62,18 @@ public class DefinedSetFilterScanLabelGenerator implements ScanLabelGenerator {
     if (authorizations != null) {
       List<String> labels = authorizations.getLabels();
       String userName = user.getShortName();
-      Set<String> auths = new HashSet<String>();
+      Set<String> auths = new HashSet<>();
       auths.addAll(this.labelsCache.getUserAuths(userName));
       auths.addAll(this.labelsCache.getGroupAuths(user.getGroupNames()));
-      return dropLabelsNotInUserAuths(labels, new ArrayList<String>(auths), userName);
+      return dropLabelsNotInUserAuths(labels, new ArrayList<>(auths), userName);
     }
     return null;
   }
 
   private List<String> dropLabelsNotInUserAuths(List<String> labels, List<String> auths,
       String userName) {
-    List<String> droppedLabels = new ArrayList<String>();
-    List<String> passedLabels = new ArrayList<String>(labels.size());
+    List<String> droppedLabels = new ArrayList<>();
+    List<String> passedLabels = new ArrayList<>(labels.size());
     for (String label : labels) {
       if (auths.contains(label)) {
         passedLabels.add(label);

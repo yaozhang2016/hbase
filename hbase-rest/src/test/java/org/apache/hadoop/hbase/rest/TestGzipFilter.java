@@ -68,7 +68,7 @@ public class TestGzipFilter {
     REST_TEST_UTIL.startServletContainer(TEST_UTIL.getConfiguration());
     client = new Client(new Cluster().add("localhost",
       REST_TEST_UTIL.getServletPort()));
-    Admin admin = TEST_UTIL.getHBaseAdmin();
+    Admin admin = TEST_UTIL.getAdmin();
     if (admin.tableExists(TABLE)) {
       return;
     }
@@ -124,21 +124,6 @@ public class TestGzipFilter {
     table.close();
 
     testScannerResultCodes();
-  }
-
-  @Test
-  public void testErrorNotGzipped() throws Exception {
-    Header[] headers = new Header[2];
-    headers[0] = new BasicHeader("Accept", Constants.MIMETYPE_BINARY);
-    headers[1] = new BasicHeader("Accept-Encoding", "gzip");
-    Response response = client.get("/" + TABLE + "/" + ROW_1 + "/" + COLUMN_2, headers);
-    assertEquals(response.getCode(), 404);
-    String contentEncoding = response.getHeader("Content-Encoding");
-    assertTrue(contentEncoding == null || !contentEncoding.contains("gzip"));
-    response = client.get("/" + TABLE, headers);
-    assertEquals(response.getCode(), 405);
-    contentEncoding = response.getHeader("Content-Encoding");
-    assertTrue(contentEncoding == null || !contentEncoding.contains("gzip"));
   }
 
   void testScannerResultCodes() throws Exception {

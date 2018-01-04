@@ -24,10 +24,9 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.client.Admin;
 import org.apache.hadoop.hbase.client.Connection;
@@ -58,13 +57,10 @@ import org.apache.hadoop.hbase.util.JVMClusterUtil;
  *
  */
 @InterfaceAudience.Public
-@InterfaceStability.Evolving
 public class LocalHBaseCluster {
-  private static final Log LOG = LogFactory.getLog(LocalHBaseCluster.class);
-  private final List<JVMClusterUtil.MasterThread> masterThreads =
-    new CopyOnWriteArrayList<JVMClusterUtil.MasterThread>();
-  private final List<JVMClusterUtil.RegionServerThread> regionThreads =
-    new CopyOnWriteArrayList<JVMClusterUtil.RegionServerThread>();
+  private static final Logger LOG = LoggerFactory.getLogger(LocalHBaseCluster.class);
+  private final List<JVMClusterUtil.MasterThread> masterThreads = new CopyOnWriteArrayList<>();
+  private final List<JVMClusterUtil.RegionServerThread> regionThreads = new CopyOnWriteArrayList<>();
   private final static int DEFAULT_NO = 1;
   /** local mode */
   public static final String LOCAL = "local";
@@ -177,14 +173,8 @@ public class LocalHBaseCluster {
     // Create each regionserver with its own Configuration instance so each has
     // its Connection instance rather than share (see HBASE_INSTANCES down in
     // the guts of ConnectionManager).
-
-    // Also, create separate CoordinatedStateManager instance per Server.
-    // This is special case when we have to have more than 1 CoordinatedStateManager
-    // within 1 process.
-    CoordinatedStateManager cp = CoordinatedStateManagerFactory.getCoordinatedStateManager(conf);
-
     JVMClusterUtil.RegionServerThread rst =
-        JVMClusterUtil.createRegionServerThread(config, cp, (Class<? extends HRegionServer>) conf
+        JVMClusterUtil.createRegionServerThread(config, (Class<? extends HRegionServer>) conf
             .getClass(HConstants.REGION_SERVER_IMPL, this.regionServerClass), index);
 
     this.regionThreads.add(rst);
@@ -212,13 +202,7 @@ public class LocalHBaseCluster {
     // Create each master with its own Configuration instance so each has
     // its Connection instance rather than share (see HBASE_INSTANCES down in
     // the guts of ConnectionManager.
-
-    // Also, create separate CoordinatedStateManager instance per Server.
-    // This is special case when we have to have more than 1 CoordinatedStateManager
-    // within 1 process.
-    CoordinatedStateManager cp = CoordinatedStateManagerFactory.getCoordinatedStateManager(conf);
-
-    JVMClusterUtil.MasterThread mt = JVMClusterUtil.createMasterThread(c, cp,
+    JVMClusterUtil.MasterThread mt = JVMClusterUtil.createMasterThread(c,
         (Class<? extends HMaster>) conf.getClass(HConstants.MASTER_IMPL, this.masterClass), index);
     this.masterThreads.add(mt);
     return mt;
@@ -257,8 +241,7 @@ public class LocalHBaseCluster {
    * list).
    */
   public List<JVMClusterUtil.RegionServerThread> getLiveRegionServers() {
-    List<JVMClusterUtil.RegionServerThread> liveServers =
-      new ArrayList<JVMClusterUtil.RegionServerThread>();
+    List<JVMClusterUtil.RegionServerThread> liveServers = new ArrayList<>();
     List<RegionServerThread> list = getRegionServers();
     for (JVMClusterUtil.RegionServerThread rst: list) {
       if (rst.isAlive()) liveServers.add(rst);
@@ -314,12 +297,10 @@ public class LocalHBaseCluster {
    */
   public HMaster getActiveMaster() {
     for (JVMClusterUtil.MasterThread mt : masterThreads) {
-      if (mt.getMaster().isActiveMaster()) {
-        // Ensure that the current active master is not stopped.
-        // We don't want to return a stopping master as an active master.
-        if (mt.getMaster().isActiveMaster()  && !mt.getMaster().isStopped()) {
-          return mt.getMaster();
-        }
+      // Ensure that the current active master is not stopped.
+      // We don't want to return a stopping master as an active master.
+      if (mt.getMaster().isActiveMaster()  && !mt.getMaster().isStopped()) {
+        return mt.getMaster();
       }
     }
     return null;

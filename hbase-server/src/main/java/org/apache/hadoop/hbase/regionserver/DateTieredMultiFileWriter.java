@@ -25,7 +25,7 @@ import java.util.NavigableMap;
 import java.util.TreeMap;
 
 import org.apache.hadoop.hbase.Cell;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * class for cell sink that separates the provided cells into multiple files for date tiered
@@ -34,8 +34,7 @@ import org.apache.hadoop.hbase.classification.InterfaceAudience;
 @InterfaceAudience.Private
 public class DateTieredMultiFileWriter extends AbstractMultiFileWriter {
 
-  private final NavigableMap<Long, StoreFileWriter> lowerBoundary2Writer
-    = new TreeMap<Long, StoreFileWriter>();
+  private final NavigableMap<Long, StoreFileWriter> lowerBoundary2Writer = new TreeMap<>();
 
   private final boolean needEmptyFile;
 

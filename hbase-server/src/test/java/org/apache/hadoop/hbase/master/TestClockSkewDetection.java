@@ -24,29 +24,23 @@ import static org.mockito.Mockito.when;
 
 import java.net.InetAddress;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.hbase.ChoreService;
 import org.apache.hadoop.hbase.ClockOutOfSyncException;
-import org.apache.hadoop.hbase.CoordinatedStateManager;
 import org.apache.hadoop.hbase.HBaseConfiguration;
-import org.apache.hadoop.hbase.Server;
-import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.client.ClusterConnection;
 import org.apache.hadoop.hbase.ipc.RpcControllerFactory;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProtos.RegionServerStartupRequest;
 import org.apache.hadoop.hbase.testclassification.MasterTests;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
-import org.apache.hadoop.hbase.zookeeper.MetaTableLocator;
-import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Category({MasterTests.class, SmallTests.class})
 public class TestClockSkewDetection {
-  private static final Log LOG =
-    LogFactory.getLog(TestClockSkewDetection.class);
+  private static final Logger LOG =
+    LoggerFactory.getLogger(TestClockSkewDetection.class);
 
   @Test
   public void testClockSkewDetection() throws Exception {
@@ -85,7 +79,7 @@ public class TestClockSkewDetection {
       fail("HMaster should have thrown a ClockOutOfSyncException but didn't.");
     } catch(ClockOutOfSyncException e) {
       //we want an exception
-      LOG.info("Recieved expected exception: "+e);
+      LOG.info("Received expected exception: "+e);
     }
 
     try {
@@ -101,7 +95,7 @@ public class TestClockSkewDetection {
       fail("HMaster should have thrown a ClockOutOfSyncException but didn't.");
     } catch (ClockOutOfSyncException e) {
       // we want an exception
-      LOG.info("Recieved expected exception: " + e);
+      LOG.info("Received expected exception: " + e);
     }
 
     // make sure values above warning threshold but below max threshold don't kill

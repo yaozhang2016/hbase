@@ -19,8 +19,6 @@ package org.apache.hadoop.hbase.master;
 
 import java.io.IOException;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.CompatibilityFactory;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
@@ -36,15 +34,19 @@ import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.junit.rules.TestName;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import static org.junit.Assert.fail;
 
 @Category(MediumTests.class)
 public class TestAssignmentManagerMetrics {
 
-  private static final Log LOG = LogFactory.getLog(TestAssignmentManagerMetrics.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestAssignmentManagerMetrics.class);
   private static final MetricsAssertHelper metricsHelper = CompatibilityFactory
       .getInstance(MetricsAssertHelper.class);
 
@@ -53,6 +55,9 @@ public class TestAssignmentManagerMetrics {
   private static HBaseTestingUtility TEST_UTIL;
   private static Configuration conf;
   private static final int msgInterval = 1000;
+
+  @Rule
+  public TestName name = new TestName();
 
   @BeforeClass
   public static void startCluster() throws Exception {
@@ -91,8 +96,7 @@ public class TestAssignmentManagerMetrics {
 
   @Test
   public void testRITAssignmentManagerMetrics() throws Exception {
-
-    final TableName TABLENAME = TableName.valueOf("testRITMetrics");
+    final TableName TABLENAME = TableName.valueOf(name.getMethodName());
     final byte[] FAMILY = Bytes.toBytes("family");
 
     Table table = null;
@@ -128,7 +132,7 @@ public class TestAssignmentManagerMetrics {
       htd.addCoprocessorWithSpec(spec);
 
       try {
-        TEST_UTIL.getHBaseAdmin().modifyTable(TABLENAME, htd);
+        TEST_UTIL.getAdmin().modifyTable(TABLENAME, htd);
         fail("Expected region failed to open");
       } catch (IOException e) {
         // expected, the RS will crash and the assignment will spin forever waiting for a RS

@@ -20,9 +20,10 @@ package org.apache.hadoop.hbase.chaos.actions;
 
 import java.util.Collection;
 import java.util.Collections;
+import java.util.EnumSet;
 import java.util.List;
-
-import org.apache.commons.lang.math.RandomUtils;
+import org.apache.commons.lang3.RandomUtils;
+import org.apache.hadoop.hbase.ClusterMetrics.Option;
 import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
@@ -54,8 +55,9 @@ public class MoveRegionsOfTableAction extends Action {
       Thread.sleep(sleepTime);
     }
 
-    Admin admin = this.context.getHBaseIntegrationTestingUtility().getHBaseAdmin();
-    Collection<ServerName> serversList = admin.getClusterStatus().getServers();
+    Admin admin = this.context.getHBaseIntegrationTestingUtility().getAdmin();
+    Collection<ServerName> serversList =
+        admin.getClusterMetrics(EnumSet.of(Option.LIVE_SERVERS)).getLiveServerMetrics().keySet();
     ServerName[] servers = serversList.toArray(new ServerName[serversList.size()]);
 
     LOG.info("Performing action: Move regions of table " + tableName);
@@ -77,7 +79,7 @@ public class MoveRegionsOfTableAction extends Action {
 
       try {
         String destServerName =
-          servers[RandomUtils.nextInt(servers.length)].getServerName();
+          servers[RandomUtils.nextInt(0, servers.length)].getServerName();
         LOG.debug("Moving " + regionInfo.getRegionNameAsString() + " to " + destServerName);
         admin.move(regionInfo.getEncodedNameAsBytes(), Bytes.toBytes(destServerName));
       } catch (Exception ex) {

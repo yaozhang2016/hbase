@@ -21,7 +21,6 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -32,6 +31,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.Cell;
+import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HRegionInfo;
@@ -43,11 +43,9 @@ import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.regionserver.CompactedHFilesDischarger;
 import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.HStore;
-import org.apache.hadoop.hbase.regionserver.Region;
+import org.apache.hadoop.hbase.regionserver.HStoreFile;
 import org.apache.hadoop.hbase.regionserver.RegionScanner;
 import org.apache.hadoop.hbase.regionserver.RegionServerServices;
-import org.apache.hadoop.hbase.regionserver.Store;
-import org.apache.hadoop.hbase.regionserver.StoreFile;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.testclassification.RegionServerTests;
 import org.apache.hadoop.hbase.util.Bytes;
@@ -55,11 +53,12 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.mockito.Mockito;
 
 @Category({ MediumTests.class, RegionServerTests.class })
 public class TestCompactedHFilesDischarger {
   private final HBaseTestingUtility testUtil = new HBaseTestingUtility();
-  private Region region;
+  private HRegion region;
   private final static byte[] fam = Bytes.toBytes("cf_1");
   private final static byte[] qual1 = Bytes.toBytes("qf_1");
   private final static byte[] val = Bytes.toBytes("val");
@@ -77,9 +76,9 @@ public class TestCompactedHFilesDischarger {
     Path path = testUtil.getDataTestDir(getClass().getSimpleName());
     region = HBaseTestingUtility.createRegionAndWAL(info, path, testUtil.getConfiguration(), htd);
     rss = mock(RegionServerServices.class);
-    List<Region> regions = new ArrayList<Region>();
+    List<HRegion> regions = new ArrayList<>(1);
     regions.add(region);
-    when(rss.getOnlineRegions()).thenReturn(regions);
+    Mockito.doReturn(regions).when(rss).getRegions();
   }
 
   @After
@@ -119,21 +118,21 @@ public class TestCompactedHFilesDischarger {
     // flush them
     region.flush(true);
 
-    Store store = region.getStore(fam);
+    HStore store = region.getStore(fam);
     assertEquals(3, store.getStorefilesCount());
 
-    Collection<StoreFile> storefiles = store.getStorefiles();
-    Collection<StoreFile> compactedfiles =
-        ((HStore) store).getStoreEngine().getStoreFileManager().getCompactedfiles();
+    Collection<HStoreFile> storefiles = store.getStorefiles();
+    Collection<HStoreFile> compactedfiles =
+        store.getStoreEngine().getStoreFileManager().getCompactedfiles();
     // None of the files should be in compacted state.
-    for (StoreFile file : storefiles) {
+    for (HStoreFile file : storefiles) {
       assertFalse(file.isCompactedAway());
     }
     // Try to run the cleaner without compaction. there should not be any change
     cleaner.chore();
     storefiles = store.getStorefiles();
     // None of the files should be in compacted state.
-    for (StoreFile file : storefiles) {
+    for (HStoreFile file : storefiles) {
       assertFalse(file.isCompactedAway());
     }
     // now do some compaction
@@ -148,12 +147,12 @@ public class TestCompactedHFilesDischarger {
     cleaner.chore();
     assertEquals(1, store.getStorefilesCount());
     storefiles = store.getStorefiles();
-    for (StoreFile file : storefiles) {
+    for (HStoreFile file : storefiles) {
       // Should not be in compacted state
       assertFalse(file.isCompactedAway());
     }
     compactedfiles = ((HStore) store).getStoreEngine().getStoreFileManager().getCompactedfiles();
-    assertTrue(compactedfiles.size() == 0);
+    assertTrue(compactedfiles.isEmpty());
     
   }
 
@@ -185,14 +184,14 @@ public class TestCompactedHFilesDischarger {
     // flush them
     region.flush(true);
 
-    Store store = region.getStore(fam);
+    HStore store = region.getStore(fam);
     assertEquals(3, store.getStorefilesCount());
 
-    Collection<StoreFile> storefiles = store.getStorefiles();
-    Collection<StoreFile> compactedfiles =
-        ((HStore) store).getStoreEngine().getStoreFileManager().getCompactedfiles();
+    Collection<HStoreFile> storefiles = store.getStorefiles();
+    Collection<HStoreFile> compactedfiles =
+        store.getStoreEngine().getStoreFileManager().getCompactedfiles();
     // None of the files should be in compacted state.
-    for (StoreFile file : storefiles) {
+    for (HStoreFile file : storefiles) {
       assertFalse(file.isCompactedAway());
     }
     // Do compaction
@@ -202,14 +201,14 @@ public class TestCompactedHFilesDischarger {
     storefiles = store.getStorefiles();
     int usedReaderCount = 0;
     int unusedReaderCount = 0;
-    for (StoreFile file : storefiles) {
-      if (file.getRefCount() == 3) {
+    for (HStoreFile file : storefiles) {
+      if (((HStoreFile) file).getRefCount() == 3) {
         usedReaderCount++;
       }
     }
     compactedfiles = ((HStore) store).getStoreEngine().getStoreFileManager().getCompactedfiles();
-    for(StoreFile file : compactedfiles) {
-      assertEquals("Refcount should be 3", 0, file.getRefCount());
+    for(HStoreFile file : compactedfiles) {
+      assertEquals("Refcount should be 3", 0, ((HStoreFile) file).getRefCount());
       unusedReaderCount++;
     }
     // Though there are files we are not using them for reads
@@ -220,12 +219,12 @@ public class TestCompactedHFilesDischarger {
     countDown();
     assertEquals(1, store.getStorefilesCount());
     storefiles = store.getStorefiles();
-    for (StoreFile file : storefiles) {
+    for (HStoreFile file : storefiles) {
       // Should not be in compacted state
       assertFalse(file.isCompactedAway());
     }
     compactedfiles = ((HStore) store).getStoreEngine().getStoreFileManager().getCompactedfiles();
-    assertTrue(compactedfiles.size() == 0);
+    assertTrue(compactedfiles.isEmpty());
   }
 
   @Test
@@ -256,14 +255,14 @@ public class TestCompactedHFilesDischarger {
     // flush them
     region.flush(true);
 
-    Store store = region.getStore(fam);
+    HStore store = region.getStore(fam);
     assertEquals(3, store.getStorefilesCount());
 
-    Collection<StoreFile> storefiles = store.getStorefiles();
-    Collection<StoreFile> compactedfiles =
-        ((HStore) store).getStoreEngine().getStoreFileManager().getCompactedfiles();
+    Collection<HStoreFile> storefiles = store.getStorefiles();
+    Collection<HStoreFile> compactedfiles =
+        store.getStoreEngine().getStoreFileManager().getCompactedfiles();
     // None of the files should be in compacted state.
-    for (StoreFile file : storefiles) {
+    for (HStoreFile file : storefiles) {
       assertFalse(file.isCompactedAway());
     }
     startScannerThreads();
@@ -273,15 +272,14 @@ public class TestCompactedHFilesDischarger {
     storefiles = store.getStorefiles();
     int usedReaderCount = 0;
     int unusedReaderCount = 0;
-    for (StoreFile file : storefiles) {
+    for (HStoreFile file : storefiles) {
       if (file.getRefCount() == 0) {
         unusedReaderCount++;
       }
     }
-    compactedfiles =
-        ((HStore) store).getStoreEngine().getStoreFileManager().getCompactedfiles();
-    for(StoreFile file : compactedfiles) {
-      assertEquals("Refcount should be 3", 3, file.getRefCount());
+    compactedfiles = store.getStoreEngine().getStoreFileManager().getCompactedfiles();
+    for(HStoreFile file : compactedfiles) {
+      assertEquals("Refcount should be 3", 3, ((HStoreFile) file).getRefCount());
       usedReaderCount++;
     }
     // The newly compacted file will not be used by any scanner
@@ -306,13 +304,13 @@ public class TestCompactedHFilesDischarger {
     storefiles = store.getStorefiles();
     usedReaderCount = 0;
     unusedReaderCount = 0;
-    for (StoreFile file : storefiles) {
+    for (HStoreFile file : storefiles) {
       if (file.getRefCount() == 3) {
         usedReaderCount++;
       }
     }
     compactedfiles = ((HStore) store).getStoreEngine().getStoreFileManager().getCompactedfiles();
-    for(StoreFile file : compactedfiles) {
+    for (HStoreFile file : compactedfiles) {
       assertEquals("Refcount should be 0", 0, file.getRefCount());
       unusedReaderCount++;
     }
@@ -328,12 +326,55 @@ public class TestCompactedHFilesDischarger {
     // Now the cleaner should be able to clear it up because there are no active readers
     assertEquals(1, store.getStorefilesCount());
     storefiles = store.getStorefiles();
-    for (StoreFile file : storefiles) {
+    for (HStoreFile file : storefiles) {
       // Should not be in compacted state
       assertFalse(file.isCompactedAway());
     }
     compactedfiles = ((HStore) store).getStoreEngine().getStoreFileManager().getCompactedfiles();
-    assertTrue(compactedfiles.size() == 0);
+    assertTrue(compactedfiles.isEmpty());
+  }
+
+  @Test
+  public void testStoreFileMissing() throws Exception {
+    // Write 3 records and create 3 store files.
+    write("row1");
+    region.flush(true);
+    write("row2");
+    region.flush(true);
+    write("row3");
+    region.flush(true);
+
+    Scan scan = new Scan();
+    scan.setCaching(1);
+    RegionScanner scanner = region.getScanner(scan);
+    List<Cell> res = new ArrayList<Cell>();
+    // Read first item
+    scanner.next(res);
+    assertEquals("row1", Bytes.toString(CellUtil.cloneRow(res.get(0))));
+    res.clear();
+    // Create a new file in between scan nexts
+    write("row4");
+    region.flush(true);
+
+    // Compact the table
+    region.compact(true);
+
+    // Create the cleaner object
+    CompactedHFilesDischarger cleaner =
+        new CompactedHFilesDischarger(1000, (Stoppable) null, rss, false);
+    cleaner.chore();
+    // This issues scan next
+    scanner.next(res);
+    assertEquals("row2", Bytes.toString(CellUtil.cloneRow(res.get(0))));
+
+    scanner.close();
+  }
+
+  private void write(String row1) throws IOException {
+    byte[] row = Bytes.toBytes(row1);
+    Put put = new Put(row);
+    put.addColumn(fam, qual1, row);
+    region.put(put);
   }
 
   protected void countDown() {
@@ -369,7 +410,7 @@ public class TestCompactedHFilesDischarger {
       try {
         initiateScan(region);
       } catch (IOException e) {
-        // do nothing
+        e.printStackTrace();
       }
     }
 
@@ -379,15 +420,15 @@ public class TestCompactedHFilesDischarger {
       RegionScanner resScanner = null;
       try {
         resScanner = region.getScanner(scan);
-        List<Cell> results = new ArrayList<Cell>();
+        List<Cell> results = new ArrayList<>();
         boolean next = resScanner.next(results);
         try {
           counter.incrementAndGet();
           latch.await();
         } catch (InterruptedException e) {
         }
-        while (!next) {
-          resScanner.next(results);
+        while (next) {
+          next = resScanner.next(results);
         }
       } finally {
         scanCompletedCounter.incrementAndGet();

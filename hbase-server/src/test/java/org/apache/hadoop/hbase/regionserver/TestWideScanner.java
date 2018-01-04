@@ -21,12 +21,11 @@ package org.apache.hadoop.hbase.regionserver;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Random;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.HBaseTestCase;
@@ -42,10 +41,12 @@ import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Category({RegionServerTests.class, SmallTests.class})
 public class TestWideScanner extends HBaseTestCase {
-  private static final Log LOG = LogFactory.getLog(TestWideScanner.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestWideScanner.class);
 
   static final byte[] A = Bytes.toBytes("A");
   static final byte[] B = Bytes.toBytes("B");
@@ -94,7 +95,7 @@ public class TestWideScanner extends HBaseTestCase {
     try {
       this.r = createNewHRegion(TESTTABLEDESC, null, null);
       int inserted = addWideContent(this.r);
-      List<Cell> results = new ArrayList<Cell>();
+      List<Cell> results = new ArrayList<>();
       Scan scan = new Scan();
       scan.addFamily(A);
       scan.addFamily(B);
@@ -130,7 +131,7 @@ public class TestWideScanner extends HBaseTestCase {
           ((HRegion.RegionScannerImpl)s).storeHeap.getHeap().iterator();
         while (scanners.hasNext()) {
           StoreScanner ss = (StoreScanner)scanners.next();
-          ss.updateReaders(new ArrayList<StoreFile>());
+          ss.updateReaders(Collections.EMPTY_LIST, Collections.EMPTY_LIST);
         }
       } while (more);
 

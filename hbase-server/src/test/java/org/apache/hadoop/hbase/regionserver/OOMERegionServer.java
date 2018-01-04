@@ -24,7 +24,6 @@ import java.util.List;
 
 import org.apache.hadoop.hbase.CoordinatedStateManager;
 import org.apache.hadoop.hbase.HBaseConfiguration;
-import org.apache.hadoop.hbase.client.Durability;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.shaded.protobuf.RequestConverter;
@@ -32,17 +31,16 @@ import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos.MutateRequ
 
 /**
  * A region server that will OOME.
- * Everytime {@link #put(regionName, Durability)} is called, we add
+ * Everytime {@link #put(byte[], Put)} is called, we add
  * keep around a reference to the batch.  Use this class to test OOME extremes.
  * Needs to be started manually as in
  * <code>${HBASE_HOME}/bin/hbase ./bin/hbase org.apache.hadoop.hbase.OOMERegionServer start</code>.
  */
 public class OOMERegionServer extends HRegionServer {
-  private List<Put> retainer = new ArrayList<Put>();
+  private List<Put> retainer = new ArrayList<>();
 
-  public OOMERegionServer(HBaseConfiguration conf, CoordinatedStateManager cp)
-      throws IOException, InterruptedException {
-    super(conf, cp);
+  public OOMERegionServer(HBaseConfiguration conf) throws IOException, InterruptedException {
+    super(conf);
   }
 
   public void put(byte [] regionName, Put put)
@@ -55,7 +53,7 @@ public class OOMERegionServer extends HRegionServer {
         // Add the batch update 30 times to bring on the OOME faster.
         this.retainer.add(put);
       }
-    } catch (org.apache.hadoop.hbase.shaded.com.google.protobuf.ServiceException e) {
+    } catch (org.apache.hbase.thirdparty.com.google.protobuf.ServiceException e) {
       throw ProtobufUtil.handleRemoteException(e);
     }
   }

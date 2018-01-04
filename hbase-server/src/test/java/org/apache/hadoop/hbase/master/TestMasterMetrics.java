@@ -19,8 +19,6 @@ package org.apache.hadoop.hbase.master;
 
 import java.io.IOException;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.CompatibilityFactory;
 import org.apache.hadoop.hbase.CoordinatedStateManager;
@@ -38,11 +36,13 @@ import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Category({MasterTests.class, MediumTests.class})
 public class TestMasterMetrics {
 
-  private static final Log LOG = LogFactory.getLog(TestMasterMetrics.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestMasterMetrics.class);
   private static final MetricsAssertHelper metricsHelper = CompatibilityFactory
       .getInstance(MetricsAssertHelper.class);
 
@@ -51,11 +51,9 @@ public class TestMasterMetrics {
   private static HBaseTestingUtility TEST_UTIL;
 
   public static class MyMaster extends HMaster {
-    public MyMaster(Configuration conf, CoordinatedStateManager cp) throws IOException,
-        KeeperException, InterruptedException {
-      super(conf, cp);
+    public MyMaster(Configuration conf) throws IOException, KeeperException, InterruptedException {
+      super(conf);
     }
-
     @Override
     protected void tryRegionServerReport(
         long reportStartTime, long reportEndTime) {
@@ -85,40 +83,51 @@ public class TestMasterMetrics {
   public void testClusterRequests() throws Exception {
 
     // sending fake request to master to see how metric value has changed
+
     RegionServerStatusProtos.RegionServerReportRequest.Builder request =
         RegionServerStatusProtos.RegionServerReportRequest.newBuilder();
     ServerName serverName = cluster.getMaster(0).getServerName();
     request.setServer(ProtobufUtil.toServerName(serverName));
+    long expectedRequestNumber = 10000;
 
     MetricsMasterSource masterSource = master.getMasterMetrics().getMetricsSource();
     ClusterStatusProtos.ServerLoad sl = ClusterStatusProtos.ServerLoad.newBuilder()
-                                           .setTotalNumberOfRequests(10000)
+                                           .setTotalNumberOfRequests(expectedRequestNumber)
                                            .build();
-    masterSource.init();
     request.setLoad(sl);
-    master.getMasterRpcServices().regionServerReport(null, request.build());
 
-    metricsHelper.assertCounter("cluster_requests", 10000, masterSource);
+    master.getMasterRpcServices().regionServerReport(null, request.build());
+    boolean tablesOnMaster = LoadBalancer.isTablesOnMaster(TEST_UTIL.getConfiguration());
+    if (tablesOnMaster) {
+      metricsHelper.assertCounter("cluster_requests", expectedRequestNumber, masterSource);
+    } else {
+      metricsHelper.assertCounterGt("cluster_requests", expectedRequestNumber, masterSource);
+
+    }
+
+    expectedRequestNumber = 15000;
 
     sl = ClusterStatusProtos.ServerLoad.newBuilder()
-        .setTotalNumberOfRequests(15000)
+        .setTotalNumberOfRequests(expectedRequestNumber)
         .build();
     request.setLoad(sl);
-    master.getMasterRpcServices().regionServerReport(null, request.build());
-
-    metricsHelper.assertCounter("cluster_requests", 15000, masterSource);
 
     master.getMasterRpcServices().regionServerReport(null, request.build());
+    if (tablesOnMaster) {
+      metricsHelper.assertCounter("cluster_requests", expectedRequestNumber, masterSource);
+    } else {
+      metricsHelper.assertCounterGt("cluster_requests", expectedRequestNumber, masterSource);
+    }
 
-    metricsHelper.assertCounter("cluster_requests", 15000, masterSource);
     master.stopMaster();
   }
 
   @Test
   public void testDefaultMasterMetrics() throws Exception {
     MetricsMasterSource masterSource = master.getMasterMetrics().getMetricsSource();
-    metricsHelper.assertGauge( "numRegionServers", 2, masterSource);
-    metricsHelper.assertGauge( "averageLoad", 2, masterSource);
+    boolean tablesOnMaster = LoadBalancer.isTablesOnMaster(TEST_UTIL.getConfiguration());
+    metricsHelper.assertGauge( "numRegionServers",1 + (tablesOnMaster? 1: 0), masterSource);
+    metricsHelper.assertGauge( "averageLoad", 1 + (tablesOnMaster? 0: 1), masterSource);
     metricsHelper.assertGauge( "numDeadRegionServers", 0, masterSource);
 
     metricsHelper.assertGauge("masterStartTime", master.getMasterStartTime(), masterSource);

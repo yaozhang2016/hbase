@@ -19,7 +19,7 @@ package org.apache.hadoop.hbase.util;
 import static org.apache.hadoop.hbase.util.test.LoadTestDataGenerator.INCREMENT;
 import static org.apache.hadoop.hbase.util.test.LoadTestDataGenerator.MUTATE_INFO;
 
-import com.google.common.base.Preconditions;
+import org.apache.hbase.thirdparty.com.google.common.base.Preconditions;
 
 import java.io.IOException;
 import java.util.Arrays;
@@ -31,8 +31,6 @@ import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellUtil;
@@ -44,15 +42,16 @@ import org.apache.hadoop.hbase.client.ConnectionFactory;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos.MutationProto.MutationType;
 import org.apache.hadoop.hbase.util.test.LoadTestDataGenerator;
-import org.apache.hadoop.hbase.util.test.LoadTestKVGenerator;
 import org.apache.hadoop.util.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Common base class for reader and writer parts of multi-thread HBase load
- * test ({@link LoadTestTool}).
+ * test (See LoadTestTool).
  */
 public abstract class MultiThreadedAction {
-  private static final Log LOG = LogFactory.getLog(MultiThreadedAction.class);
+  private static final Logger LOG = LoggerFactory.getLogger(MultiThreadedAction.class);
 
   protected final TableName tableName;
   protected final Configuration conf;
@@ -78,8 +77,8 @@ public abstract class MultiThreadedAction {
    * Default implementation of LoadTestDataGenerator that uses LoadTestKVGenerator, fixed
    * set of column families, and random number of columns in range. The table for it can
    * be created manually or, for example, via
-   * {@link HBaseTestingUtility#createPreSplitLoadTestTable(
-   * org.apache.hadoop.hbase.Configuration, byte[], byte[], Algorithm, DataBlockEncoding)}
+   * {@link org.apache.hadoop.hbase.HBaseTestingUtility#createPreSplitLoadTestTable(Configuration, TableName, byte[],
+   * org.apache.hadoop.hbase.io.compress.Compression.Algorithm, org.apache.hadoop.hbase.io.encoding.DataBlockEncoding)}
    */
   public static class DefaultDataGenerator extends LoadTestDataGenerator {
     private byte[][] columnFamilies = null;
@@ -215,11 +214,13 @@ public abstract class MultiThreadedAction {
               + ", time="
               + formatTime(time)
               + ((numKeys > 0 && time > 0) ? (" Overall: [" + "keys/s= "
-                  + numKeys * 1000 / time + ", latency=" + totalOpTime
-                  / numKeys + " ms]") : "")
+                  + numKeys * 1000 / time + ", latency="
+                  + String.format("%.2f", (double)totalOpTime / (double)numKeys)
+                  + " ms]") : "")
               + ((numKeysDelta > 0) ? (" Current: [" + "keys/s="
                   + numKeysDelta * 1000 / REPORTING_INTERVAL_MS + ", latency="
-                  + totalOpTimeDelta / numKeysDelta + " ms]") : "")
+                  + String.format("%.2f", (double)totalOpTimeDelta / (double)numKeysDelta)
+                  + " ms]") : "")
               + progressInfo());
 
           if (streamingCounters) {
@@ -533,7 +534,7 @@ public abstract class MultiThreadedAction {
 
   // Parse mutate info into a map of <column name> => <update action>
   private Map<String, MutationType> parseMutateInfo(byte[] mutateInfo) {
-    Map<String, MutationType> mi = new HashMap<String, MutationType>();
+    Map<String, MutationType> mi = new HashMap<>();
     if (mutateInfo != null) {
       String mutateInfoStr = Bytes.toString(mutateInfo);
       String[] mutations = mutateInfoStr.split("#");

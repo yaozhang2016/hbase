@@ -18,27 +18,28 @@
  */
 package org.apache.hadoop.hbase;
 
+import java.io.IOException;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public abstract class MultithreadedTestUtil {
 
-  private static final Log LOG =
-    LogFactory.getLog(MultithreadedTestUtil.class);
+  private static final Logger LOG =
+    LoggerFactory.getLogger(MultithreadedTestUtil.class);
 
   public static class TestContext {
     private final Configuration conf;
     private Throwable err = null;
     private boolean stopped = false;
     private int threadDoneCount = 0;
-    private Set<TestThread> testThreads = new HashSet<TestThread>();
+    private Set<TestThread> testThreads = new HashSet<>();
 
     public TestContext(Configuration configuration) {
       this.conf = configuration;
@@ -143,12 +144,17 @@ public abstract class MultithreadedTestUtil {
     }
 
     public final void doWork() throws Exception {
-      while (ctx.shouldRun() && !stopped) {
-        doAnAction();
+      try {
+        while (ctx.shouldRun() && !stopped) {
+          doAnAction();
+        }
+      } finally {
+        workDone();
       }
     }
 
     public abstract void doAnAction() throws Exception;
+    public void workDone() throws IOException {}
   }
 
   /**

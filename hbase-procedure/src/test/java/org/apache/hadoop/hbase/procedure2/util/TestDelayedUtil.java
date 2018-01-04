@@ -18,31 +18,31 @@
 
 package org.apache.hadoop.hbase.procedure2.util;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.apache.hadoop.hbase.testclassification.MasterTests;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import static org.junit.Assert.assertEquals;
 
 @Category({MasterTests.class, SmallTests.class})
 public class TestDelayedUtil {
-  private static final Log LOG = LogFactory.getLog(TestDelayedUtil.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestDelayedUtil.class);
 
   @Test
   public void testDelayedContainerEquals() {
     Object o1 = new Object();
     Object o2 = new Object();
     ZeroDelayContainer<Long> lnull = new ZeroDelayContainer(null);
-    ZeroDelayContainer<Long> l10a = new ZeroDelayContainer<Long>(10L);
+    ZeroDelayContainer<Long> l10a = new ZeroDelayContainer<>(10L);
     ZeroDelayContainer<Long> l10b = new ZeroDelayContainer(10L);
     ZeroDelayContainer<Long> l15 = new ZeroDelayContainer(15L);
-    ZeroDelayContainer<Object> onull = new ZeroDelayContainer<Object>(null);
-    ZeroDelayContainer<Object> o1ca = new ZeroDelayContainer<Object>(o1);
-    ZeroDelayContainer<Object> o1cb = new ZeroDelayContainer<Object>(o1);
-    ZeroDelayContainer<Object> o2c = new ZeroDelayContainer<Object>(o2);
+    ZeroDelayContainer<Object> onull = new ZeroDelayContainer<>(null);
+    ZeroDelayContainer<Object> o1ca = new ZeroDelayContainer<>(o1);
+    ZeroDelayContainer<Object> o1cb = new ZeroDelayContainer<>(o1);
+    ZeroDelayContainer<Object> o2c = new ZeroDelayContainer<>(o2);
 
     ZeroDelayContainer[] items = new ZeroDelayContainer[] {
       lnull, l10a, l10b, l15, onull, o1ca, o1cb, o2c,
@@ -80,7 +80,7 @@ public class TestDelayedUtil {
     }
 
     @Override
-    public long getTimeoutTimestamp() {
+    public long getTimeout() {
       return 0;
     }
   }

@@ -26,7 +26,7 @@ import java.util.List;
 import java.util.concurrent.ConcurrentMap;
 import java.util.function.Supplier;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * Utility methods for dealing with Collections, including treating null collections as empty.
@@ -34,8 +34,7 @@ import org.apache.hadoop.hbase.classification.InterfaceAudience;
 @InterfaceAudience.Private
 public class CollectionUtils {
 
-  private static final List<Object> EMPTY_LIST = Collections.unmodifiableList(
-    new ArrayList<Object>(0));
+  private static final List<Object> EMPTY_LIST = Collections.unmodifiableList(new ArrayList<>(0));
 
   
   @SuppressWarnings("unchecked")
@@ -110,15 +109,12 @@ public class CollectionUtils {
 
   /**
    * In HBASE-16648 we found that ConcurrentHashMap.get is much faster than computeIfAbsent if the
-   * value already exists. So here we copy the implementation of
-   * {@link ConcurrentMap#computeIfAbsent(Object, java.util.function.Function)}. It uses get and
-   * putIfAbsent to implement computeIfAbsent. And notice that the implementation does not guarantee
-   * that the supplier will only be executed once.
+   * value already exists. Notice that the implementation does not guarantee that the supplier will
+   * only be executed once.
    */
   public static <K, V> V computeIfAbsent(ConcurrentMap<K, V> map, K key, Supplier<V> supplier) {
-    V v, newValue;
-    return ((v = map.get(key)) == null && (newValue = supplier.get()) != null
-        && (v = map.putIfAbsent(key, newValue)) == null) ? newValue : v;
+    return computeIfAbsent(map, key, supplier, () -> {
+    });
   }
 
   /**
@@ -141,5 +137,20 @@ public class CollectionUtils {
     V v, newValue;
     return ((v = map.get(key)) == null && (newValue = supplier.get()) != null
         && (v = map.putIfAbsent(key, newValue)) == null) ? newValue : v;
+  }
+
+  public static <K, V> V computeIfAbsent(ConcurrentMap<K, V> map, K key, Supplier<V> supplier,
+      Runnable actionIfAbsent) {
+    V v = map.get(key);
+    if (v != null) {
+      return v;
+    }
+    V newValue = supplier.get();
+    v = map.putIfAbsent(key, newValue);
+    if (v != null) {
+      return v;
+    }
+    actionIfAbsent.run();
+    return newValue;
   }
 }

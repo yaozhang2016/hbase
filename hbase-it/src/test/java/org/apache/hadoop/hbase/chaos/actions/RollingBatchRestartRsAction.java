@@ -24,11 +24,11 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Queue;
 
-import org.apache.commons.lang.math.RandomUtils;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.apache.commons.lang3.RandomUtils;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.chaos.monkies.PolicyBasedChaosMonkey;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Restarts a ratio of the regionservers in a rolling fashion. At each step, either kills a
@@ -36,7 +36,7 @@ import org.apache.hadoop.hbase.chaos.monkies.PolicyBasedChaosMonkey;
  * limits the maximum number of servers that can be down at the same time during rolling restarts.
  */
 public class RollingBatchRestartRsAction extends BatchRestartRsAction {
-  private static final Log LOG = LogFactory.getLog(RollingBatchRestartRsAction.class);
+  private static final Logger LOG = LoggerFactory.getLogger(RollingBatchRestartRsAction.class);
   protected int maxDeadServers; // number of maximum dead servers at any given time. Defaults to 5
 
   public RollingBatchRestartRsAction(long sleepTime, float ratio) {
@@ -59,8 +59,8 @@ public class RollingBatchRestartRsAction extends BatchRestartRsAction {
         (int)(ratio * 100)));
     List<ServerName> selectedServers = selectServers();
 
-    Queue<ServerName> serversToBeKilled = new LinkedList<ServerName>(selectedServers);
-    Queue<ServerName> deadServers = new LinkedList<ServerName>();
+    Queue<ServerName> serversToBeKilled = new LinkedList<>(selectedServers);
+    Queue<ServerName> deadServers = new LinkedList<>();
 
     // loop while there are servers to be killed or dead servers to be restarted
     while ((!serversToBeKilled.isEmpty() || !deadServers.isEmpty())  && !context.isStopping()) {
@@ -104,7 +104,7 @@ public class RollingBatchRestartRsAction extends BatchRestartRsAction {
         break;
       }
 
-      sleep(RandomUtils.nextInt((int)sleepTime));
+      sleep(RandomUtils.nextInt(0, (int)sleepTime));
     }
   }
 
@@ -123,7 +123,7 @@ public class RollingBatchRestartRsAction extends BatchRestartRsAction {
       @Override
       protected ServerName[] getCurrentServers() throws IOException {
         final int count = 4;
-        List<ServerName> serverNames = new ArrayList<ServerName>(count);
+        List<ServerName> serverNames = new ArrayList<>(count);
         for (int i = 0; i < 4; i++) {
           serverNames.add(ServerName.valueOf(i + ".example.org", i, i));
         }

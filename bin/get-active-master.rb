@@ -17,11 +17,11 @@
 
 # Prints the hostname of the machine running the active master.
 
-include Java 
-import org.apache.hadoop.hbase.HBaseConfiguration
-import org.apache.hadoop.hbase.ServerName
-import org.apache.hadoop.hbase.zookeeper.ZKUtil
-import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher
+include Java
+java_import org.apache.hadoop.hbase.HBaseConfiguration
+java_import org.apache.hadoop.hbase.ServerName
+java_import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher
+java_import org.apache.hadoop.hbase.zookeeper.MasterAddressTracker
 
 # disable debug/info logging on this script for clarity
 log_level = org.apache.log4j.Level::ERROR
@@ -32,13 +32,7 @@ config = HBaseConfiguration.create
 
 zk = ZooKeeperWatcher.new(config, 'get-active-master', nil)
 begin
-  master_address = ZKUtil.getData(zk, zk.masterAddressZNode)
-  if master_address
-    puts ServerName.parseFrom(master_address).getHostname()
-  else
-    puts 'Master not running'
-  end
+  puts MasterAddressTracker.getMasterAddress(zk).getHostname
 ensure
-  zk.close()
+  zk.close
 end
-

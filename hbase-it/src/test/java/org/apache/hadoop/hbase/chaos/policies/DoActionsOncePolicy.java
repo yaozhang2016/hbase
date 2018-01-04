@@ -31,7 +31,7 @@ public class DoActionsOncePolicy extends PeriodicPolicy {
 
   public DoActionsOncePolicy(long periodMs, List<Action> actions) {
     super(periodMs);
-    this.actions = new ArrayList<Action>(actions);
+    this.actions = new ArrayList<>(actions);
   }
 
   public DoActionsOncePolicy(long periodMs, Action... actions) {
@@ -49,7 +49,7 @@ public class DoActionsOncePolicy extends PeriodicPolicy {
     try {
       action.perform();
     } catch (Exception ex) {
-      LOG.warn("Exception occured during performing action: "
+      LOG.warn("Exception occurred during performing action: "
           + StringUtils.stringifyException(ex));
     }
   }

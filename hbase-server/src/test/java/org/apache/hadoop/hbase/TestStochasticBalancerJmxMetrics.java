@@ -28,7 +28,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
-
 import javax.management.MBeanAttributeInfo;
 import javax.management.MBeanInfo;
 import javax.management.MBeanServerConnection;
@@ -36,10 +35,8 @@ import javax.management.ObjectInstance;
 import javax.management.ObjectName;
 import javax.management.remote.JMXConnector;
 import javax.management.remote.JMXConnectorFactory;
-
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hbase.client.RegionInfo;
 import org.apache.hadoop.hbase.coprocessor.CoprocessorHost;
 import org.apache.hadoop.hbase.master.balancer.BalancerTestBase;
 import org.apache.hadoop.hbase.master.balancer.StochasticLoadBalancer;
@@ -54,12 +51,14 @@ import org.junit.Ignore;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.junit.runners.MethodSorters;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Category({ MiscTests.class, MediumTests.class })
 @FixMethodOrder(MethodSorters.NAME_ASCENDING)
 @Ignore
 public class TestStochasticBalancerJmxMetrics extends BalancerTestBase {
-  private static final Log LOG = LogFactory.getLog(TestStochasticBalancerJmxMetrics.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestStochasticBalancerJmxMetrics.class);
   private static HBaseTestingUtility UTIL = new HBaseTestingUtility();
   private static int connectorPort = 61120;
   private static StochasticLoadBalancer loadBalancer;
@@ -127,8 +126,8 @@ public class TestStochasticBalancerJmxMetrics extends BalancerTestBase {
     conf.setBoolean(HConstants.HBASE_MASTER_LOADBALANCE_BYTABLE, false);
     loadBalancer.setConf(conf);
 
-    TableName tableName = TableName.valueOf(HConstants.ENSEMBLE_TABLE_NAME);
-    Map<ServerName, List<HRegionInfo>> clusterState = mockClusterServers(mockCluster_ensemble);
+    TableName tableName = HConstants.ENSEMBLE_TABLE_NAME;
+    Map<ServerName, List<RegionInfo>> clusterState = mockClusterServers(mockCluster_ensemble);
     loadBalancer.balanceCluster(tableName, clusterState);
 
     String[] tableNames = new String[] { tableName.getNameAsString() };
@@ -156,7 +155,7 @@ public class TestStochasticBalancerJmxMetrics extends BalancerTestBase {
     conf.setBoolean(HConstants.HBASE_MASTER_LOADBALANCE_BYTABLE, true);
     loadBalancer.setConf(conf);
 
-    // NOTE the size is normally set in setClusterStatus, for test purpose, we set it manually
+    // NOTE the size is normally set in setClusterMetrics, for test purpose, we set it manually
     // Tables: hbase:namespace, table1, table2
     // Functions: costFunctions, overall
     String[] functionNames = loadBalancer.getCostFunctionNames();
@@ -164,7 +163,7 @@ public class TestStochasticBalancerJmxMetrics extends BalancerTestBase {
 
     // table 1
     TableName tableName = TableName.valueOf(TABLE_NAME_1);
-    Map<ServerName, List<HRegionInfo>> clusterState = mockClusterServers(mockCluster_pertable_1);
+    Map<ServerName, List<RegionInfo>> clusterState = mockClusterServers(mockCluster_pertable_1);
     loadBalancer.balanceCluster(tableName, clusterState);
 
     // table 2
@@ -204,7 +203,7 @@ public class TestStochasticBalancerJmxMetrics extends BalancerTestBase {
 
   /**
    * Read the attributes from Hadoop->HBase->Master->Balancer in JMX
-   * @throws IOException 
+   * @throws IOException
    */
   private Set<String> readJmxMetrics() throws IOException {
     JMXConnector connector = null;
@@ -222,7 +221,7 @@ public class TestStochasticBalancerJmxMetrics extends BalancerTestBase {
       target = new ObjectName("Hadoop", pairs);
       MBeanInfo beanInfo = mb.getMBeanInfo(target);
 
-      Set<String> existingAttrs = new HashSet<String>();
+      Set<String> existingAttrs = new HashSet<>();
       for (MBeanAttributeInfo attrInfo : beanInfo.getAttributes()) {
         existingAttrs.add(attrInfo.getName());
       }
@@ -255,7 +254,7 @@ public class TestStochasticBalancerJmxMetrics extends BalancerTestBase {
    * Given the tables and functions, return metrics names that should exist in JMX
    */
   private Set<String> getExpectedJmxMetrics(String[] tableNames, String[] functionNames) {
-    Set<String> ret = new HashSet<String>();
+    Set<String> ret = new HashSet<>();
 
     for (String tableName : tableNames) {
       ret.add(StochasticLoadBalancer.composeAttributeName(tableName, "Overall"));

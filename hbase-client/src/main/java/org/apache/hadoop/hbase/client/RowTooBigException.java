@@ -19,8 +19,7 @@
 package org.apache.hadoop.hbase.client;
 
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * Gets or Scans throw this exception if running without in-row scan flag
@@ -28,7 +27,6 @@ import org.apache.hadoop.hbase.classification.InterfaceStability;
  * hbase.table.max.rowsize).
  */
 @InterfaceAudience.Public
-@InterfaceStability.Stable
 public class RowTooBigException extends DoNotRetryRegionException {
 
   public RowTooBigException(String message) {

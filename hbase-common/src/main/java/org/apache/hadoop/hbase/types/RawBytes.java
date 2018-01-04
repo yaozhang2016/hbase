@@ -17,11 +17,10 @@
  */
 package org.apache.hadoop.hbase.types;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.Order;
 import org.apache.hadoop.hbase.util.PositionedByteRange;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * An {@code DataType} for interacting with variable-length values
@@ -35,7 +34,6 @@ import org.apache.hadoop.hbase.util.PositionedByteRange;
  * @see OrderedBlobVar
  */
 @InterfaceAudience.Public
-@InterfaceStability.Evolving
 public class RawBytes implements DataType<byte[]> {
 
   public static final RawBytes ASCENDING = new RawBytes(Order.ASCENDING);
@@ -43,20 +41,33 @@ public class RawBytes implements DataType<byte[]> {
 
   protected final Order order;
 
-  protected RawBytes() { this.order = Order.ASCENDING; }
-  protected RawBytes(Order order) { this.order = order; }
+  protected RawBytes() {
+    this.order = Order.ASCENDING;
+  }
+
+  protected RawBytes(Order order) {
+    this.order = order;
+  }
 
   @Override
-  public boolean isOrderPreserving() { return true; }
+  public boolean isOrderPreserving() {
+    return true;
+  }
 
   @Override
-  public Order getOrder() { return order; }
+  public Order getOrder() {
+    return order;
+  }
 
   @Override
-  public boolean isNullable() { return false; }
+  public boolean isNullable() {
+    return false;
+  }
 
   @Override
-  public boolean isSkippable() { return false; }
+  public boolean isSkippable() {
+    return false;
+  }
 
   @Override
   public int skip(PositionedByteRange src) {
@@ -66,10 +77,14 @@ public class RawBytes implements DataType<byte[]> {
   }
 
   @Override
-  public int encodedLength(byte[] val) { return val.length; }
+  public int encodedLength(byte[] val) {
+    return val.length;
+  }
 
   @Override
-  public Class<byte[]> encodedClass() { return byte[].class; }
+  public Class<byte[]> encodedClass() {
+    return byte[].class;
+  }
 
   @Override
   public byte[] decode(PositionedByteRange src) {

@@ -22,6 +22,7 @@ package org.apache.hadoop.hbase.filter;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
+import java.math.BigDecimal;
 import java.util.regex.Pattern;
 
 import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
@@ -75,7 +76,7 @@ public class TestComparatorSerialization {
     try {
       new RegexStringComparator("regex", Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
     } catch (Throwable t) {
-      assertNull("Exception occured while created the RegexStringComparator object", t);
+      assertNull("Exception occurred while created the RegexStringComparator object", t);
     }
   }
 
@@ -84,6 +85,14 @@ public class TestComparatorSerialization {
     SubstringComparator substringComparator = new SubstringComparator("substr");
     assertTrue(substringComparator.areSerializedFieldsEqual(
       ProtobufUtil.toComparator(ProtobufUtil.toComparator(substringComparator))));
+  }
+
+  @Test
+  public void testBigDecimalComparator() throws Exception {
+    BigDecimal bigDecimal = new BigDecimal(Double.MIN_VALUE);
+    BigDecimalComparator bigDecimalComparator = new BigDecimalComparator(bigDecimal);
+    assertTrue(bigDecimalComparator.areSerializedFieldsEqual(ProtobufUtil.toComparator(ProtobufUtil
+        .toComparator(bigDecimalComparator))));
   }
 
 }

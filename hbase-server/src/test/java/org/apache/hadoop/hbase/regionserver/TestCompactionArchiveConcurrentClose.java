@@ -1,4 +1,4 @@
-/*
+/**
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -15,13 +15,20 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 package org.apache.hadoop.hbase.regionserver;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
+
+import java.io.IOException;
+import java.io.InterruptedIOException;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
@@ -40,16 +47,11 @@ import org.apache.hadoop.hbase.util.FSUtils;
 import org.apache.hadoop.hbase.wal.WALFactory;
 import org.junit.After;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
-
-import java.io.IOException;
-import java.io.InterruptedIOException;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.List;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
+import org.junit.rules.TestName;
+import org.mockito.Mockito;
 
 /**
  * Tests a race condition between archiving of compacted files in CompactedHFilesDischarger chore
@@ -61,6 +63,9 @@ public class TestCompactionArchiveConcurrentClose {
 
   private Path testDir;
   private AtomicBoolean archived = new AtomicBoolean();
+
+  @Rule
+  public TestName name = new TestName();
 
   @Before
   public void setup() throws Exception {
@@ -80,15 +85,15 @@ public class TestCompactionArchiveConcurrentClose {
     byte[] col = Bytes.toBytes("c");
     byte[] val = Bytes.toBytes("val");
 
-    TableName tableName = TableName.valueOf(getClass().getSimpleName());
+    final TableName tableName = TableName.valueOf(name.getMethodName());
     HTableDescriptor htd = new HTableDescriptor(tableName);
     htd.addFamily(new HColumnDescriptor(fam));
     HRegionInfo info = new HRegionInfo(tableName, null, null, false);
-    Region region = initHRegion(htd, info);
+    HRegion region = initHRegion(htd, info);
     RegionServerServices rss = mock(RegionServerServices.class);
-    List<Region> regions = new ArrayList<Region>();
+    List<HRegion> regions = new ArrayList<>();
     regions.add(region);
-    when(rss.getOnlineRegions()).thenReturn(regions);
+    Mockito.doReturn(regions).when(rss).getRegions();
 
     // Create the cleaner object
     CompactedHFilesDischarger cleaner =
@@ -107,12 +112,12 @@ public class TestCompactionArchiveConcurrentClose {
       region.flush(true);
     }
 
-    Store store = region.getStore(fam);
+    HStore store = region.getStore(fam);
     assertEquals(fileCount, store.getStorefilesCount());
 
-    Collection<StoreFile> storefiles = store.getStorefiles();
+    Collection<HStoreFile> storefiles = store.getStorefiles();
     // None of the files should be in compacted state.
-    for (StoreFile file : storefiles) {
+    for (HStoreFile file : storefiles) {
       assertFalse(file.isCompactedAway());
     }
     // Do compaction
@@ -152,13 +157,14 @@ public class TestCompactionArchiveConcurrentClose {
     }
   }
 
-  private Region initHRegion(HTableDescriptor htd, HRegionInfo info)
+  private HRegion initHRegion(HTableDescriptor htd, HRegionInfo info)
       throws IOException {
     Configuration conf = testUtil.getConfiguration();
     Path tableDir = FSUtils.getTableDir(testDir, htd.getTableName());
 
     HRegionFileSystem fs = new WaitingHRegionFileSystem(conf, tableDir.getFileSystem(conf),
         tableDir, info);
+    ChunkCreator.initialize(MemStoreLABImpl.CHUNK_SIZE_DEFAULT, false, 0, 0, 0, null);
     final Configuration walConf = new Configuration(conf);
     FSUtils.setRootDir(walConf, tableDir);
     final WALFactory wals = new WALFactory(walConf, null, "log_" + info.getEncodedName());
@@ -179,7 +185,7 @@ public class TestCompactionArchiveConcurrentClose {
     }
 
     @Override
-    public void removeStoreFiles(String familyName, Collection<StoreFile> storeFiles)
+    public void removeStoreFiles(String familyName, Collection<HStoreFile> storeFiles)
         throws IOException {
       super.removeStoreFiles(familyName, storeFiles);
       archived.set(true);

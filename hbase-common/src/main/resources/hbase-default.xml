@@ -63,13 +63,6 @@ possible configurations would overwhelm and obscure the important.
     machine restart.</description>
   </property>
   <property >
-    <name>hbase.fs.tmp.dir</name>
-    <value>/user/${user.name}/hbase-staging</value>
-    <description>A staging directory in default file system (HDFS)
-    for keeping temporary data.
-    </description>
-  </property>
-  <property >
     <name>hbase.cluster.distributed</name>
     <value>false</value>
     <description>The mode the cluster will be in. Possible values are
@@ -88,13 +81,20 @@ possible configurations would overwhelm and obscure the important.
     list of ZooKeeper ensemble servers. If HBASE_MANAGES_ZK is set in hbase-env.sh
     this is the list of servers which hbase will start/stop ZooKeeper on as
     part of cluster start/stop.  Client-side, we will take this list of
-    ensemble members and put it together with the hbase.zookeeper.clientPort
+    ensemble members and put it together with the hbase.zookeeper.property.clientPort
     config. and pass it into zookeeper constructor as the connectString
     parameter.</description>
   </property>
   <!--The above are the important configurations for getting hbase up
     and running -->
 
+  <property>
+    <name>zookeeper.recovery.retry.maxsleeptime</name>
+    <value>60000</value>
+    <description>Max sleep time before retry zookeeper operations in milliseconds,
+    a max time is needed here so that sleep time won't grow unboundedly
+    </description>
+  </property>
   <property>
     <name>hbase.local.dir</name>
     <value>${hbase.tmp.dir}/local/</value>
@@ -122,7 +122,7 @@ possible configurations would overwhelm and obscure the important.
   </property>
   <property>
     <name>hbase.master.logcleaner.plugins</name>
-    <value>org.apache.hadoop.hbase.master.cleaner.TimeToLiveLogCleaner</value>
+    <value>org.apache.hadoop.hbase.master.cleaner.TimeToLiveLogCleaner,org.apache.hadoop.hbase.master.cleaner.TimeToLiveProcedureWALCleaner</value>
     <description>A comma-separated list of BaseLogCleanerDelegate invoked by
     the LogsCleaner service. These WAL cleaners are called in order,
     so put the cleaner that prunes the most files in front. To
@@ -133,8 +133,15 @@ possible configurations would overwhelm and obscure the important.
   <property>
     <name>hbase.master.logcleaner.ttl</name>
     <value>600000</value>
-    <description>Maximum time a WAL can stay in the .oldlogdir directory,
-    after which it will be cleaned by a Master thread.</description>
+    <description>How long a WAL remain in the archive ({hbase.rootdir}/oldWALs) directory,
+    after which it will be cleaned by a Master thread. The value is in milliseconds.</description>
+  </property>
+  <property>
+    <name>hbase.master.procedurewalcleaner.ttl</name>
+    <value>604800000</value>
+    <description>How long a Procedure WAL will remain in the
+    archive directory, after which it will be cleaned
+    by a Master thread. The value is in milliseconds.</description>
   </property>
   <property>
     <name>hbase.master.hfilecleaner.plugins</name>
@@ -152,7 +159,19 @@ possible configurations would overwhelm and obscure the important.
     <value>true</value>
     <description>Whether or not the Master listens to the Master web
       UI port (hbase.master.info.port) and redirects requests to the web
-      UI server shared by the Master and RegionServer.</description>
+      UI server shared by the Master and RegionServer. Config. makes
+      sense when Master is serving Regions (not the default).</description>
+  </property>
+  <property>
+    <name>hbase.master.fileSplitTimeout</name>
+    <value>600000</value>
+    <description>Splitting a region, how long to wait on the file-splitting
+      step before aborting the attempt. Default: 600000. This setting used
+      to be known as hbase.regionserver.fileSplitTimeout in hbase-1.x.
+      Split is now run master-side hence the rename (If a
+      'hbase.master.fileSplitTimeout' setting found, will use it to
+      prime the current 'hbase.master.fileSplitTimeout'
+      Configuration.</description>
   </property>
 
   <!--RegionServer configurations-->
@@ -184,7 +203,10 @@ possible configurations would overwhelm and obscure the important.
     <name>hbase.regionserver.handler.count</name>
     <value>30</value>
     <description>Count of RPC Listener instances spun up on RegionServers.
-    Same property is used by the Master for count of master handlers.</description>
+      Same property is used by the Master for count of master handlers.
+      Too many handlers can be counter-productive. Make it a multiple of
+      CPU count. If mostly read-only, handlers count close to cpu count
+      does well. Start with twice the CPU count and tune from there.</description>
   </property>
   <property>
     <name>hbase.ipc.server.callqueue.handler.factor</name>
@@ -278,24 +300,37 @@ possible configurations would overwhelm and obscure the important.
       Updates are blocked and flushes are forced until size of all memstores
       in a region server hits hbase.regionserver.global.memstore.size.lower.limit.
       The default value in this configuration has been intentionally left empty in order to
-      honor the old hbase.regionserver.global.memstore.upperLimit property if present.</description>
+      honor the old hbase.regionserver.global.memstore.upperLimit property if present.
+    </description>
   </property>
   <property>
     <name>hbase.regionserver.global.memstore.size.lower.limit</name>
     <value></value>
-    <description>Maximum size of all memstores in a region server before flushes are forced.
-      Defaults to 95% of hbase.regionserver.global.memstore.size (0.95).
-      A 100% value for this value causes the minimum possible flushing to occur when updates are
-      blocked due to memstore limiting.
-      The default value in this configuration has been intentionally left empty in order to
-      honor the old hbase.regionserver.global.memstore.lowerLimit property if present.</description>
+    <description>Maximum size of all memstores in a region server before flushes
+      are forced. Defaults to 95% of hbase.regionserver.global.memstore.size
+      (0.95). A 100% value for this value causes the minimum possible flushing
+      to occur when updates are blocked due to memstore limiting. The default
+      value in this configuration has been intentionally left empty in order to
+      honor the old hbase.regionserver.global.memstore.lowerLimit property if
+      present.
+    </description>
+  </property>
+  <property>
+    <name>hbase.systemtables.compacting.memstore.type</name>
+    <value>NONE</value>
+    <description>Determines the type of memstore to be used for system tables like
+      META, namespace tables etc. By default NONE is the type and hence we use the
+      default memstore for all the system tables. If we need to use compacting
+      memstore for system tables then set this property to BASIC/EAGER
+    </description>
   </property>
   <property>
     <name>hbase.regionserver.optionalcacheflushinterval</name>
     <value>3600000</value>
     <description>
     Maximum amount of time an edit lives in memory before being automatically flushed.
-    Default 1 hour. Set it to 0 to disable automatic flushing.</description>
+    Default 1 hour. Set it to 0 to disable automatic flushing.
+  </description>
   </property>
   <property>
     <name>hbase.regionserver.dns.interface</name>
@@ -314,19 +349,21 @@ possible configurations would overwhelm and obscure the important.
     <name>hbase.regionserver.region.split.policy</name>
     <value>org.apache.hadoop.hbase.regionserver.SteppingSplitPolicy</value>
     <description>
-      A split policy determines when a region should be split. The various other split policies that
-      are available currently are BusyRegionSplitPolicy, ConstantSizeRegionSplitPolicy, DisabledRegionSplitPolicy,
-      DelimitedKeyPrefixRegionSplitPolicy, and KeyPrefixRegionSplitPolicy.
-      DisabledRegionSplitPolicy blocks manual region splitting.
+      A split policy determines when a region should be split. The various
+      other split policies that are available currently are BusyRegionSplitPolicy,
+      ConstantSizeRegionSplitPolicy, DisabledRegionSplitPolicy,
+      DelimitedKeyPrefixRegionSplitPolicy, KeyPrefixRegionSplitPolicy, and
+      SteppingSplitPolicy. DisabledRegionSplitPolicy blocks manual region splitting.
     </description>
   </property>
   <property>
     <name>hbase.regionserver.regionSplitLimit</name>
     <value>1000</value>
     <description>
-      Limit for the number of regions after which no more region splitting should take place.
-      This is not hard limit for the number of regions but acts as a guideline for the regionserver
-      to stop splitting after a certain limit. Default is set to 1000.
+      Limit for the number of regions after which no more region splitting
+      should take place. This is not hard limit for the number of regions
+      but acts as a guideline for the regionserver to stop splitting after
+      a certain limit. Default is set to 1000.
     </description>
   </property>
 
@@ -336,14 +373,15 @@ possible configurations would overwhelm and obscure the important.
     <value>90000</value>
     <description>ZooKeeper session timeout in milliseconds. It is used in two different ways.
       First, this value is used in the ZK client that HBase uses to connect to the ensemble.
-      It is also used by HBase when it starts a ZK server and it is passed as the 'maxSessionTimeout'. See
-      http://hadoop.apache.org/zookeeper/docs/current/zookeeperProgrammers.html#ch_zkSessions.
+      It is also used by HBase when it starts a ZK server and it is passed as the 'maxSessionTimeout'.
+      See http://hadoop.apache.org/zookeeper/docs/current/zookeeperProgrammers.html#ch_zkSessions.
       For example, if an HBase region server connects to a ZK ensemble that's also managed
-      by HBase, then the
-      session timeout will be the one specified by this configuration. But, a region server that connects
-      to an ensemble managed with a different configuration will be subjected that ensemble's maxSessionTimeout. So,
-      even though HBase might propose using 90 seconds, the ensemble can have a max timeout lower than this and
-      it will take precedence. The current default that ZK ships with is 40 seconds, which is lower than HBase's.
+      by HBase, then the session timeout will be the one specified by this configuration.
+      But, a region server that connects to an ensemble managed with a different configuration
+      will be subjected that ensemble's maxSessionTimeout. So, even though HBase might propose
+      using 90 seconds, the ensemble can have a max timeout lower than this and it will take
+      precedence. The current default that ZK ships with is 40 seconds, which is lower than
+      HBase's.
     </description>
   </property>
   <property>
@@ -352,7 +390,8 @@ possible configurations would overwhelm and obscure the important.
     <description>Root ZNode for HBase in ZooKeeper. All of HBase's ZooKeeper
       files that are configured with a relative path will go under this node.
       By default, all of HBase's ZooKeeper file paths are configured with a
-      relative path, so they will all go under this directory unless changed.</description>
+      relative path, so they will all go under this directory unless changed.
+    </description>
   </property>
   <property>
     <name>zookeeper.znode.acl.parent</name>
@@ -442,7 +481,7 @@ possible configurations would overwhelm and obscure the important.
   <property>
     <name>hbase.client.write.buffer</name>
     <value>2097152</value>
-    <description>Default size of the HTable client write buffer in bytes.
+    <description>Default size of the BufferedMutator write buffer in bytes.
     A bigger buffer takes more memory -- on both the client and server
     side since server instantiates the passed write buffer to process
     it -- but a larger buffer size reduces the number of RPCs made.
@@ -458,8 +497,16 @@ possible configurations would overwhelm and obscure the important.
     this initial pause amount and how this pause works w/ retries.</description>
   </property>
   <property>
+    <name>hbase.client.pause.cqtbe</name>
+    <value></value>
+    <description>Whether or not to use a special client pause for
+    CallQueueTooBigException (cqtbe). Set this property to a higher value
+    than hbase.client.pause if you observe frequent CQTBE from the same
+    RegionServer and the call queue there keeps full</description>
+  </property>
+  <property>
     <name>hbase.client.retries.number</name>
-    <value>35</value>
+    <value>15</value>
     <description>Maximum retries.  Used as maximum for all retryable
     operations such as the getting of a cell's value, starting a row update,
     etc.  Retry interval is a rough function based on hbase.client.pause.  At
@@ -475,7 +522,7 @@ possible configurations would overwhelm and obscure the important.
   </property>
   <property>
     <name>hbase.client.max.perserver.tasks</name>
-    <value>5</value>
+    <value>2</value>
     <description>The maximum number of concurrent mutation tasks a single HTable instance will
     send to a single region server.</description>
   </property>
@@ -524,6 +571,15 @@ possible configurations would overwhelm and obscure the important.
     or less disables the check.</description>
   </property>
   <property>
+    <name>hbase.server.keyvalue.maxsize</name>
+    <value>10485760</value>
+    <description>Maximum allowed size of an individual cell, inclusive of value and all key
+    components. A value of 0 or less disables the check.
+    The default value is 10MB.
+    This is a safety setting to protect the server from OOM situations.
+    </description>
+  </property>
+  <property>
     <name>hbase.client.scanner.timeout.period</name>
     <value>60000</value>
     <description>Client scanner lease period in milliseconds.</description>
@@ -542,6 +598,14 @@ possible configurations would overwhelm and obscure the important.
     0 means never give up.</description>
   </property>
   <property>
+    <name>hbase.master.balancer.maxRitPercent</name>
+    <value>1.0</value>
+    <description>The max percent of regions in transition when balancing.
+      The default value is 1.0. So there are no balancer throttling. If set this config to 0.01,
+      It means that there are at most 1% regions in transition when balancing.
+      Then the cluster's availability is at least 99% when balancing.</description>
+  </property>
+  <property>
     <name>hbase.balancer.period
     </name>
     <value>300000</value>
@@ -549,7 +613,7 @@ possible configurations would overwhelm and obscure the important.
   </property>
   <property>
     <name>hbase.normalizer.period</name>
-    <value>1800000</value>
+    <value>300000</value>
     <description>Period at which the region normalizer runs in the Master.</description>
   </property>
   <property>
@@ -673,7 +737,7 @@ possible configurations would overwhelm and obscure the important.
   </property>
   <property>
     <name>hbase.hstore.blockingStoreFiles</name>
-    <value>10</value>
+    <value>16</value>
     <description> If more than this number of StoreFiles exist in any one Store (one StoreFile
      is written per flush of MemStore), updates are blocked for this region until a compaction is
       completed, or until hbase.hstore.blockingWaitTime has been exceeded.</description>
@@ -787,6 +851,24 @@ possible configurations would overwhelm and obscure the important.
       the default.</description>
   </property>
   <property>
+    <name>hbase.regionserver.majorcompaction.pagecache.drop</name>
+    <value>true</value>
+    <description>Specifies whether to drop pages read/written into the system page cache by
+      major compactions. Setting it to true helps prevent major compactions from
+      polluting the page cache, which is almost always required, especially for clusters
+      with low/moderate memory to storage ratio.</description>
+  </property>
+  <property>
+    <name>hbase.regionserver.minorcompaction.pagecache.drop</name>
+    <value>true</value>
+    <description>Specifies whether to drop pages read/written into the system page cache by
+      minor compactions. Setting it to true helps prevent minor compactions from
+      polluting the page cache, which is most beneficial on clusters with low
+      memory to storage ratio or very write heavy clusters. You may want to set it to
+      false under moderate to low write workload when bulk of the reads are
+      on the most recently written data.</description>
+  </property>
+  <property>
     <name>hbase.hstore.compaction.kv.max</name>
     <value>10</value>
     <description>The maximum number of KeyValues to read and then write in a batch when flushing or
@@ -830,17 +912,11 @@ possible configurations would overwhelm and obscure the important.
     <property>
     <name>hbase.bucketcache.ioengine</name>
     <value></value>
-    <description>Where to store the contents of the bucketcache. One of: heap,
-    offheap, or file. If a file, set it to file:PATH_TO_FILE. See
-    http://hbase.apache.org/book.html#offheap.blockcache for more information.
+    <description>Where to store the contents of the bucketcache. One of: offheap,
+    file, files or mmap. If a file or files, set it to file(s):PATH_TO_FILE.
+    mmap means the content will be in an mmaped file. Use mmap:PATH_TO_FILE.
+    See http://hbase.apache.org/book.html#offheap.blockcache for more information.
     </description>
-  </property>
-  <property>
-    <name>hbase.bucketcache.combinedcache.enabled</name>
-    <value>true</value>
-    <description>Whether or not the bucketcache is used in league with the LRU
-    on-heap block cache. In this mode, indices and blooms are kept in the LRU
-    blockcache and the data blocks are kept in the bucketcache.</description>
   </property>
   <property>
     <name>hbase.bucketcache.size</name>
@@ -855,7 +931,7 @@ possible configurations would overwhelm and obscure the important.
     <description>A comma-separated list of sizes for buckets for the bucketcache.
     Can be multiple sizes. List block sizes in order from smallest to largest.
     The sizes you use will depend on your data access patterns.
-    Must be a multiple of 1024 else you will run into
+    Must be a multiple of 256 else you will run into
     'java.io.IOException: Invalid HFile block magic' when you go to read from cache.
     If you specify no values here, then you pick up the default bucketsizes set
     in code (See BucketAllocator#DEFAULT_BUCKET_SIZES).
@@ -866,8 +942,7 @@ possible configurations would overwhelm and obscure the important.
       <value>3</value>
       <description>The HFile format version to use for new files.
       Version 3 adds support for tags in hfiles (See http://hbase.apache.org/book.html#hbase.tags).
-      Distributed Log Replay requires that tags are enabled. Also see the configuration
-      'hbase.replication.rpc.codec'.
+      Also see the configuration 'hbase.replication.rpc.codec'.
       </description>
   </property>
   <property>
@@ -937,6 +1012,15 @@ possible configurations would overwhelm and obscure the important.
     <description>This config is for experts: don't set its value unless you really know what you are doing.
     When set to a non-empty value, this represents the (external facing) hostname for the underlying server.
     See https://issues.apache.org/jira/browse/HBASE-12954 for details.</description>
+  </property>
+  <property>
+    <name>hbase.regionserver.hostname.disable.master.reversedns</name>
+    <value>false</value>
+    <description>This config is for experts: don't set its value unless you really know what you are doing.
+    When set to true, regionserver will use the current node hostname for the servername and HMaster will
+    skip reverse DNS lookup and use the hostname sent by regionserver instead. Note that this config and
+    hbase.regionserver.hostname are mutually exclusive. See https://issues.apache.org/jira/browse/HBASE-18226
+    for more details.</description>
   </property>
   <!-- The following properties configure authentication information for
        HBase processes when using Kerberos security.  There are no default
@@ -1046,11 +1130,32 @@ possible configurations would overwhelm and obscure the important.
   <property>
     <name>hbase.coprocessor.region.classes</name>
     <value></value>
-    <description>A comma-separated list of Coprocessors that are loaded by
-    default on all tables. For any override coprocessor method, these classes
-    will be called in order. After implementing your own Coprocessor, just put
-    it in HBase's classpath and add the fully qualified class name here.
-    A coprocessor can also be loaded on demand by setting HTableDescriptor.</description>
+    <description>A comma-separated list of region observer or endpoint coprocessors
+    that are loaded by default on all tables. For any override coprocessor method,
+    these classes will be called in order. After implementing your own Coprocessor,
+    add it to HBase's classpath and add the fully qualified class name here.
+    A coprocessor can also be loaded on demand by setting HTableDescriptor or the
+    HBase shell.</description>
+  </property>
+  <property>
+    <name>hbase.coprocessor.master.classes</name>
+    <value></value>
+    <description>A comma-separated list of
+    org.apache.hadoop.hbase.coprocessor.MasterObserver coprocessors that are
+    loaded by default on the active HMaster process. For any implemented
+    coprocessor methods, the listed classes will be called in order. After
+    implementing your own MasterObserver, just put it in HBase's classpath
+    and add the fully qualified class name here.</description>
+  </property>
+  <property>
+      <name>hbase.coprocessor.abortonerror</name>
+      <value>true</value>
+      <description>Set to true to cause the hosting server (master or regionserver)
+      to abort if a coprocessor fails to load, fails to initialize, or throws an
+      unexpected Throwable object. Setting this to false will allow the server to
+      continue execution but the system wide state of the coprocessor in question
+      will become inconsistent as it will be properly executing in only a subset
+      of servers, so this is most useful for debugging only.</description>
   </property>
   <property>
     <name>hbase.rest.port</name>
@@ -1103,26 +1208,6 @@ possible configurations would overwhelm and obscure the important.
     seeing the RuntimeException complaint: "hbase-default.xml file
     seems to be for and old version of HBase (\${hbase.version}), this
     version is X.X.X-SNAPSHOT"</description>
-  </property>
-  <property>
-    <name>hbase.coprocessor.master.classes</name>
-    <value></value>
-    <description>A comma-separated list of
-    org.apache.hadoop.hbase.coprocessor.MasterObserver coprocessors that are
-    loaded by default on the active HMaster process. For any implemented
-    coprocessor methods, the listed classes will be called in order. After
-    implementing your own MasterObserver, just put it in HBase's classpath
-    and add the fully qualified class name here.</description>
-  </property>
-  <property>
-      <name>hbase.coprocessor.abortonerror</name>
-      <value>true</value>
-      <description>Set to true to cause the hosting server (master or regionserver)
-      to abort if a coprocessor fails to load, fails to initialize, or throws an
-      unexpected Throwable object. Setting this to false will allow the server to
-      continue execution but the system wide state of the coprocessor in question
-      will become inconsistent as it will be properly executing in only a subset
-      of servers, so this is most useful for debugging only.</description>
   </property>
   <property>
     <name>hbase.table.lock.enable</name>
@@ -1186,6 +1271,13 @@ possible configurations would overwhelm and obscure the important.
     <description>FS Permissions for the root data subdirectory in a secure (kerberos) setup.
     When master starts, it creates the rootdir with this permissions or sets the permissions
     if it does not match.</description>
+  </property>
+  <property>
+    <name>hbase.wal.dir.perms</name>
+    <value>700</value>
+    <description>FS Permissions for the root WAL directory in a secure(kerberos) setup.
+      When master starts, it creates the WAL dir with this permissions or sets the permissions
+      if it does not match.</description>
   </property>
   <property>
     <name>hbase.data.umask.enable</name>
@@ -1314,7 +1406,6 @@ possible configurations would overwhelm and obscure the important.
       are NULL, CRC32, CRC32C.
     </description>
   </property>
-
   <property>
     <name>hbase.client.scanner.max.result.size</name>
     <value>2097152</value>
@@ -1324,7 +1415,6 @@ possible configurations would overwhelm and obscure the important.
     With faster and/or high latency networks this value should be increased.
     </description>
   </property>
-
   <property>
     <name>hbase.server.scanner.max.result.size</name>
     <value>104857600</value>
@@ -1334,7 +1424,6 @@ possible configurations would overwhelm and obscure the important.
     This is a safety setting to protect the server from OOM situations.
     </description>
   </property>
-
   <property>
     <name>hbase.status.published</name>
     <value>false</value>
@@ -1373,7 +1462,6 @@ possible configurations would overwhelm and obscure the important.
       Multicast port to use for the status publication by multicast.
     </description>
   </property>
-
   <property>
     <name>hbase.dynamic.jars.dir</name>
     <value>${hbase.rootdir}/lib</value>
@@ -1410,6 +1498,13 @@ possible configurations would overwhelm and obscure the important.
       http://hbase.apache.org/devapidocs/org/apache/hadoop/hbase/master/balancer/StochasticLoadBalancer.html
       It replaces the DefaultLoadBalancer as the default (since renamed
       as the SimpleLoadBalancer).
+    </description>
+  </property>
+  <property>
+    <name>hbase.master.loadbalance.bytable</name>
+    <value>false</value>
+    <description>Factor Table name when the balancer runs.
+      Default: false.
     </description>
   </property>
   <property>
@@ -1509,7 +1604,7 @@ possible configurations would overwhelm and obscure the important.
       If this is enabled, a replication peer named "region_replica_replication" will be created
       which will tail the logs and replicate the mutations to region replicas for tables that
       have region replication > 1. If this is enabled once, disabling this replication also
-      requires disabling the replication peer using shell or ReplicationAdmin java class.
+      requires disabling the replication peer using shell or Admin java class.
       Replication to secondary region replicas works over standard inter-cluster replication.
     </description>
   </property>
@@ -1530,13 +1625,13 @@ possible configurations would overwhelm and obscure the important.
     <name>hbase.security.visibility.mutations.checkauths</name>
     <value>false</value>
     <description>
-      This property if enabled, will check whether the labels in the visibility expression are associated
-      with the user issuing the mutation
+      This property if enabled, will check whether the labels in the visibility
+      expression are associated with the user issuing the mutation
     </description>
   </property>
   <property>
     <name>hbase.http.max.threads</name>
-    <value>10</value>
+    <value>16</value>
     <description>
       The maximum number of threads that the HTTP Server will create in its
       ThreadPool.
@@ -1559,9 +1654,9 @@ possible configurations would overwhelm and obscure the important.
     <description>
         The maximum number of threads any replication source will use for
         shipping edits to the sinks in parallel. This also limits the number of
-        chunks each replication batch is broken into.
-        Larger values can improve the replication throughput between the master and
-        slave clusters. The default of 10 will rarely need to be changed.
+        chunks each replication batch is broken into. Larger values can improve
+        the replication throughput between the master and slave clusters. The
+        default of 10 will rarely need to be changed.
     </description>
   </property>
   <property>
@@ -1570,23 +1665,22 @@ possible configurations would overwhelm and obscure the important.
     <description>
       By default, in replication we can not make sure the order of operations in slave cluster is
       same as the order in master. If set REPLICATION_SCOPE to 2, we will push edits by the order
-      of written. This configure is to set how long (in ms) we will wait before next checking if a
-      log can not push right now because there are some logs written before it have not been pushed.
-      A larger waiting will decrease the number of queries on hbase:meta but will enlarge the delay
-      of replication. This feature relies on zk-less assignment, and conflicts with distributed log
-      replay. So users must set hbase.assignment.usezk and hbase.master.distributed.log.replay to
-      false to support it.
+      of written. This configuration is to set how long (in ms) we will wait before next checking if
+      a log can NOT be pushed because there are some logs written before it that have yet to be
+      pushed. A larger waiting will decrease the number of queries on hbase:meta but will enlarge
+      the delay of replication. This feature relies on zk-less assignment, so users must set
+      hbase.assignment.usezk to false to support it.
     </description>
   </property>
   <!-- Static Web User Filter properties. -->
   <property>
+    <name>hbase.http.staticuser.user</name>
+    <value>dr.stack</value>
     <description>
       The user name to filter as, on static web filters
       while rendering content. An example use is the HDFS
       web UI (user to be used for browsing files).
     </description>
-    <name>hbase.http.staticuser.user</name>
-    <value>dr.stack</value>
   </property>
   <property>
     <name>hbase.regionserver.handler.abort.on.error.percent</name>
@@ -1626,48 +1720,22 @@ possible configurations would overwhelm and obscure the important.
     </description>
   </property>
   <property>
-    <name>hbase.mob.sweep.tool.compaction.ratio</name>
-    <value>0.5f</value>
-    <description>
-      If there're too many cells deleted in a mob file, it's regarded
-      as an invalid file and needs to be merged.
-      If existingCellsSize/mobFileSize is less than ratio, it's regarded
-      as an invalid file. The default value is 0.5f.
-    </description>
-  </property>
-  <property>
-    <name>hbase.mob.sweep.tool.compaction.mergeable.size</name>
-    <value>134217728</value>
-    <description>
-      If the size of a mob file is less than this value, it's regarded as a small
-      file and needs to be merged. The default value is 128MB.
-    </description>
-  </property>
-  <property>
-    <name>hbase.mob.sweep.tool.compaction.memstore.flush.size</name>
-    <value>134217728</value>
-    <description>
-      The flush size for the memstore used by sweep job. Each sweep reducer owns such a memstore.
-      The default value is 128MB.
-    </description>
-  </property>
-  <property>
     <name>hbase.master.mob.ttl.cleaner.period</name>
     <value>86400</value>
     <description>
       The period that ExpiredMobFileCleanerChore runs. The unit is second.
-      The default value is one day.
-      The MOB file name uses only the date part of the file creation time in it. We use this
-      time for deciding TTL expiry of the files. So the removal of TTL expired files might be
-      delayed. The max delay might be 24 hrs.
+      The default value is one day. The MOB file name uses only the date part of
+      the file creation time in it. We use this time for deciding TTL expiry of
+      the files. So the removal of TTL expired files might be delayed. The max
+      delay might be 24 hrs.
     </description>
   </property>
   <property>
     <name>hbase.mob.compaction.mergeable.threshold</name>
-    <value>201326592</value>
+    <value>1342177280</value>
     <description>
       If the size of a mob file is less than this value, it's regarded as a small
-      file and needs to be merged in mob compaction. The default value is 192MB.
+      file and needs to be merged in mob compaction. The default value is 1280MB.
     </description>
   </property>
   <property>
@@ -1717,14 +1785,21 @@ possible configurations would overwhelm and obscure the important.
     <name>hbase.snapshot.master.timeout.millis</name>
     <value>300000</value>
     <description>
-       Timeout for master for the snapshot procedure execution
+       Timeout for master for the snapshot procedure execution.
     </description>
    </property>
      <property>
     <name>hbase.snapshot.region.timeout</name>
     <value>300000</value>
     <description>
-       Timeout for regionservers to keep threads in snapshot request pool waiting
+       Timeout for regionservers to keep threads in snapshot request pool waiting.
     </description>
    </property>
+   <property>
+    <name>hbase.rpc.rows.warning.threshold</name>
+    <value>5000</value>
+    <description>
+      Number of rows in a batch operation above which a warning will be logged.
+    </description>
+  </property>
 </configuration>

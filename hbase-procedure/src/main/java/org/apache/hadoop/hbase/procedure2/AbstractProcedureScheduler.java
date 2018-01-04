@@ -18,22 +18,20 @@
 
 package org.apache.hadoop.hbase.procedure2;
 
+import java.util.Iterator;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.concurrent.TimeUnit;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @InterfaceAudience.Private
-@InterfaceStability.Evolving
 public abstract class AbstractProcedureScheduler implements ProcedureScheduler {
-  private static final Log LOG = LogFactory.getLog(AbstractProcedureScheduler.class);
-
-  private final ReentrantLock schedLock = new ReentrantLock();
-  private final Condition schedWaitCond = schedLock.newCondition();
+  private static final Logger LOG = LoggerFactory.getLogger(AbstractProcedureScheduler.class);
+  private final ReentrantLock schedulerLock = new ReentrantLock();
+  private final Condition schedWaitCond = schedulerLock.newCondition();
   private boolean running = false;
 
   // TODO: metrics
@@ -82,23 +80,44 @@ public abstract class AbstractProcedureScheduler implements ProcedureScheduler {
    */
   protected abstract void enqueue(Procedure procedure, boolean addFront);
 
+  @Override
   public void addFront(final Procedure procedure) {
     push(procedure, true, true);
   }
 
+  @Override
+  public void addFront(Iterator<Procedure> procedureIterator) {
+    schedLock();
+    try {
+      int count = 0;
+      while (procedureIterator.hasNext()) {
+        Procedure procedure = procedureIterator.next();
+        if (LOG.isTraceEnabled()) {
+          LOG.trace("Wake " + procedure);
+        }
+        push(procedure, /* addFront= */ true, /* notify= */false);
+        count++;
+      }
+      wakePollIfNeeded(count);
+    } finally {
+      schedUnlock();
+    }
+  }
+
+  @Override
   public void addBack(final Procedure procedure) {
     push(procedure, false, true);
   }
 
   protected void push(final Procedure procedure, final boolean addFront, final boolean notify) {
-    schedLock.lock();
+    schedLock();
     try {
       enqueue(procedure, addFront);
       if (notify) {
         schedWaitCond.signal();
       }
     } finally {
-      schedLock.unlock();
+      schedUnlock();
     }
   }
 
@@ -162,12 +181,6 @@ public abstract class AbstractProcedureScheduler implements ProcedureScheduler {
   //  Utils
   // ==========================================================================
   /**
-   * Removes all of the elements from the queue
-   * NOTE: this method is called with the sched lock held.
-   */
-  protected abstract void clearQueue();
-
-  /**
    * Returns the number of elements in this queue.
    * NOTE: this method is called with the sched lock held.
    * @return the number of elements in this queue.
@@ -180,17 +193,6 @@ public abstract class AbstractProcedureScheduler implements ProcedureScheduler {
    * @return true if there are procedures available to process, otherwise false.
    */
   protected abstract boolean queueHasRunnables();
-
-  @Override
-  public void clear() {
-    // NOTE: USED ONLY FOR TESTING
-    schedLock();
-    try {
-      clearQueue();
-    } finally {
-      schedUnlock();
-    }
-  }
 
   @Override
   public int size() {
@@ -226,94 +228,68 @@ public abstract class AbstractProcedureScheduler implements ProcedureScheduler {
   // ==========================================================================
   //  Procedure Events
   // ==========================================================================
-  @Override
-  public boolean waitEvent(final ProcedureEvent event, final Procedure procedure) {
-    synchronized (event) {
-      if (event.isReady()) {
-        return false;
-      }
-      suspendProcedure(event, procedure);
-      return true;
-    }
-  }
 
-  @Override
-  public void suspendEvent(final ProcedureEvent event) {
-    final boolean isTraceEnabled = LOG.isTraceEnabled();
-    synchronized (event) {
-      event.setReady(false);
-      if (isTraceEnabled) {
-        LOG.trace("Suspend event " + event);
-      }
-    }
-  }
-
-  @Override
-  public void wakeEvent(final ProcedureEvent event) {
-    wakeEvents(1, event);
-  }
-
-  @Override
-  public void wakeEvents(final int count, final ProcedureEvent... events) {
-    final boolean isTraceEnabled = LOG.isTraceEnabled();
+  /**
+   * Wake up all of the given events.
+   * Note that we first take scheduler lock and then wakeInternal() synchronizes on the event.
+   * Access should remain package-private. Use ProcedureEvent class to wake/suspend events.
+   * @param events the list of events to wake
+   */
+  void wakeEvents(ProcedureEvent[] events) {
     schedLock();
     try {
-      int waitingCount = 0;
-      for (int i = 0; i < count; ++i) {
-        final ProcedureEvent event = events[i];
-        synchronized (event) {
-          event.setReady(true);
-          if (isTraceEnabled) {
-            LOG.trace("Wake event " + event);
-          }
-          waitingCount += popEventWaitingObjects(event);
+      for (ProcedureEvent event : events) {
+        if (event == null) {
+          continue;
         }
+        event.wakeInternal(this);
       }
-      wakePollIfNeeded(waitingCount);
     } finally {
       schedUnlock();
     }
   }
 
-  protected int popEventWaitingObjects(final ProcedureEvent event) {
-    return popEventWaitingProcedures(event);
-  }
-
-  protected int popEventWaitingProcedures(final ProcedureEventQueue event) {
-    int count = 0;
-    while (event.hasWaitingProcedures()) {
-      wakeProcedure(event.popWaitingProcedure(false));
-      count++;
-    }
+  /**
+   * Wakes up given waiting procedures by pushing them back into scheduler queues.
+   * @return size of given {@code waitQueue}.
+   */
+  protected int wakeWaitingProcedures(final ProcedureDeque waitQueue) {
+    int count = waitQueue.size();
+    // wakeProcedure adds to the front of queue, so we start from last in the
+    // waitQueue' queue, so that the procedure which was added first goes in the front for
+    // the scheduler queue.
+    addFront(waitQueue.descendingIterator());
+    waitQueue.clear();
     return count;
   }
 
-  protected void suspendProcedure(final ProcedureEventQueue event, final Procedure procedure) {
-    procedure.suspend();
-    event.suspendProcedure(procedure);
+  protected void waitProcedure(final ProcedureDeque waitQueue, final Procedure proc) {
+    waitQueue.addLast(proc);
   }
 
   protected void wakeProcedure(final Procedure procedure) {
-    procedure.resume();
+    if (LOG.isTraceEnabled()) LOG.trace("Wake " + procedure);
     push(procedure, /* addFront= */ true, /* notify= */false);
   }
+
 
   // ==========================================================================
   //  Internal helpers
   // ==========================================================================
   protected void schedLock() {
-    schedLock.lock();
+    schedulerLock.lock();
   }
 
   protected void schedUnlock() {
-    schedLock.unlock();
+    schedulerLock.unlock();
   }
 
   protected void wakePollIfNeeded(final int waitingCount) {
-    if (waitingCount > 1) {
-      schedWaitCond.signalAll();
-    } else if (waitingCount > 0) {
+    if (waitingCount <= 0) return;
+    if (waitingCount == 1) {
       schedWaitCond.signal();
+    } else {
+      schedWaitCond.signalAll();
     }
   }
 }

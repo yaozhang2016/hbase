@@ -23,16 +23,16 @@ import java.io.IOException;
 import java.util.ArrayList;
 
 import org.apache.hadoop.hbase.Cell;
-import org.apache.hadoop.hbase.CellComparator;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.hadoop.hbase.CompareOperator;
+import org.apache.hadoop.hbase.PrivateCellUtil;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.FilterProtos;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos.CompareType;
 import org.apache.hadoop.hbase.util.Bytes;
 
-import com.google.common.base.Preconditions;
+import org.apache.hbase.thirdparty.com.google.common.base.Preconditions;
 /**
  * This is a generic filter to be used to filter by comparison.  It takes an
  * operator (equal, greater, not equal, etc) and a byte [] comparator.
@@ -49,12 +49,15 @@ import com.google.common.base.Preconditions;
  * Multiple filters can be combined using {@link FilterList}.
  */
 @InterfaceAudience.Public
-@InterfaceStability.Stable
 public abstract class CompareFilter extends FilterBase {
-
-  /** Comparison operators. */
+  /**
+   * Comparison operators. For filters only!
+   * Use {@link CompareOperator} otherwise.
+   * It (intentionally) has at least the below enums with same names.
+   * @deprecated  since 2.0.0. Will be removed in 3.0.0. Use {@link CompareOperator} instead.
+   */
+  @Deprecated
   @InterfaceAudience.Public
-  @InterfaceStability.Stable
   public enum CompareOp {
     /** less than */
     LESS,
@@ -72,25 +75,43 @@ public abstract class CompareFilter extends FilterBase {
     NO_OP,
   }
 
-  protected CompareOp compareOp;
+  protected CompareOperator op;
   protected ByteArrayComparable comparator;
 
   /**
    * Constructor.
    * @param compareOp the compare op for row matching
    * @param comparator the comparator for row matching
+   * @deprecated Since 2.0.0. Will be removed in 3.0.0. Use other constructor.
    */
+  @Deprecated
   public CompareFilter(final CompareOp compareOp,
       final ByteArrayComparable comparator) {
-    this.compareOp = compareOp;
+    this(CompareOperator.valueOf(compareOp.name()), comparator);
+  }
+
+  /**
+   * Constructor.
+   * @param op the compare op for row matching
+   * @param comparator the comparator for row matching
+   */
+  public CompareFilter(final CompareOperator op,
+                       final ByteArrayComparable comparator) {
+    this.op = op;
     this.comparator = comparator;
   }
 
   /**
    * @return operator
+   * @deprecated  since 2.0.0. Will be removed in 3.0.0. Use {@link #getCompareOperator()} instead.
    */
+  @Deprecated
   public CompareOp getOperator() {
-    return compareOp;
+    return CompareOp.valueOf(op.name());
+  }
+
+  public CompareOperator getCompareOperator() {
+    return op;
   }
 
   /**
@@ -106,44 +127,103 @@ public abstract class CompareFilter extends FilterBase {
     return false;
   }
 
+  /**
+   * @deprecated Since 2.0.0. Will be removed in 3.0.0.
+   * Use {@link #compareRow(CompareOperator, ByteArrayComparable, Cell)}
+   */
+  @Deprecated
   protected boolean compareRow(final CompareOp compareOp, final ByteArrayComparable comparator,
       final Cell cell) {
     if (compareOp == CompareOp.NO_OP) {
       return true;
     }
-    int compareResult = CellComparator.compareRow(cell, comparator);
+    int compareResult = PrivateCellUtil.compareRow(cell, comparator);
     return compare(compareOp, compareResult);
   }
 
+  protected boolean compareRow(final CompareOperator op, final ByteArrayComparable comparator,
+                               final Cell cell) {
+    if (op == CompareOperator.NO_OP) {
+      return true;
+    }
+    int compareResult = PrivateCellUtil.compareRow(cell, comparator);
+    return compare(op, compareResult);
+  }
+
+  /**
+   * @deprecated Since 2.0.0. Will be removed in 3.0.0.
+   * Use {@link #compareFamily(CompareOperator, ByteArrayComparable, Cell)}
+   */
+  @Deprecated
   protected boolean compareFamily(final CompareOp compareOp, final ByteArrayComparable comparator,
       final Cell cell) {
     if (compareOp == CompareOp.NO_OP) {
       return true;
     }
-    int compareResult = CellComparator.compareFamily(cell, comparator);
+    int compareResult = PrivateCellUtil.compareFamily(cell, comparator);
     return compare(compareOp, compareResult);
   }
 
+  protected boolean compareFamily(final CompareOperator op, final ByteArrayComparable comparator,
+                                  final Cell cell) {
+    if (op == CompareOperator.NO_OP) {
+      return true;
+    }
+    int compareResult = PrivateCellUtil.compareFamily(cell, comparator);
+    return compare(op, compareResult);
+  }
+
+  /**
+   * @deprecated Since 2.0.0. Will be removed in 3.0.0.
+   * Use {@link #compareQualifier(CompareOperator, ByteArrayComparable, Cell)}
+   */
+  @Deprecated
   protected boolean compareQualifier(final CompareOp compareOp,
       final ByteArrayComparable comparator, final Cell cell) {
+    // We do not call through to the non-deprecated method for perf reasons.
     if (compareOp == CompareOp.NO_OP) {
       return true;
     }
-    int compareResult = CellComparator.compareQualifier(cell, comparator);
+    int compareResult = PrivateCellUtil.compareQualifier(cell, comparator);
     return compare(compareOp, compareResult);
   }
 
+  protected boolean compareQualifier(final CompareOperator op,
+                                     final ByteArrayComparable comparator, final Cell cell) {
+    // We do not call through to the non-deprecated method for perf reasons.
+    if (op == CompareOperator.NO_OP) {
+      return true;
+    }
+    int compareResult = PrivateCellUtil.compareQualifier(cell, comparator);
+    return compare(op, compareResult);
+  }
+
+  /**
+   * @deprecated Since 2.0.0. Will be removed in 3.0.0.
+   * Use {@link #compareValue(CompareOperator, ByteArrayComparable, Cell)}
+   */
+  @Deprecated
   protected boolean compareValue(final CompareOp compareOp, final ByteArrayComparable comparator,
       final Cell cell) {
+    // We do not call through to the non-deprecated method for perf reasons.
     if (compareOp == CompareOp.NO_OP) {
       return true;
     }
-    int compareResult = CellComparator.compareValue(cell, comparator);
+    int compareResult = PrivateCellUtil.compareValue(cell, comparator);
     return compare(compareOp, compareResult);
   }
 
-  private boolean compare(final CompareOp compareOp, int compareResult) {
-    switch (compareOp) {
+  protected boolean compareValue(final CompareOperator op, final ByteArrayComparable comparator,
+                                 final Cell cell) {
+    if (op == CompareOperator.NO_OP) {
+      return true;
+    }
+    int compareResult = PrivateCellUtil.compareValue(cell, comparator);
+    return compare(op, compareResult);
+  }
+
+  static boolean compare(final CompareOp op, int compareResult) {
+    switch (op) {
     case LESS:
       return compareResult <= 0;
     case LESS_OR_EQUAL:
@@ -157,7 +237,26 @@ public abstract class CompareFilter extends FilterBase {
     case GREATER:
       return compareResult >= 0;
     default:
-      throw new RuntimeException("Unknown Compare op " + compareOp.name());
+      throw new RuntimeException("Unknown Compare op " + op.name());
+    }
+  }
+
+  static boolean compare(final CompareOperator op, int compareResult) {
+    switch (op) {
+      case LESS:
+        return compareResult <= 0;
+      case LESS_OR_EQUAL:
+        return compareResult < 0;
+      case EQUAL:
+        return compareResult != 0;
+      case NOT_EQUAL:
+        return compareResult == 0;
+      case GREATER_OR_EQUAL:
+        return compareResult > 0;
+      case GREATER:
+        return compareResult >= 0;
+      default:
+        throw new RuntimeException("Unknown Compare op " + op.name());
     }
   }
 
@@ -165,20 +264,20 @@ public abstract class CompareFilter extends FilterBase {
   public static ArrayList<Object> extractArguments(ArrayList<byte []> filterArguments) {
     Preconditions.checkArgument(filterArguments.size() == 2,
                                 "Expected 2 but got: %s", filterArguments.size());
-    CompareOp compareOp = ParseFilter.createCompareOp(filterArguments.get(0));
+    CompareOperator op = ParseFilter.createCompareOperator(filterArguments.get(0));
     ByteArrayComparable comparator = ParseFilter.createComparator(
       ParseFilter.removeQuotesFromByteArray(filterArguments.get(1)));
 
     if (comparator instanceof RegexStringComparator ||
         comparator instanceof SubstringComparator) {
-      if (compareOp != CompareOp.EQUAL &&
-          compareOp != CompareOp.NOT_EQUAL) {
+      if (op != CompareOperator.EQUAL &&
+          op != CompareOperator.NOT_EQUAL) {
         throw new IllegalArgumentException ("A regexstring comparator and substring comparator" +
                                             " can only be used with EQUAL and NOT_EQUAL");
       }
     }
-    ArrayList<Object> arguments = new ArrayList<Object>();
-    arguments.add(compareOp);
+    ArrayList<Object> arguments = new ArrayList<>(2);
+    arguments.add(op);
     arguments.add(comparator);
     return arguments;
   }
@@ -189,7 +288,7 @@ public abstract class CompareFilter extends FilterBase {
   FilterProtos.CompareFilter convert() {
     FilterProtos.CompareFilter.Builder builder =
       FilterProtos.CompareFilter.newBuilder();
-    HBaseProtos.CompareType compareOp = CompareType.valueOf(this.compareOp.name());
+    HBaseProtos.CompareType compareOp = CompareType.valueOf(this.op.name());
     builder.setCompareOp(compareOp);
     if (this.comparator != null) builder.setComparator(ProtobufUtil.toComparator(this.comparator));
     return builder.build();
@@ -201,12 +300,12 @@ public abstract class CompareFilter extends FilterBase {
    * @return true if and only if the fields of the filter that are serialized
    * are equal to the corresponding fields in other.  Used for testing.
    */
+  @Override
   boolean areSerializedFieldsEqual(Filter o) {
     if (o == this) return true;
     if (!(o instanceof CompareFilter)) return false;
-
     CompareFilter other = (CompareFilter)o;
-    return this.getOperator().equals(other.getOperator()) &&
+    return this.getCompareOperator().equals(other.getCompareOperator()) &&
       (this.getComparator() == other.getComparator()
         || this.getComparator().areSerializedFieldsEqual(other.getComparator()));
   }
@@ -215,7 +314,7 @@ public abstract class CompareFilter extends FilterBase {
   public String toString() {
     return String.format("%s (%s, %s)",
         this.getClass().getSimpleName(),
-        this.compareOp.name(),
+        this.op.name(),
         Bytes.toStringBinary(this.comparator.getValue()));
   }
 }

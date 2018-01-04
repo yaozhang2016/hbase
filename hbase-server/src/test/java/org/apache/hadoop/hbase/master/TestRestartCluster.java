@@ -25,16 +25,15 @@ import static org.junit.Assert.assertTrue;
 import java.util.List;
 import java.util.Map;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.MetaTableAccessor;
 import org.apache.hadoop.hbase.MiniHBaseCluster;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableExistsException;
 import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.client.RegionInfo;
+import org.apache.hadoop.hbase.master.assignment.RegionStates;
 import org.apache.hadoop.hbase.testclassification.LargeTests;
 import org.apache.hadoop.hbase.testclassification.MasterTests;
 import org.apache.hadoop.hbase.util.Bytes;
@@ -43,10 +42,12 @@ import org.apache.hadoop.hbase.util.Threads;
 import org.junit.After;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Category({MasterTests.class, LargeTests.class})
 public class TestRestartCluster {
-  private static final Log LOG = LogFactory.getLog(TestRestartCluster.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestRestartCluster.class);
   private HBaseTestingUtility UTIL = new HBaseTestingUtility();
 
   private static final TableName[] TABLES = {
@@ -74,7 +75,7 @@ public class TestRestartCluster {
       UTIL.waitTableEnabled(TABLE);
     }
 
-    List<HRegionInfo> allRegions = MetaTableAccessor.getAllRegions(UTIL.getConnection(), false);
+    List<RegionInfo> allRegions = MetaTableAccessor.getAllRegions(UTIL.getConnection(), false);
     assertEquals(4, allRegions.size());
 
     LOG.info("\n\nShutting down cluster");
@@ -131,7 +132,7 @@ public class TestRestartCluster {
     SnapshotOfRegionAssignmentFromMeta snapshot = new SnapshotOfRegionAssignmentFromMeta(
       master.getConnection());
     snapshot.initialize();
-    Map<HRegionInfo, ServerName> regionToRegionServerMap
+    Map<RegionInfo, ServerName> regionToRegionServerMap
       = snapshot.getRegionToRegionServerMap();
 
     MiniHBaseCluster cluster = UTIL.getHBaseCluster();
@@ -160,7 +161,7 @@ public class TestRestartCluster {
     LOG.info("\n\nStarting cluster the second time with the same ports");
     try {
       cluster.getConf().setInt(
-        ServerManager.WAIT_ON_REGIONSERVERS_MINTOSTART, 4);
+          ServerManager.WAIT_ON_REGIONSERVERS_MINTOSTART, 3);
       master = cluster.startMaster().getMaster();
       for (int i = 0; i < 3; i++) {
         cluster.getConf().setInt(HConstants.REGIONSERVER_PORT, rsPorts[i]);
@@ -175,7 +176,7 @@ public class TestRestartCluster {
 
     // Make sure live regionservers are on the same host/port
     List<ServerName> localServers = master.getServerManager().getOnlineServersList();
-    assertEquals(4, localServers.size());
+    assertEquals(3, localServers.size());
     for (int i = 0; i < 3; i++) {
       boolean found = false;
       for (ServerName serverName: localServers) {
@@ -195,16 +196,17 @@ public class TestRestartCluster {
       Threads.sleep(100);
     }
 
-    snapshot =new SnapshotOfRegionAssignmentFromMeta(master.getConnection());
+    snapshot = new SnapshotOfRegionAssignmentFromMeta(master.getConnection());
     snapshot.initialize();
-    Map<HRegionInfo, ServerName> newRegionToRegionServerMap =
+    Map<RegionInfo, ServerName> newRegionToRegionServerMap =
       snapshot.getRegionToRegionServerMap();
     assertEquals(regionToRegionServerMap.size(), newRegionToRegionServerMap.size());
-    for (Map.Entry<HRegionInfo, ServerName> entry: newRegionToRegionServerMap.entrySet()) {
+    for (Map.Entry<RegionInfo, ServerName> entry: newRegionToRegionServerMap.entrySet()) {
       if (TableName.NAMESPACE_TABLE_NAME.equals(entry.getKey().getTable())) continue;
       ServerName oldServer = regionToRegionServerMap.get(entry.getKey());
       ServerName currentServer = entry.getValue();
-      assertEquals(oldServer.getHostAndPort(), currentServer.getHostAndPort());
+      LOG.info("Key=" + entry.getKey() + " oldServer=" + oldServer + ", currentServer=" + currentServer);
+      assertEquals(entry.getKey().toString(), oldServer.getAddress(), currentServer.getAddress());
       assertNotEquals(oldServer.getStartcode(), currentServer.getStartcode());
     }
   }

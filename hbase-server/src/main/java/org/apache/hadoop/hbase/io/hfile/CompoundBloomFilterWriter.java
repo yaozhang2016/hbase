@@ -23,13 +23,14 @@ import java.io.IOException;
 import java.util.LinkedList;
 import java.util.Queue;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellComparator;
 import org.apache.hadoop.hbase.CellUtil;
+import org.apache.hadoop.hbase.PrivateCellUtil;
 import org.apache.hadoop.hbase.KeyValueUtil;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.hbase.regionserver.BloomType;
 import org.apache.hadoop.hbase.util.BloomFilterChunk;
 import org.apache.hadoop.hbase.util.BloomFilterUtil;
@@ -46,8 +47,8 @@ import org.apache.hadoop.io.Writable;
 public class CompoundBloomFilterWriter extends CompoundBloomFilterBase
     implements BloomFilterWriter, InlineBlockWriter {
 
-  private static final Log LOG =
-    LogFactory.getLog(CompoundBloomFilterWriter.class);
+  private static final Logger LOG =
+    LoggerFactory.getLogger(CompoundBloomFilterWriter.class);
 
   /** The current chunk being written to */
   private BloomFilterChunk chunk;
@@ -70,7 +71,7 @@ public class CompoundBloomFilterWriter extends CompoundBloomFilterBase
     BloomFilterChunk chunk;
   }
 
-  private Queue<ReadyChunk> readyChunks = new LinkedList<ReadyChunk>();
+  private Queue<ReadyChunk> readyChunks = new LinkedList<>();
 
   /** The first key in the current Bloom filter chunk. */
   private byte[] firstKeyInChunk = null;
@@ -177,7 +178,8 @@ public class CompoundBloomFilterWriter extends CompoundBloomFilterBase
         firstKeyInChunk = CellUtil.copyRow(cell);
       } else {
         firstKeyInChunk =
-            CellUtil.getCellKeySerializedAsKeyValueKey(CellUtil.createFirstOnRowCol(cell));
+            PrivateCellUtil
+                .getCellKeySerializedAsKeyValueKey(PrivateCellUtil.createFirstOnRowCol(cell));
       }
       allocateNewChunk();
     }
@@ -248,7 +250,7 @@ public class CompoundBloomFilterWriter extends CompoundBloomFilterBase
     }
 
     /**
-     * This is modeled after {@link BloomFilterChunk.MetaWriter} for simplicity,
+     * This is modeled after {@link CompoundBloomFilterWriter.MetaWriter} for simplicity,
      * although the two metadata formats do not have to be consistent. This
      * does have to be consistent with how {@link
      * CompoundBloomFilter#CompoundBloomFilter(DataInput,

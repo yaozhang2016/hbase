@@ -32,20 +32,15 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Random;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.hbase.CellComparator;
+import org.apache.hadoop.hbase.CellComparatorImpl;
 import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
-import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.KeyValueUtil;
-import org.apache.hadoop.hbase.io.hfile.RandomKeyValueUtil;
-import org.apache.hadoop.hbase.testclassification.MediumTests;
-import org.apache.hadoop.hbase.testclassification.RegionServerTests;
+import org.apache.hadoop.hbase.client.ColumnFamilyDescriptorBuilder;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.io.hfile.BlockCache;
 import org.apache.hadoop.hbase.io.hfile.CacheConfig;
@@ -54,12 +49,17 @@ import org.apache.hadoop.hbase.io.hfile.CompoundBloomFilterWriter;
 import org.apache.hadoop.hbase.io.hfile.HFile;
 import org.apache.hadoop.hbase.io.hfile.HFileContext;
 import org.apache.hadoop.hbase.io.hfile.HFileContextBuilder;
+import org.apache.hadoop.hbase.io.hfile.RandomKeyValueUtil;
+import org.apache.hadoop.hbase.testclassification.MediumTests;
+import org.apache.hadoop.hbase.testclassification.RegionServerTests;
 import org.apache.hadoop.hbase.util.BloomFilterFactory;
-import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.BloomFilterUtil;
+import org.apache.hadoop.hbase.util.Bytes;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Tests writing Bloom filter blocks in the same part of the file as data
@@ -71,7 +71,7 @@ public class TestCompoundBloomFilter {
   private static final HBaseTestingUtility TEST_UTIL =
       new HBaseTestingUtility();
 
-  private static final Log LOG = LogFactory.getLog(
+  private static final Logger LOG = LoggerFactory.getLogger(
       TestCompoundBloomFilter.class);
 
   private static final int NUM_TESTS = 9;
@@ -142,10 +142,10 @@ public class TestCompoundBloomFilter {
   }
 
   private List<KeyValue> createSortedKeyValues(Random rand, int n) {
-    List<KeyValue> kvList = new ArrayList<KeyValue>(n);
+    List<KeyValue> kvList = new ArrayList<>(n);
     for (int i = 0; i < n; ++i)
       kvList.add(RandomKeyValueUtil.randomKeyValue(rand));
-    Collections.sort(kvList, CellComparator.COMPARATOR);
+    Collections.sort(kvList, CellComparatorImpl.COMPARATOR);
     return kvList;
   }
 
@@ -200,8 +200,9 @@ public class TestCompoundBloomFilter {
 
   private void readStoreFile(int t, BloomType bt, List<KeyValue> kvs,
       Path sfPath) throws IOException {
-    StoreFile sf = new StoreFile(fs, sfPath, conf, cacheConf, bt);
-    StoreFileReader r = sf.createReader();
+    HStoreFile sf = new HStoreFile(fs, sfPath, conf, cacheConf, bt, true);
+    sf.initReader();
+    StoreFileReader r = sf.getReader();
     final boolean pread = true; // does not really matter
     StoreFileScanner scanner = r.getStoreFileScanner(true, pread, false, 0, 0, false);
 
@@ -285,12 +286,11 @@ public class TestCompoundBloomFilter {
 
   private boolean isInBloom(StoreFileScanner scanner, byte[] row,
       byte[] qualifier) {
-    Scan scan = new Scan(row, row);
+    Scan scan = new Scan().withStartRow(row).withStopRow(row, true);
     scan.addColumn(Bytes.toBytes(RandomKeyValueUtil.COLUMN_FAMILY_NAME), qualifier);
-    Store store = mock(Store.class);
-    HColumnDescriptor hcd = mock(HColumnDescriptor.class);
-    when(hcd.getName()).thenReturn(Bytes.toBytes(RandomKeyValueUtil.COLUMN_FAMILY_NAME));
-    when(store.getFamily()).thenReturn(hcd);
+    HStore store = mock(HStore.class);
+    when(store.getColumnFamilyDescriptor())
+        .thenReturn(ColumnFamilyDescriptorBuilder.of(RandomKeyValueUtil.COLUMN_FAMILY_NAME));
     return scanner.shouldUseScanner(scan, store, Long.MIN_VALUE);
   }
 

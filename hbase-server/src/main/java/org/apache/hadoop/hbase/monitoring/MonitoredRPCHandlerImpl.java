@@ -22,11 +22,11 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.hbase.client.Operation;
 import org.apache.hadoop.hbase.util.Bytes;
 
-import org.apache.hadoop.hbase.shaded.com.google.protobuf.Message;
+import org.apache.hbase.thirdparty.com.google.protobuf.Message;
 
 /**
  * A MonitoredTask implementation designed for use with RPC Handlers 
@@ -224,7 +224,7 @@ public class MonitoredRPCHandlerImpl extends MonitoredTaskImpl
     if (getState() != State.RUNNING) {
       return map;
     }
-    Map<String, Object> rpcJSON = new HashMap<String, Object>();
+    Map<String, Object> rpcJSON = new HashMap<>();
     ArrayList paramList = new ArrayList();
     map.put("rpcCall", rpcJSON);
     rpcJSON.put("queuetimems", getRPCQueueTime());
@@ -251,6 +251,12 @@ public class MonitoredRPCHandlerImpl extends MonitoredTaskImpl
     if (getState() != State.RUNNING) {
       return super.toString();
     }
-    return super.toString() + ", rpcMethod=" + getRPC();
+    return super.toString()
+        + ", queuetimems=" + getRPCQueueTime()
+        + ", starttimems=" + getRPCStartTime()
+        + ", clientaddress=" + clientAddress
+        + ", remoteport=" + remotePort
+        + ", packetlength=" + getRPCPacketLength()
+        + ", rpcMethod=" + getRPC();
   }
 }

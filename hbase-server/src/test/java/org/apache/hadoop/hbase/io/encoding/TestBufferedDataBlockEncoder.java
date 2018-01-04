@@ -29,7 +29,6 @@ import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.KeyValue.Type;
 import org.apache.hadoop.hbase.codec.KeyValueCodecWithTags;
-import org.apache.hadoop.hbase.io.encoding.BufferedDataBlockEncoder.OffheapDecodedCell;
 import org.apache.hadoop.hbase.io.encoding.BufferedDataBlockEncoder.OnheapDecodedCell;
 import org.apache.hadoop.hbase.codec.Codec.Decoder;
 import org.apache.hadoop.hbase.codec.Codec.Encoder;
@@ -59,7 +58,7 @@ public class TestBufferedDataBlockEncoder {
   @Test
   public void testEnsureSpaceForKey() {
     BufferedDataBlockEncoder.SeekerState state = new BufferedDataBlockEncoder.SeekerState(
-        new ObjectIntPair<ByteBuffer>(), false);
+        new ObjectIntPair<>(), false);
     for (int i = 1; i <= 65536; ++i) {
       state.keyLength = i;
       state.ensureSpaceForKey();
@@ -108,7 +107,8 @@ public class TestBufferedDataBlockEncoder {
         kv2.getTagsLength());
     KeyValue kv3 = new KeyValue(Bytes.toBytes("r3"), Bytes.toBytes("cf"), Bytes.toBytes("qual"),
         HConstants.LATEST_TIMESTAMP, Bytes.toBytes("3"));
-    OffheapDecodedCell c3 = new OffheapDecodedCell(ByteBuffer.wrap(kv2.getKey()),
+    BufferedDataBlockEncoder.OffheapDecodedExtendedCell
+        c3 = new BufferedDataBlockEncoder.OffheapDecodedExtendedCell(ByteBuffer.wrap(kv2.getKey()),
         kv2.getRowLength(), kv2.getFamilyOffset() - KeyValue.ROW_OFFSET, kv2.getFamilyLength(),
         kv2.getQualifierOffset() - KeyValue.ROW_OFFSET, kv2.getQualifierLength(),
         kv2.getTimestamp(), kv2.getTypeByte(), ByteBuffer.wrap(kv2.getValueArray()),

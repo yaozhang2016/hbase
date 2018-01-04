@@ -19,6 +19,7 @@
 package org.apache.hadoop.hbase.master;
 
 import org.apache.hadoop.hbase.metrics.BaseSource;
+import org.apache.hadoop.hbase.metrics.OperationMetrics;
 
 public interface MetricsAssignmentManagerSource extends BaseSource {
 
@@ -40,17 +41,28 @@ public interface MetricsAssignmentManagerSource extends BaseSource {
   /**
    * Description
    */
-  String METRICS_DESCRIPTION = "Metrics about HBase master assingment manager.";
+  String METRICS_DESCRIPTION = "Metrics about HBase master assignment manager.";
 
+  // RIT metrics
   String RIT_COUNT_NAME = "ritCount";
   String RIT_COUNT_OVER_THRESHOLD_NAME = "ritCountOverThreshold";
   String RIT_OLDEST_AGE_NAME = "ritOldestAge";
-  String ASSIGN_TIME_NAME = "assign";
-  String BULK_ASSIGN_TIME_NAME = "bulkAssign";
+  String RIT_DURATION_NAME = "ritDuration";
 
-  void updateAssignmentTime(long time);
+  String RIT_COUNT_DESC = "Current number of Regions In Transition (Gauge).";
+  String RIT_COUNT_OVER_THRESHOLD_DESC =
+      "Current number of Regions In Transition over threshold time (Gauge).";
+  String RIT_OLDEST_AGE_DESC =
+      "Timestamp in milliseconds of the oldest Region In Transition (Gauge).";
+  String RIT_DURATION_DESC =
+      "Total durations in milliseconds for all Regions in Transition (Histogram).";
 
-  void updateBulkAssignTime(long time);
+  String ASSIGN_METRIC_PREFIX = "assign";
+  String UNASSIGN_METRIC_PREFIX = "unassign";
+  String SPLIT_METRIC_PREFIX = "split";
+  String MERGE_METRIC_PREFIX = "merge";
+
+  String OPERATION_COUNT_NAME = "operationCount";
 
   /**
    * Set the number of regions in transition.
@@ -72,4 +84,32 @@ public interface MetricsAssignmentManagerSource extends BaseSource {
    * @param age age of the oldest RIT.
    */
   void setRITOldestAge(long age);
+
+  void updateRitDuration(long duration);
+
+  /**
+   * TODO: Remove. This may not be needed now as assign and unassign counts are tracked separately
+   * Increment the count of operations (assign/unassign).
+   */
+  void incrementOperationCounter();
+
+  /**
+   * @return {@link OperationMetrics} containing common metrics for assign operation
+   */
+  OperationMetrics getAssignMetrics();
+
+  /**
+   * @return {@link OperationMetrics} containing common metrics for unassign operation
+   */
+  OperationMetrics getUnassignMetrics();
+
+  /**
+   * @return {@link OperationMetrics} containing common metrics for split operation
+   */
+  OperationMetrics getSplitMetrics();
+
+  /**
+   * @return {@link OperationMetrics} containing common metrics for merge operation
+   */
+  OperationMetrics getMergeMetrics();
 }

@@ -25,7 +25,7 @@ import java.util.Set;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * A utility class to manage a set of locks. Each lock is identified by a String which serves
@@ -49,8 +49,8 @@ public class KeyLocker<K> {
   private static final int NB_CONCURRENT_LOCKS = 1000;
 
   private final WeakObjectPool<K, ReentrantLock> lockPool =
-      new WeakObjectPool<K, ReentrantLock>(
-          new WeakObjectPool.ObjectFactory<K, ReentrantLock>() {
+      new WeakObjectPool<>(
+          new ObjectPool.ObjectFactory<K, ReentrantLock>() {
             @Override
             public ReentrantLock createObject(K key) {
               return new ReentrantLock();
@@ -85,7 +85,7 @@ public class KeyLocker<K> {
     Arrays.sort(keyArray);
 
     lockPool.purge();
-    Map<K, Lock> locks = new LinkedHashMap<K, Lock>(keyArray.length);
+    Map<K, Lock> locks = new LinkedHashMap<>(keyArray.length);
     for (Object o : keyArray) {
       @SuppressWarnings("unchecked")
       K key = (K)o;

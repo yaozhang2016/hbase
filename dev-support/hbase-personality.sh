@@ -36,6 +36,15 @@
 
 personality_plugins "all"
 
+if ! declare -f "yetus_info" >/dev/null; then
+
+  function yetus_info
+  {
+    echo "[$(date) INFO]: $*" 1>&2
+  }
+
+fi
+
 ## @description  Globals specific to this personality
 ## @audience     private
 ## @stability    evolving
@@ -51,19 +60,32 @@ function personality_globals
   #shellcheck disable=SC2034
   GITHUB_REPO="apache/hbase"
 
-  # TODO use PATCH_BRANCH to select hadoop versions to use.
-  # All supported Hadoop versions that we want to test the compilation with
-  HBASE_MASTER_HADOOP2_VERSIONS="2.6.1 2.6.2 2.6.3 2.6.4 2.6.5 2.7.1 2.7.2 2.7.3"
-  HBASE_MASTER_HADOOP3_VERSIONS="3.0.0-alpha1"
-
-  HBASE_HADOOP2_VERSIONS="2.4.0 2.4.1 2.5.0 2.5.1 2.5.2 2.6.1 2.6.2 2.6.3 2.6.4 2.6.5 2.7.1 2.7.2 2.7.3"
-  HBASE_HADOOP3_VERSIONS=""
-
   # TODO use PATCH_BRANCH to select jdk versions to use.
 
   # Override the maven options
   MAVEN_OPTS="${MAVEN_OPTS:-"-Xmx3100M"}"
+}
 
+## @description  Parse extra arguments required by personalities, if any.
+## @audience     private
+## @stability    evolving
+function personality_parse_args
+{
+  declare i
+
+  for i in "$@"; do
+    case ${i} in
+      --exclude-tests-url=*)
+        EXCLUDE_TESTS_URL=${i#*=}
+      ;;
+      --include-tests-url=*)
+        INCLUDE_TESTS_URL=${i#*=}
+      ;;
+      --hadoop-profile=*)
+        HADOOP_PROFILE=${i#*=}
+      ;;
+    esac
+  done
 }
 
 ## @description  Queue up modules for this personality
@@ -76,21 +98,40 @@ function personality_modules
   local repostatus=$1
   local testtype=$2
   local extra=""
+  local MODULES=(${CHANGED_MODULES[@]})
 
-  yetus_debug "Personality: ${repostatus} ${testtype}"
+  yetus_info "Personality: ${repostatus} ${testtype}"
 
   clear_personality_queue
 
   extra="-DHBasePatchProcess"
 
-  if [[ ${repostatus} == branch
-     && ${testtype} == mvninstall ]] ||
-     [[ "${BUILDMODE}" == full ]];then
+  if [[ -n "${HADOOP_PROFILE}" ]]; then
+    extra="${extra} -Dhadoop.profile=${HADOOP_PROFILE}"
+  fi
+
+  # BUILDMODE value is 'full' when there is no patch to be tested, and we are running checks on
+  # full source code instead. In this case, do full compiles, tests, etc instead of per
+  # module.
+  # Used in nightly runs.
+  # If BUILDMODE is 'patch', for unit and compile testtypes, there is no need to run individual
+  # modules if root is included. HBASE-18505
+  if [[ "${BUILDMODE}" == "full" ]] || \
+     [[ ( "${testtype}" == unit || "${testtype}" == compile ) && "${MODULES[*]}" =~ \. ]]; then
+    MODULES=(.)
+  fi
+
+  if [[ ${testtype} == mvninstall ]]; then
+    # shellcheck disable=SC2086
     personality_enqueue_module . ${extra}
     return
   fi
 
-  if [[ ${testtype} = findbugs ]]; then
+  if [[ ${testtype} == findbugs ]]; then
+    # Run findbugs on each module individually to diff pre-patch and post-patch results and
+    # report new warnings for changed modules only.
+    # For some reason, findbugs on root is not working, but running on individual modules is
+    # working. For time being, let it run on original list of CHANGED_MODULES. HBASE-19491
     for module in "${CHANGED_MODULES[@]}"; do
       # skip findbugs on hbase-shell and hbase-it. hbase-it has nothing
       # in src/main/java where findbugs goes to look
@@ -109,33 +150,10 @@ function personality_modules
   # If EXCLUDE_TESTS_URL/INCLUDE_TESTS_URL is set, fetches the url
   # and sets -Dtest.exclude.pattern/-Dtest to exclude/include the
   # tests respectively.
-  if [[ ${testtype} = unit ]]; then
-    extra="${extra} -PrunAllTests"
-    if [[ -n "$EXCLUDE_TESTS_URL" ]]; then
-        wget "$EXCLUDE_TESTS_URL" -O "excludes"
-        if [[ $? -eq 0 ]]; then
-          excludes=$(cat excludes)
-          if [[ -n "${excludes}" ]]; then
-            extra="${extra} -Dtest.exclude.pattern=${excludes}"
-          fi
-          rm excludes
-        else
-          echo "Wget error $? in fetching excludes file from url" \
-               "${EXCLUDE_TESTS_URL}. Ignoring and proceeding."
-        fi
-    elif [[ -n "$INCLUDE_TESTS_URL" ]]; then
-        wget "$INCLUDE_TESTS_URL" -O "includes"
-        if [[ $? -eq 0 ]]; then
-          includes=$(cat includes)
-          if [[ -n "${includes}" ]]; then
-            extra="${extra} -Dtest=${includes}"
-          fi
-          rm includes
-        else
-          echo "Wget error $? in fetching includes file from url" \
-               "${INCLUDE_TESTS_URL}. Ignoring and proceeding."
-        fi
-    fi
+  if [[ ${testtype} == unit ]]; then
+    local tests_arg=""
+    get_include_exclude_tests_arg tests_arg
+    extra="${extra} -PrunAllTests ${tests_arg}"
 
     # Inject the jenkins build-id for our surefire invocations
     # Used by zombie detection stuff, even though we're not including that yet.
@@ -144,10 +162,47 @@ function personality_modules
     fi
   fi
 
-  for module in "${CHANGED_MODULES[@]}"; do
+  for module in "${MODULES[@]}"; do
     # shellcheck disable=SC2086
     personality_enqueue_module ${module} ${extra}
   done
+}
+
+## @description  Uses relevant include/exclude env variable to fetch list of included/excluded
+#                tests and sets given variable to arguments to be passes to maven command.
+## @audience     private
+## @stability    evolving
+## @param        name of variable to set with maven arguments
+function get_include_exclude_tests_arg
+{
+  local  __resultvar=$1
+  yetus_info "EXCLUDE_TESTS_URL=${EXCLUDE_TESTS_URL}"
+  yetus_info "INCLUDE_TESTS_URL=${INCLUDE_TESTS_URL}"
+  if [[ -n "${EXCLUDE_TESTS_URL}" ]]; then
+      if wget "${EXCLUDE_TESTS_URL}" -O "excludes"; then
+        excludes=$(cat excludes)
+        yetus_debug "excludes=${excludes}"
+        if [[ -n "${excludes}" ]]; then
+          eval "${__resultvar}='-Dtest.exclude.pattern=${excludes}'"
+        fi
+        rm excludes
+      else
+        yetus_error "Wget error $? in fetching excludes file from url" \
+             "${EXCLUDE_TESTS_URL}. Ignoring and proceeding."
+      fi
+  elif [[ -n "$INCLUDE_TESTS_URL" ]]; then
+      if wget "$INCLUDE_TESTS_URL" -O "includes"; then
+        includes=$(cat includes)
+        yetus_debug "includes=${includes}"
+        if [[ -n "${includes}" ]]; then
+          eval "${__resultvar}='-Dtest=${includes}'"
+        fi
+        rm includes
+      else
+        yetus_error "Wget error $? in fetching includes file from url" \
+             "${INCLUDE_TESTS_URL}. Ignoring and proceeding."
+      fi
+  fi
 }
 
 ###################################################
@@ -155,6 +210,61 @@ function personality_modules
 # TODO break them into individual files so it's easier to maintain them?
 
 # TODO line length check? could ignore all java files since checkstyle gets them.
+
+###################################################
+
+add_test_type shadedjars
+
+
+function shadedjars_initialize
+{
+  yetus_debug "initializing shaded client checks."
+  maven_add_install shadedjars
+}
+
+## @description  only run the test if java changes.
+## @audience     private
+## @stability    evolving
+## @param        filename
+function shadedjars_filefilter
+{
+  local filename=$1
+
+  if [[ ${filename} =~ \.java$ ]] || [[ ${filename} =~ pom.xml$ ]]; then
+    add_test shadedjars
+  fi
+}
+
+## @description test the shaded client artifacts
+## @audience private
+## @stability evolving
+## @param repostatus
+function shadedjars_rebuild
+{
+  local repostatus=$1
+  local logfile="${PATCH_DIR}/${repostatus}-shadedjars.txt"
+
+  if ! verify_needed_test shadedjars; then
+    return 0
+  fi
+
+  big_console_header "Checking shaded client builds on ${repostatus}"
+
+  echo_and_redirect "${logfile}" \
+    "${MAVEN}" "${MAVEN_ARGS[@]}" clean verify -fae --batch-mode \
+      -pl hbase-shaded/hbase-shaded-check-invariants -am \
+      -Dtest=NoUnitTests -DHBasePatchProcess -Prelease \
+      -Dmaven.javadoc.skip=true -Dcheckstyle.skip=true -Dfindbugs.skip=true
+
+  count=$(${GREP} -c '\[ERROR\]' "${logfile}")
+  if [[ ${count} -gt 0 ]]; then
+    add_vote_table -1 shadedjars "${repostatus} has ${count} errors when building our shaded downstream artifacts."
+    return 1
+  fi
+
+  add_vote_table +1 shadedjars "${repostatus} has no errors when building our shaded downstream artifacts."
+  return 0
+}
 
 ###################################################
 
@@ -168,9 +278,33 @@ function hadoopcheck_filefilter
 {
   local filename=$1
 
-  if [[ ${filename} =~ \.java$ ]]; then
+  if [[ ${filename} =~ \.java$ ]] || [[ ${filename} =~ pom.xml$ ]]; then
     add_test hadoopcheck
   fi
+}
+
+## @description  Parse args to detect if QUICK_HADOOPCHECK mode is enabled.
+## @audience     private
+## @stability    evolving
+function hadoopcheck_parse_args
+{
+  declare i
+
+  for i in "$@"; do
+    case ${i} in
+      --quick-hadoopcheck)
+        QUICK_HADOOPCHECK=true
+      ;;
+    esac
+  done
+}
+
+## @description  Adds QUICK_HADOOPCHECK env variable to DOCKER_EXTRAARGS.
+## @audience     private
+## @stability    evolving
+function hadoopcheck_docker_support
+{
+  DOCKER_EXTRAARGS=("${DOCKER_EXTRAARGS[@]}" "--env=QUICK_HADOOPCHECK=${QUICK_HADOOPCHECK}")
 }
 
 ## @description  hadoopcheck test
@@ -191,14 +325,31 @@ function hadoopcheck_rebuild
     return 0
   fi
 
+  if ! verify_needed_test hadoopcheck; then
+    return 0
+  fi
+
   big_console_header "Compiling against various Hadoop versions"
 
-  if [[ "${PATCH_BRANCH}" = "master" ]]; then
-    hbase_hadoop2_versions=${HBASE_MASTER_HADOOP2_VERSIONS}
-    hbase_hadoop3_versions=${HBASE_MASTER_HADOOP3_VERSIONS}
-  else
-    hbase_hadoop2_versions=${HBASE_HADOOP2_VERSIONS}
-    hbase_hadoop3_versions=${HBASE_HADOOP3_VERSIONS}
+  # All supported Hadoop versions that we want to test the compilation with
+  # See the Hadoop section on prereqs in the HBase Reference Guide
+  hbase_common_hadoop2_versions="2.6.1 2.6.2 2.6.3 2.6.4 2.6.5 2.7.1 2.7.2 2.7.3 2.7.4"
+  if [[ "${PATCH_BRANCH}" = branch-1* ]]; then
+    yetus_info "Setting Hadoop versions to test based on branch-1-ish rules."
+    if [[ "${QUICK_HADOOPCHECK}" == "true" ]]; then
+      hbase_hadoop2_versions="2.4.1 2.5.2 2.6.5 2.7.4"
+    else
+      hbase_hadoop2_versions="2.4.0 2.4.1 2.5.0 2.5.1 2.5.2 ${hbase_common_hadoop2_versions}"
+    fi
+    hbase_hadoop3_versions=""
+  else # master or a feature branch
+    yetus_info "Setting Hadoop versions to test based on branch-2/master/feature branch rules."
+    if [[ "${QUICK_HADOOPCHECK}" == "true" ]]; then
+      hbase_hadoop2_versions="2.6.5 2.7.4"
+    else
+      hbase_hadoop2_versions="${hbase_common_hadoop2_versions}"
+    fi
+    hbase_hadoop3_versions="3.0.0"
   fi
 
   export MAVEN_OPTS="${MAVEN_OPTS}"
@@ -208,7 +359,7 @@ function hadoopcheck_rebuild
       "${MAVEN}" clean install \
         -DskipTests -DHBasePatchProcess \
         -Dhadoop-two.version="${hadoopver}"
-    count=$(${GREP} -c ERROR "${logfile}")
+    count=$(${GREP} -c '\[ERROR\]' "${logfile}")
     if [[ ${count} -gt 0 ]]; then
       add_vote_table -1 hadoopcheck "${BUILDMODEMSG} causes ${count} errors with Hadoop v${hadoopver}."
       ((result=result+1))
@@ -220,9 +371,9 @@ function hadoopcheck_rebuild
     echo_and_redirect "${logfile}" \
       "${MAVEN}" clean install \
         -DskipTests -DHBasePatchProcess \
-        -Dhadoop-three.version="${hadoopver} \
-        -Dhadoop.profile=3.0"
-    count=$(${GREP} -c ERROR "${logfile}")
+        -Dhadoop-three.version="${hadoopver}" \
+        -Dhadoop.profile=3.0
+    count=$(${GREP} -c '\[ERROR\]' "${logfile}")
     if [[ ${count} -gt 0 ]]; then
       add_vote_table -1 hadoopcheck "${BUILDMODEMSG} causes ${count} errors with Hadoop v${hadoopver}."
       ((result=result+1))
@@ -259,7 +410,7 @@ function hbaseprotoc_filefilter
   fi
 }
 
-## @description  hadoopcheck test
+## @description  check hbase proto compilation
 ## @audience     private
 ## @stability    evolving
 ## @param        repostatus
@@ -302,7 +453,7 @@ function hbaseprotoc_rebuild
     fn=$(module_file_fragment "${module}")
     logfile="${PATCH_DIR}/patch-hbaseprotoc-${fn}.txt"
 
-    count=$(${GREP} -c ERROR "${logfile}")
+    count=$(${GREP} -c '\[ERROR\]' "${logfile}")
 
     if [[ ${count} -gt 0 ]]; then
       module_status ${i} -1 "patch-hbaseprotoc-${fn}.txt" "Patch generated "\
@@ -358,15 +509,21 @@ function hbaseanti_patchfile
 
   start_clock
 
-  warnings=$(${GREP} 'new TreeMap<byte.*()' "${patchfile}")
+  warnings=$(${GREP} -c 'new TreeMap<byte.*()' "${patchfile}")
   if [[ ${warnings} -gt 0 ]]; then
-    add_vote_table -1 hbaseanti "" "The patch appears to have anti-pattern where BYTES_COMPARATOR was omitted: ${warnings}."
+    add_vote_table -1 hbaseanti "" "The patch appears to have anti-pattern where BYTES_COMPARATOR was omitted."
     ((result=result+1))
   fi
 
-  warnings=$(${GREP} 'import org.apache.hadoop.classification' "${patchfile}")
+  warnings=$(${GREP} -c 'import org.apache.hadoop.classification' "${patchfile}")
   if [[ ${warnings} -gt 0 ]]; then
-    add_vote_table -1 hbaseanti "" "The patch appears use Hadoop classification instead of HBase: ${warnings}."
+    add_vote_table -1 hbaseanti "" "The patch appears use Hadoop classification instead of HBase."
+    ((result=result+1))
+  fi
+
+  warnings=$(${GREP} -c 'import org.codehaus.jackson' "${patchfile}")
+  if [[ ${warnings} -gt 0 ]]; then
+    add_vote_table -1 hbaseanti "" "The patch appears use Jackson 1 classes/annotations."
     ((result=result+1))
   fi
 
@@ -388,7 +545,7 @@ function mvnsite_filefilter
   local filename=$1
 
   if [[ ${BUILDTOOL} = maven ]]; then
-    if [[ ${filename} =~ src/main/site || ${filename} =~ src/main/asciidoc ]]; then
+    if [[ ${filename} =~ src/site || ${filename} =~ src/main/asciidoc ]]; then
       yetus_debug "tests/mvnsite: ${filename}"
       add_test mvnsite
     fi

@@ -21,21 +21,19 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
 
-import com.google.common.collect.ImmutableMap;
+import org.apache.hbase.thirdparty.com.google.common.collect.ImmutableMap;
 
 /**
  * Provides server side metrics related to scan operations.
  */
 @InterfaceAudience.Public
-@InterfaceStability.Evolving
 public class ServerSideScanMetrics {
   /**
    * Hash to hold the String -&gt; Atomic Long mappings for each metric
    */
-  private final Map<String, AtomicLong> counters = new HashMap<String, AtomicLong>();
+  private final Map<String, AtomicLong> counters = new HashMap<>();
 
   /**
    * Create a new counter with the specified name
@@ -48,19 +46,35 @@ public class ServerSideScanMetrics {
     return c;
   }
 
-  public static final String COUNT_OF_ROWS_SCANNED_KEY = "ROWS_SCANNED";
-  public static final String COUNT_OF_ROWS_FILTERED_KEY = "ROWS_FILTERED";
+  public static final String COUNT_OF_ROWS_SCANNED_KEY_METRIC_NAME = "ROWS_SCANNED";
+  public static final String COUNT_OF_ROWS_FILTERED_KEY_METRIC_NAME = "ROWS_FILTERED";
+
+  /**
+   * @deprecated As of release 2.0.0, this will be removed in HBase 3.0.0
+   *             (<a href="https://issues.apache.org/jira/browse/HBASE-17886">HBASE-17886</a>).
+   *             Use {@link #COUNT_OF_ROWS_SCANNED_KEY_METRIC_NAME}.
+   */
+  @Deprecated
+  public static final String COUNT_OF_ROWS_SCANNED_KEY = COUNT_OF_ROWS_SCANNED_KEY_METRIC_NAME;
+
+  /**
+   * @deprecated As of release 2.0.0, this will be removed in HBase 3.0.0
+   *             (<a href="https://issues.apache.org/jira/browse/HBASE-17886">HBASE-17886</a>).
+   *             Use {@link #COUNT_OF_ROWS_FILTERED_KEY_METRIC_NAME}.
+   */
+  @Deprecated
+  public static final String COUNT_OF_ROWS_FILTERED_KEY = COUNT_OF_ROWS_FILTERED_KEY_METRIC_NAME;
 
   /**
    * number of rows filtered during scan RPC
    */
-  public final AtomicLong countOfRowsFiltered = createCounter(COUNT_OF_ROWS_FILTERED_KEY);
+  public final AtomicLong countOfRowsFiltered = createCounter(COUNT_OF_ROWS_FILTERED_KEY_METRIC_NAME);
 
   /**
    * number of rows scanned during scan RPC. Not every row scanned will be returned to the client
    * since rows may be filtered.
    */
-  public final AtomicLong countOfRowsScanned = createCounter(COUNT_OF_ROWS_SCANNED_KEY);
+  public final AtomicLong countOfRowsScanned = createCounter(COUNT_OF_ROWS_SCANNED_KEY_METRIC_NAME);
 
   /**
    * @param counterName
@@ -106,11 +120,20 @@ public class ServerSideScanMetrics {
    * @return A Map of String -&gt; Long for metrics
    */
   public Map<String, Long> getMetricsMap() {
+    return getMetricsMap(true);
+  }
+
+  /**
+   * Get all of the values. If reset is true, we will reset the all AtomicLongs back to 0.
+   * @param reset whether to reset the AtomicLongs to 0.
+   * @return A Map of String -&gt; Long for metrics
+   */
+  public Map<String, Long> getMetricsMap(boolean reset) {
     // Create a builder
     ImmutableMap.Builder<String, Long> builder = ImmutableMap.builder();
-    // For every entry add the value and reset the AtomicLong back to zero
     for (Map.Entry<String, AtomicLong> e : this.counters.entrySet()) {
-      builder.put(e.getKey(), e.getValue().getAndSet(0));
+      long value = reset ? e.getValue().getAndSet(0) : e.getValue().get();
+      builder.put(e.getKey(), value);
     }
     // Build the immutable map so that people can't mess around with it.
     return builder.build();

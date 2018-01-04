@@ -26,8 +26,6 @@ import static org.junit.Assert.assertTrue;
 import java.util.Arrays;
 import java.util.List;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.Coprocessor;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
@@ -54,9 +52,9 @@ import org.apache.hadoop.hbase.security.access.Permission.Action;
 import org.apache.hadoop.hbase.testclassification.LargeTests;
 import org.apache.hadoop.hbase.testclassification.SecurityTests;
 import org.apache.hadoop.hbase.util.Bytes;
-import org.apache.hadoop.hbase.util.TestTableName;
+import org.apache.hadoop.hbase.TestTableName;
 import org.apache.hadoop.hbase.zookeeper.ZKUtil;
-import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher;
+import org.apache.hadoop.hbase.zookeeper.ZKWatcher;
 import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.Before;
@@ -64,10 +62,12 @@ import org.junit.BeforeClass;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Category({SecurityTests.class, LargeTests.class})
 public class TestAccessController2 extends SecureTestUtil {
-  private static final Log LOG = LogFactory.getLog(TestAccessController2.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestAccessController2.class);
 
   private static final byte[] TEST_ROW = Bytes.toBytes("test");
   private static final byte[] TEST_FAMILY = Bytes.toBytes("f");
@@ -384,6 +384,7 @@ public class TestAccessController2 extends SecureTestUtil {
           Scan s1 = new Scan();
           s1.addFamily(TEST_FAMILY_2);
           try (ResultScanner scanner1 = table.getScanner(s1);) {
+            scanner1.next();
           }
         }
         return null;
@@ -414,6 +415,7 @@ public class TestAccessController2 extends SecureTestUtil {
           Scan s1 = new Scan();
           s1.addFamily(TEST_FAMILY_2);
           try (ResultScanner scanner1 = table.getScanner(s1);) {
+            scanner1.next();
           }
         }
         return null;
@@ -428,6 +430,7 @@ public class TestAccessController2 extends SecureTestUtil {
           Scan s1 = new Scan();
           s1.addColumn(TEST_FAMILY, Q2);
           try (ResultScanner scanner1 = table.getScanner(s1);) {
+            scanner1.next();
           }
         }
         return null;
@@ -482,14 +485,13 @@ public class TestAccessController2 extends SecureTestUtil {
     MasterCoprocessorHost cpHost =
         TEST_UTIL.getMiniHBaseCluster().getMaster().getMasterCoprocessorHost();
     cpHost.load(MyAccessController.class, Coprocessor.PRIORITY_HIGHEST, conf);
-    AccessController ACCESS_CONTROLLER = (AccessController) cpHost.findCoprocessor(
-      MyAccessController.class.getName());
+    AccessController ACCESS_CONTROLLER = cpHost.findCoprocessor(MyAccessController.class);
     MasterCoprocessorEnvironment CP_ENV = cpHost.createEnvironment(
-      MyAccessController.class, ACCESS_CONTROLLER, Coprocessor.PRIORITY_HIGHEST, 1, conf);
+      ACCESS_CONTROLLER, Coprocessor.PRIORITY_HIGHEST, 1, conf);
     RegionServerCoprocessorHost rsHost = TEST_UTIL.getMiniHBaseCluster().getRegionServer(0)
         .getRegionServerCoprocessorHost();
     RegionServerCoprocessorEnvironment RSCP_ENV = rsHost.createEnvironment(
-      MyAccessController.class, ACCESS_CONTROLLER, Coprocessor.PRIORITY_HIGHEST, 1, conf);
+      ACCESS_CONTROLLER, Coprocessor.PRIORITY_HIGHEST, 1, conf);
   }
 
   @Test (timeout=180000)
@@ -507,7 +509,7 @@ public class TestAccessController2 extends SecureTestUtil {
 
     // Namespace needs this, as they follow the lazy creation of ACL znode.
     grantOnNamespace(TEST_UTIL, TESTGROUP1_USER1.getShortName(), ns, Action.ADMIN);
-    ZooKeeperWatcher zkw = TEST_UTIL.getMiniHBaseCluster().getMaster().getZooKeeper();
+    ZKWatcher zkw = TEST_UTIL.getMiniHBaseCluster().getMaster().getZooKeeper();
     assertTrue("The acl znode for table should exist",  ZKUtil.checkExists(zkw, baseAclZNode +
         table.getNameAsString()) != -1);
     assertTrue("The acl znode for namespace should exist", ZKUtil.checkExists(zkw, baseAclZNode +

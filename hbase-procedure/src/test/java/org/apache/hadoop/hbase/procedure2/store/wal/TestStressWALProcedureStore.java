@@ -22,8 +22,6 @@ import java.io.IOException;
 import java.util.Random;
 import java.util.concurrent.atomic.AtomicLong;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
@@ -38,7 +36,10 @@ import org.apache.hadoop.hbase.testclassification.MasterTests;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
+import org.junit.Ignore;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -47,7 +48,7 @@ import static org.junit.Assert.fail;
 
 @Category({MasterTests.class, LargeTests.class})
 public class TestStressWALProcedureStore {
-  private static final Log LOG = LogFactory.getLog(TestWALProcedureStore.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestWALProcedureStore.class);
 
   private static final int PROCEDURE_STORE_SLOTS = 8;
 
@@ -74,7 +75,7 @@ public class TestStressWALProcedureStore {
     assertTrue(testDir.depth() > 1);
 
     logDir = new Path(testDir, "proc-logs");
-    procStore = ProcedureTestingUtility.createWalStore(htu.getConfiguration(), fs, logDir);
+    procStore = ProcedureTestingUtility.createWalStore(htu.getConfiguration(), logDir);
     procStore.start(PROCEDURE_STORE_SLOTS);
     procStore.recoverLease();
 
@@ -131,7 +132,8 @@ public class TestStressWALProcedureStore {
     assertEquals(1, procStore.getActiveLogs().size());
   }
 
-  @Test
+  @Ignore @Test // REENABLE after merge of
+  // https://github.com/google/protobuf/issues/2228#issuecomment-252058282
   public void testEntrySizeLimit() throws Exception {
     final int NITEMS = 20;
     for (int i = 1; i <= NITEMS; ++i) {

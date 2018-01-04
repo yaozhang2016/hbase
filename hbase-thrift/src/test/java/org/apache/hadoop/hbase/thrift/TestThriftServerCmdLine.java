@@ -26,8 +26,6 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.testclassification.ClientTests;
 import org.apache.hadoop.hbase.testclassification.LargeTests;
@@ -50,8 +48,9 @@ import org.junit.experimental.categories.Category;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 import org.junit.runners.Parameterized.Parameters;
-
-import com.google.common.base.Joiner;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.apache.hbase.thirdparty.com.google.common.base.Joiner;
 
 /**
  * Start the HBase Thrift server on a random port through the command-line
@@ -61,8 +60,8 @@ import com.google.common.base.Joiner;
 @RunWith(Parameterized.class)
 public class TestThriftServerCmdLine {
 
-  private static final Log LOG =
-      LogFactory.getLog(TestThriftServerCmdLine.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(TestThriftServerCmdLine.class);
 
   private final ImplType implType;
   private boolean specifyFramed;
@@ -82,7 +81,7 @@ public class TestThriftServerCmdLine {
 
   @Parameters
   public static Collection<Object[]> getParameters() {
-    Collection<Object[]> parameters = new ArrayList<Object[]>();
+    Collection<Object[]> parameters = new ArrayList<>();
     for (ImplType implType : ImplType.values()) {
       for (boolean specifyFramed : new boolean[] {false, true}) {
         for (boolean specifyBindIP : new boolean[] {false, true}) {
@@ -151,7 +150,7 @@ public class TestThriftServerCmdLine {
 
   @Test(timeout=600000)
   public void testRunThriftServer() throws Exception {
-    List<String> args = new ArrayList<String>();
+    List<String> args = new ArrayList<>();
     if (implType != null) {
       String serverTypeOption = implType.toString();
       assertTrue(serverTypeOption.startsWith("-"));
@@ -160,6 +159,10 @@ public class TestThriftServerCmdLine {
     port = HBaseTestingUtility.randomFreePort();
     args.add("-" + ThriftServer.PORT_OPTION);
     args.add(String.valueOf(port));
+    args.add("-infoport");
+    int infoPort = HBaseTestingUtility.randomFreePort();
+    args.add(String.valueOf(infoPort));
+
     if (specifyFramed) {
       args.add("-" + ThriftServer.FRAMED_OPTION);
     }

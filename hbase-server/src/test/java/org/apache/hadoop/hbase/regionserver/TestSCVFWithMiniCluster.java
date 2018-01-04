@@ -78,14 +78,14 @@ public class TestSCVFWithMiniCluster {
 
     util.startMiniCluster(1);
 
-    Admin admin = util.getHBaseAdmin();
+    Admin admin = util.getAdmin();
     destroy(admin, HBASE_TABLE_NAME);
     create(admin, HBASE_TABLE_NAME, FAMILY_A, FAMILY_B);
     admin.close();
     htable = util.getConnection().getTable(HBASE_TABLE_NAME);
 
     /* Add some values */
-    List<Put> puts = new ArrayList<Put>();
+    List<Put> puts = new ArrayList<>();
 
     /* Add a row with 'a:foo' = false */
     Put put = new Put(Bytes.toBytes("1"));

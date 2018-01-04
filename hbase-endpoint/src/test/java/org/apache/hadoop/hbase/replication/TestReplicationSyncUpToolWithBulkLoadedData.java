@@ -21,15 +21,13 @@ import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.coprocessor.CoprocessorHost;
-import org.apache.hadoop.hbase.mapreduce.LoadIncrementalHFiles;
+import org.apache.hadoop.hbase.tool.LoadIncrementalHFiles;
 import org.apache.hadoop.hbase.replication.regionserver.TestSourceFSConfigurationProvider;
 import org.apache.hadoop.hbase.testclassification.LargeTests;
 import org.apache.hadoop.hbase.testclassification.ReplicationTests;
@@ -37,12 +35,14 @@ import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.HFileTestUtil;
 import org.junit.BeforeClass;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Category({ ReplicationTests.class, LargeTests.class })
 public class TestReplicationSyncUpToolWithBulkLoadedData extends TestReplicationSyncUpTool {
 
-  private static final Log LOG = LogFactory
-      .getLog(TestReplicationSyncUpToolWithBulkLoadedData.class);
+  private static final Logger LOG = LoggerFactory
+      .getLogger(TestReplicationSyncUpToolWithBulkLoadedData.class);
 
   @BeforeClass
   public static void setUpBeforeClass() throws Exception {
@@ -71,7 +71,7 @@ public class TestReplicationSyncUpToolWithBulkLoadedData extends TestReplication
      * Prepare 16 random hfile ranges required for creating hfiles
      */
     Iterator<String> randomHFileRangeListIterator = null;
-    Set<String> randomHFileRanges = new HashSet<String>(16);
+    Set<String> randomHFileRanges = new HashSet<>(16);
     for (int i = 0; i < 16; i++) {
       randomHFileRanges.add(UUID.randomUUID().toString());
     }

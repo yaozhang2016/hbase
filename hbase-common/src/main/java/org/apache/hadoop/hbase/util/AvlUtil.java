@@ -22,8 +22,8 @@ package org.apache.hadoop.hbase.util;
 import java.util.Iterator;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceStability;
 
 /**
  * Helper class that allows to create and manipulate an AvlTree.
@@ -261,7 +261,7 @@ public final class AvlUtil {
         final AvlNodeVisitor<TNode> visitor) {
       if (root == null) return;
 
-      final AvlTreeIterator<TNode> iterator = new AvlTreeIterator<TNode>(root);
+      final AvlTreeIterator<TNode> iterator = new AvlTreeIterator<>(root);
       boolean visitNext = true;
       while (visitNext && iterator.hasNext()) {
         visitNext = visitor.visitNode(iterator.next());

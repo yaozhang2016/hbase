@@ -20,13 +20,15 @@ package org.apache.hadoop.hbase.regionserver;
 import java.io.IOException;
 import java.util.List;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.TableName;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.apache.hadoop.hbase.client.TableDescriptor;
+import org.apache.hadoop.hbase.client.TableDescriptorBuilder;
+import org.apache.hadoop.hbase.procedure2.util.StringUtils;
 
 /**
  * Split size is the number of regions that are on this server that all are
@@ -43,8 +45,9 @@ import org.apache.hadoop.hbase.classification.InterfaceAudience;
  */
 @InterfaceAudience.Private
 public class IncreasingToUpperBoundRegionSplitPolicy extends ConstantSizeRegionSplitPolicy {
+  private static final Logger LOG =
+      LoggerFactory.getLogger(IncreasingToUpperBoundRegionSplitPolicy.class);
 
-  private static final Log LOG = LogFactory.getLog(IncreasingToUpperBoundRegionSplitPolicy.class);
   protected long initialSize;
 
   @Override
@@ -55,13 +58,13 @@ public class IncreasingToUpperBoundRegionSplitPolicy extends ConstantSizeRegionS
     if (initialSize > 0) {
       return;
     }
-    HTableDescriptor desc = region.getTableDesc();
+    TableDescriptor desc = region.getTableDescriptor();
     if (desc != null) {
       initialSize = 2 * desc.getMemStoreFlushSize();
     }
     if (initialSize <= 0) {
       initialSize = 2 * conf.getLong(HConstants.HREGION_MEMSTORE_FLUSH_SIZE,
-                                     HTableDescriptor.DEFAULT_MEMSTORE_FLUSH_SIZE);
+                                     TableDescriptorBuilder.DEFAULT_MEMSTORE_FLUSH_SIZE);
     }
   }
 
@@ -74,7 +77,7 @@ public class IncreasingToUpperBoundRegionSplitPolicy extends ConstantSizeRegionS
     // Get size to check
     long sizeToCheck = getSizeToCheck(tableRegionsCount);
 
-    for (Store store : region.getStores()) {
+    for (HStore store : region.getStores()) {
       // If any of the stores is unable to split (eg they contain reference files)
       // then don't split
       if (!store.canSplit()) {
@@ -84,9 +87,10 @@ public class IncreasingToUpperBoundRegionSplitPolicy extends ConstantSizeRegionS
       // Mark if any store is big enough
       long size = store.getSize();
       if (size > sizeToCheck) {
-        LOG.debug("ShouldSplit because " + store.getColumnFamilyName() + " size=" + size
-                  + ", sizeToCheck=" + sizeToCheck + ", regionsWithCommonTable="
-                  + tableRegionsCount);
+        LOG.debug("ShouldSplit because " + store.getColumnFamilyName() +
+          " size=" + StringUtils.humanSize(size) +
+          ", sizeToCheck=" + StringUtils.humanSize(sizeToCheck) +
+          ", regionsWithCommonTable=" + tableRegionsCount);
         foundABigStore = true;
       }
     }
@@ -104,10 +108,10 @@ public class IncreasingToUpperBoundRegionSplitPolicy extends ConstantSizeRegionS
     if (rss == null) {
       return 0;
     }
-    TableName tablename = region.getTableDesc().getTableName();
+    TableName tablename = region.getTableDescriptor().getTableName();
     int tableRegionsCount = 0;
     try {
-      List<Region> hri = rss.getOnlineRegions(tablename);
+      List<? extends Region> hri = rss.getRegions(tablename);
       tableRegionsCount = hri == null || hri.isEmpty() ? 0 : hri.size();
     } catch (IOException e) {
       LOG.debug("Failed getOnlineRegions " + tablename, e);

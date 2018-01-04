@@ -23,9 +23,8 @@ import static org.junit.Assert.fail;
 
 import java.io.IOException;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.hbase.ChoreService;
 import org.apache.hadoop.hbase.ClusterId;
 import org.apache.hadoop.hbase.CoordinatedStateManager;
@@ -34,13 +33,15 @@ import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.Server;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.client.ClusterConnection;
+import org.apache.hadoop.hbase.client.Connection;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.testclassification.ReplicationTests;
 import org.apache.hadoop.hbase.zookeeper.MetaTableLocator;
 import org.apache.hadoop.hbase.zookeeper.ZKClusterId;
 import org.apache.hadoop.hbase.zookeeper.ZKConfig;
 import org.apache.hadoop.hbase.zookeeper.ZKUtil;
-import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher;
+import org.apache.hadoop.hbase.zookeeper.ZKWatcher;
+import org.apache.hadoop.hbase.zookeeper.ZNodePaths;
 import org.apache.zookeeper.KeeperException;
 import org.junit.After;
 import org.junit.AfterClass;
@@ -48,15 +49,17 @@ import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Category({ReplicationTests.class, MediumTests.class})
 public class TestReplicationStateZKImpl extends TestReplicationStateBasic {
 
-  private static final Log LOG = LogFactory.getLog(TestReplicationStateZKImpl.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestReplicationStateZKImpl.class);
 
   private static Configuration conf;
   private static HBaseTestingUtility utility;
-  private static ZooKeeperWatcher zkw;
+  private static ZKWatcher zkw;
   private static String replicationZNode;
   private ReplicationQueuesZKImpl rqZK;
 
@@ -68,7 +71,7 @@ public class TestReplicationStateZKImpl extends TestReplicationStateBasic {
     conf.setBoolean(HConstants.REPLICATION_BULKLOAD_ENABLE_KEY, true);
     zkw = HBaseTestingUtility.getZooKeeperWatcher(utility);
     String replicationZNodeName = conf.get("zookeeper.znode.replication", "replication");
-    replicationZNode = ZKUtil.joinZNode(zkw.znodePaths.baseZNode, replicationZNodeName);
+    replicationZNode = ZNodePaths.joinZNode(zkw.znodePaths.baseZNode, replicationZNodeName);
     KEY_ONE = initPeerClusterState("/hbase1");
     KEY_TWO = initPeerClusterState("/hbase2");
   }
@@ -78,8 +81,8 @@ public class TestReplicationStateZKImpl extends TestReplicationStateBasic {
     // Add a dummy region server and set up the cluster id
     Configuration testConf = new Configuration(conf);
     testConf.set(HConstants.ZOOKEEPER_ZNODE_PARENT, baseZKNode);
-    ZooKeeperWatcher zkw1 = new ZooKeeperWatcher(testConf, "test1", null);
-    String fakeRs = ZKUtil.joinZNode(zkw1.znodePaths.rsZNode, "hostname1.example.org:1234");
+    ZKWatcher zkw1 = new ZKWatcher(testConf, "test1", null);
+    String fakeRs = ZNodePaths.joinZNode(zkw1.znodePaths.rsZNode, "hostname1.example.org:1234");
     ZKUtil.createWithParents(zkw1, fakeRs);
     ZKClusterId.setClusterId(zkw1, new ClusterId());
     return ZKConfig.getZooKeeperClusterKey(testConf);
@@ -125,13 +128,13 @@ public class TestReplicationStateZKImpl extends TestReplicationStateBasic {
 
   @Test
   public void testIsPeerPath_PathToChildOfPeerNode() {
-    String peerChild = ZKUtil.joinZNode(ZKUtil.joinZNode(rqZK.peersZNode, "1"), "child");
+    String peerChild = ZNodePaths.joinZNode(ZNodePaths.joinZNode(rqZK.peersZNode, "1"), "child");
     assertFalse(rqZK.isPeerPath(peerChild));
   }
 
   @Test
   public void testIsPeerPath_ActualPeerPath() {
-    String peerPath = ZKUtil.joinZNode(rqZK.peersZNode, "1");
+    String peerPath = ZNodePaths.joinZNode(rqZK.peersZNode, "1");
     assertTrue(rqZK.isPeerPath(peerPath));
   }
 
@@ -150,7 +153,7 @@ public class TestReplicationStateZKImpl extends TestReplicationStateBasic {
     }
 
     @Override
-    public ZooKeeperWatcher getZooKeeper() {
+    public ZKWatcher getZooKeeper() {
       return zkw;
     }
 
@@ -203,6 +206,21 @@ public class TestReplicationStateZKImpl extends TestReplicationStateBasic {
     @Override
     public ClusterConnection getClusterConnection() {
       // TODO Auto-generated method stub
+      return null;
+    }
+
+    @Override
+    public FileSystem getFileSystem() {
+      return null;
+    }
+
+    @Override
+    public boolean isStopping() {
+      return false;
+    }
+
+    @Override
+    public Connection createConnection(Configuration conf) throws IOException {
       return null;
     }
   }

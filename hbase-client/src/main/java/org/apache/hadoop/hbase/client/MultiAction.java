@@ -19,15 +19,15 @@
 package org.apache.hadoop.hbase.client;
 
 import java.util.ArrayList;
-import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
-
 import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * Container for Actions (i.e. Get, Delete, or Put), which are grouped by
@@ -68,7 +68,7 @@ public final class MultiAction {
    * @param a
    */
   public void add(byte[] regionName, Action a) {
-    add(regionName, Arrays.asList(a));
+    add(regionName, Collections.singletonList(a));
   }
 
   /**
@@ -82,7 +82,7 @@ public final class MultiAction {
   public void add(byte[] regionName, List<Action> actionList){
     List<Action> rsActions = actions.get(regionName);
     if (rsActions == null) {
-      rsActions = new ArrayList<Action>(actionList.size());
+      rsActions = new ArrayList<>(actionList.size());
       actions.put(regionName, rsActions);
     }
     rsActions.addAll(actionList);
@@ -102,5 +102,12 @@ public final class MultiAction {
 
   public long getNonceGroup() {
     return this.nonceGroup;
+  }
+
+  // returns the max priority of all the actions
+  public int getPriority() {
+    Optional<Action> result = actions.values().stream().flatMap(List::stream)
+        .max((action1, action2) -> Math.max(action1.getPriority(), action2.getPriority()));
+    return result.isPresent() ? result.get().getPriority() : HConstants.PRIORITY_UNSET;
   }
 }

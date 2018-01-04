@@ -23,13 +23,13 @@ import java.io.IOException;
 import org.apache.hadoop.hbase.MetaTableAccessor;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.TableNotFoundException;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.hbase.procedure2.StateMachineProcedure;
 import org.apache.hadoop.hbase.security.User;
 
 /**
  * Base class for all the Table procedures that want to use a StateMachineProcedure.
- * It provide some basic helpers like basic locking, sync latch, and basic toStringClassDetails().
+ * It provides helpers like basic locking, sync latch, and toStringClassDetails().
  */
 @InterfaceAudience.Private
 public abstract class AbstractStateMachineTableProcedure<TState>
@@ -50,11 +50,15 @@ public abstract class AbstractStateMachineTableProcedure<TState>
     this(env, null);
   }
 
+  /**
+   * @param env Uses this to set Procedure Owner at least.
+   */
   protected AbstractStateMachineTableProcedure(final MasterProcedureEnv env,
       final ProcedurePrepareLatch latch) {
-    this.user = env.getRequestUser();
-    this.setOwner(user.getShortName());
-
+    if (env != null) {
+      this.user = env.getRequestUser();
+      this.setOwner(user);
+    }
     // used for compatibility with clients without procedures
     // they need a sync TableExistsException, TableNotFoundException, TableNotDisabledException, ...
     this.syncLatch = latch;
@@ -69,20 +73,22 @@ public abstract class AbstractStateMachineTableProcedure<TState>
   @Override
   public void toStringClassDetails(final StringBuilder sb) {
     sb.append(getClass().getSimpleName());
-    sb.append(" (table=");
+    sb.append(" table=");
     sb.append(getTableName());
-    sb.append(")");
   }
 
   @Override
-  protected boolean acquireLock(final MasterProcedureEnv env) {
-    if (env.waitInitialized(this)) return false;
-    return env.getProcedureQueue().tryAcquireTableExclusiveLock(this, getTableName());
+  protected LockState acquireLock(final MasterProcedureEnv env) {
+    if (env.waitInitialized(this)) return LockState.LOCK_EVENT_WAIT;
+    if (env.getProcedureScheduler().waitTableExclusiveLock(this, getTableName())) {
+      return LockState.LOCK_EVENT_WAIT;
+    }
+    return LockState.LOCK_ACQUIRED;
   }
 
   @Override
   protected void releaseLock(final MasterProcedureEnv env) {
-    env.getProcedureQueue().releaseTableExclusiveLock(this, getTableName());
+    env.getProcedureScheduler().wakeTableExclusiveLock(this, getTableName());
   }
 
   protected User getUser() {

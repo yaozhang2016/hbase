@@ -1,4 +1,4 @@
-/**
+/*
  *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -18,90 +18,233 @@
  */
 package org.apache.hadoop.hbase.regionserver;
 
+import java.lang.management.MemoryType;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ConcurrentSkipListMap;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.LongAdder;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.hadoop.conf.Configuration;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.apache.hadoop.hbase.io.util.MemorySizeUtil;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.hadoop.hbase.util.Pair;
 
 /**
  * RegionServerAccounting keeps record of some basic real time information about
- * the Region Server. Currently, it only keeps record the global memstore size. 
+ * the Region Server. Currently, it keeps record the global memstore size and global memstore heap
+ * overhead. It also tracks the replay edits per region.
  */
 @InterfaceAudience.Private
 public class RegionServerAccounting {
+  // memstore data size
+  private final LongAdder globalMemstoreDataSize = new LongAdder();
+  // memstore heap size. When off heap MSLAB in place, this will be only heap overhead of the Cell
+  // POJOs and entry overhead of them onto memstore. When on heap MSLAB, this will be include heap
+  // overhead as well as the cell data size. Ya cell data is in on heap area only then.
+  private final LongAdder globalMemstoreHeapSize = new LongAdder();
 
-  private final AtomicLong globalMemstoreDataSize = new AtomicLong(0);
-  private final AtomicLong globalMemstoreHeapOverhead = new AtomicLong(0);
-
-  // Store the edits size during replaying WAL. Use this to roll back the  
+  // Store the edits size during replaying WAL. Use this to roll back the
   // global memstore size once a region opening failed.
-  private final ConcurrentMap<byte[], MemstoreSize> replayEditsPerRegion =
-    new ConcurrentSkipListMap<byte[], MemstoreSize>(Bytes.BYTES_COMPARATOR);
+  private final ConcurrentMap<byte[], MemStoreSizing> replayEditsPerRegion =
+    new ConcurrentSkipListMap<>(Bytes.BYTES_COMPARATOR);
+
+  private long globalMemStoreLimit;
+  private final float globalMemStoreLimitLowMarkPercent;
+  private long globalMemStoreLimitLowMark;
+  private final MemoryType memType;
+  private long globalOnHeapMemstoreLimit;
+  private long globalOnHeapMemstoreLimitLowMark;
+
+  public RegionServerAccounting(Configuration conf) {
+    Pair<Long, MemoryType> globalMemstoreSizePair = MemorySizeUtil.getGlobalMemStoreSize(conf);
+    this.globalMemStoreLimit = globalMemstoreSizePair.getFirst();
+    this.memType = globalMemstoreSizePair.getSecond();
+    this.globalMemStoreLimitLowMarkPercent =
+        MemorySizeUtil.getGlobalMemStoreHeapLowerMark(conf, this.memType == MemoryType.HEAP);
+    // When off heap memstore in use we configure the global off heap space for memstore as bytes
+    // not as % of max memory size. In such case, the lower water mark should be specified using the
+    // key "hbase.regionserver.global.memstore.size.lower.limit" which says % of the global upper
+    // bound and defaults to 95%. In on heap case also specifying this way is ideal. But in the past
+    // we used to take lower bound also as the % of xmx (38% as default). For backward compatibility
+    // for this deprecated config,we will fall back to read that config when new one is missing.
+    // Only for on heap case, do this fallback mechanism. For off heap it makes no sense.
+    // TODO When to get rid of the deprecated config? ie
+    // "hbase.regionserver.global.memstore.lowerLimit". Can get rid of this boolean passing then.
+    this.globalMemStoreLimitLowMark =
+        (long) (this.globalMemStoreLimit * this.globalMemStoreLimitLowMarkPercent);
+    this.globalOnHeapMemstoreLimit = MemorySizeUtil.getOnheapGlobalMemStoreSize(conf);
+    this.globalOnHeapMemstoreLimitLowMark =
+        (long) (this.globalOnHeapMemstoreLimit * this.globalMemStoreLimitLowMarkPercent);
+  }
+
+  long getGlobalMemStoreLimit() {
+    return this.globalMemStoreLimit;
+  }
+
+  long getGlobalOnHeapMemStoreLimit() {
+    return this.globalOnHeapMemstoreLimit;
+  }
+
+  // Called by the tuners.
+  void setGlobalMemStoreLimits(long newGlobalMemstoreLimit) {
+    if (this.memType == MemoryType.HEAP) {
+      this.globalMemStoreLimit = newGlobalMemstoreLimit;
+      this.globalMemStoreLimitLowMark =
+          (long) (this.globalMemStoreLimit * this.globalMemStoreLimitLowMarkPercent);
+    } else {
+      this.globalOnHeapMemstoreLimit = newGlobalMemstoreLimit;
+      this.globalOnHeapMemstoreLimitLowMark =
+          (long) (this.globalOnHeapMemstoreLimit * this.globalMemStoreLimitLowMarkPercent);
+    }
+  }
+
+  boolean isOffheap() {
+    return this.memType == MemoryType.NON_HEAP;
+  }
+
+  long getGlobalMemStoreLimitLowMark() {
+    return this.globalMemStoreLimitLowMark;
+  }
+
+  float getGlobalMemStoreLimitLowMarkPercent() {
+    return this.globalMemStoreLimitLowMarkPercent;
+  }
 
   /**
-   * @return the global Memstore size in the RegionServer
+   * @return the global Memstore data size in the RegionServer
    */
-  public long getGlobalMemstoreSize() {
-    return globalMemstoreDataSize.get();
-  }
-
-  public long getGlobalMemstoreHeapOverhead() {
-    return this.globalMemstoreHeapOverhead.get();
+  public long getGlobalMemStoreDataSize() {
+    return globalMemstoreDataSize.sum();
   }
 
   /**
-   * @param memStoreSize the Memstore size will be added to 
-   *        the global Memstore size 
+   * @return the global memstore heap size in the RegionServer
    */
-  public void incGlobalMemstoreSize(MemstoreSize memStoreSize) {
-    globalMemstoreDataSize.addAndGet(memStoreSize.getDataSize());
-    globalMemstoreHeapOverhead.addAndGet(memStoreSize.getHeapOverhead());
+  public long getGlobalMemStoreHeapSize() {
+    return this.globalMemstoreHeapSize.sum();
   }
 
-  public void decGlobalMemstoreSize(MemstoreSize memStoreSize) {
-    globalMemstoreDataSize.addAndGet(-memStoreSize.getDataSize());
-    globalMemstoreHeapOverhead.addAndGet(-memStoreSize.getHeapOverhead());
+  /**
+   * @param memStoreSize the Memstore size will be added to
+   *        the global Memstore size
+   */
+  public void incGlobalMemStoreSize(MemStoreSize memStoreSize) {
+    globalMemstoreDataSize.add(memStoreSize.getDataSize());
+    globalMemstoreHeapSize.add(memStoreSize.getHeapSize());
+  }
+
+  public void decGlobalMemStoreSize(MemStoreSize memStoreSize) {
+    globalMemstoreDataSize.add(-memStoreSize.getDataSize());
+    globalMemstoreHeapSize.add(-memStoreSize.getHeapSize());
+  }
+
+  /**
+   * Return true if we are above the memstore high water mark
+   * @return the flushtype
+   */
+  public FlushType isAboveHighWaterMark() {
+    // for onheap memstore we check if the global memstore size and the
+    // global heap overhead is greater than the global memstore limit
+    if (memType == MemoryType.HEAP) {
+      if (getGlobalMemStoreHeapSize() >= globalMemStoreLimit) {
+        return FlushType.ABOVE_ONHEAP_HIGHER_MARK;
+      }
+    } else {
+      // If the configured memstore is offheap, check for two things
+      // 1) If the global memstore data size is greater than the configured
+      // 'hbase.regionserver.offheap.global.memstore.size'
+      // 2) If the global memstore heap size is greater than the configured onheap
+      // global memstore limit 'hbase.regionserver.global.memstore.size'.
+      // We do this to avoid OOME incase of scenarios where the heap is occupied with
+      // lot of onheap references to the cells in memstore
+      if (getGlobalMemStoreDataSize() >= globalMemStoreLimit) {
+        // Indicates that global memstore size is above the configured
+        // 'hbase.regionserver.offheap.global.memstore.size'
+        return FlushType.ABOVE_OFFHEAP_HIGHER_MARK;
+      } else if (getGlobalMemStoreHeapSize() >= this.globalOnHeapMemstoreLimit) {
+        // Indicates that the offheap memstore's heap overhead is greater than the
+        // configured 'hbase.regionserver.global.memstore.size'.
+        return FlushType.ABOVE_ONHEAP_HIGHER_MARK;
+      }
+    }
+    return FlushType.NORMAL;
+  }
+
+  /**
+   * Return true if we're above the low watermark
+   */
+  public FlushType isAboveLowWaterMark() {
+    // for onheap memstore we check if the global memstore size and the
+    // global heap overhead is greater than the global memstore lower mark limit
+    if (memType == MemoryType.HEAP) {
+      if (getGlobalMemStoreHeapSize() >= globalMemStoreLimitLowMark) {
+        return FlushType.ABOVE_ONHEAP_LOWER_MARK;
+      }
+    } else {
+      if (getGlobalMemStoreDataSize() >= globalMemStoreLimitLowMark) {
+        // Indicates that the offheap memstore's data size is greater than the global memstore
+        // lower limit
+        return FlushType.ABOVE_OFFHEAP_LOWER_MARK;
+      } else if (getGlobalMemStoreHeapSize() >= globalOnHeapMemstoreLimitLowMark) {
+        // Indicates that the offheap memstore's heap overhead is greater than the global memstore
+        // onheap lower limit
+        return FlushType.ABOVE_ONHEAP_LOWER_MARK;
+      }
+    }
+    return FlushType.NORMAL;
+  }
+
+  /**
+   * @return the flush pressure of all stores on this regionserver. The value should be greater than
+   *         or equal to 0.0, and any value greater than 1.0 means we enter the emergency state that
+   *         global memstore size already exceeds lower limit.
+   */
+  public double getFlushPressure() {
+    if (memType == MemoryType.HEAP) {
+      return (getGlobalMemStoreHeapSize()) * 1.0 / globalMemStoreLimitLowMark;
+    } else {
+      return Math.max(getGlobalMemStoreDataSize() * 1.0 / globalMemStoreLimitLowMark,
+          getGlobalMemStoreHeapSize() * 1.0 / globalOnHeapMemstoreLimitLowMark);
+    }
   }
 
   /***
    * Add memStoreSize to replayEditsPerRegion.
-   * 
+   *
    * @param regionName region name.
    * @param memStoreSize the Memstore size will be added to replayEditsPerRegion.
    */
-  public void addRegionReplayEditsSize(byte[] regionName, MemstoreSize memStoreSize) {
-    MemstoreSize replayEdistsSize = replayEditsPerRegion.get(regionName);
-    // All ops on the same MemstoreSize object is going to be done by single thread, sequentially
+  public void addRegionReplayEditsSize(byte[] regionName, MemStoreSize memStoreSize) {
+    MemStoreSizing replayEdistsSize = replayEditsPerRegion.get(regionName);
+    // All ops on the same MemStoreSize object is going to be done by single thread, sequentially
     // only. First calls to this method to increment the per region reply edits size and then call
     // to either rollbackRegionReplayEditsSize or clearRegionReplayEditsSize as per the result of
     // the region open operation. No need to handle multi thread issues on one region's entry in
     // this Map.
     if (replayEdistsSize == null) {
-      replayEdistsSize = new MemstoreSize();
+      replayEdistsSize = new MemStoreSizing();
       replayEditsPerRegion.put(regionName, replayEdistsSize);
     }
-    replayEdistsSize.incMemstoreSize(memStoreSize);
+    replayEdistsSize.incMemStoreSize(memStoreSize);
   }
 
   /**
    * Roll back the global MemStore size for a specified region when this region
    * can't be opened.
-   * 
+   *
    * @param regionName the region which could not open.
    */
   public void rollbackRegionReplayEditsSize(byte[] regionName) {
-    MemstoreSize replayEditsSize = replayEditsPerRegion.get(regionName);
+    MemStoreSize replayEditsSize = replayEditsPerRegion.get(regionName);
     if (replayEditsSize != null) {
       clearRegionReplayEditsSize(regionName);
-      decGlobalMemstoreSize(replayEditsSize);
+      decGlobalMemStoreSize(replayEditsSize);
     }
   }
 
   /**
    * Clear a region from replayEditsPerRegion.
-   * 
+   *
    * @param regionName region name.
    */
   public void clearRegionReplayEditsSize(byte[] regionName) {

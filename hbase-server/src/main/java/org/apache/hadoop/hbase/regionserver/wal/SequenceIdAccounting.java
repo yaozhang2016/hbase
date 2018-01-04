@@ -17,7 +17,9 @@
  */
 package org.apache.hadoop.hbase.regionserver.wal;
 
-import com.google.common.annotations.VisibleForTesting;
+import static org.apache.hadoop.hbase.util.CollectionUtils.computeIfAbsent;
+
+import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -28,11 +30,11 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HRegionInfo;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.ImmutableByteArray;
 
@@ -50,7 +52,7 @@ import org.apache.hadoop.hbase.util.ImmutableByteArray;
 @InterfaceAudience.Private
 class SequenceIdAccounting {
 
-  private static final Log LOG = LogFactory.getLog(SequenceIdAccounting.class);
+  private static final Logger LOG = LoggerFactory.getLogger(SequenceIdAccounting.class);
   /**
    * This lock ties all operations on {@link SequenceIdAccounting#flushingSequenceIds} and
    * {@link #lowestUnflushedSequenceIds} Maps. {@link #lowestUnflushedSequenceIds} has the
@@ -59,7 +61,7 @@ class SequenceIdAccounting {
    * {@link #flushingSequenceIds}.
    * 
    * <p>The two Maps are tied by this locking object EXCEPT when we go to update the lowest
-   * entry; see {@link #lowest(byte[], Set, Long)}. In here is a putIfAbsent call on
+   * entry; see {@link #lowestUnflushedSequenceIds}. In here is a putIfAbsent call on
    * {@link #lowestUnflushedSequenceIds}. In this latter case, we will add this lowest
    * sequence id if we find that there is no entry for the current column family. There will be no
    * entry only if we just came up OR we have moved aside current set of lowest sequence ids
@@ -152,7 +154,7 @@ class SequenceIdAccounting {
    */
   Map<byte[], Long> resetHighest() {
     Map<byte[], Long> old = this.highestSequenceIds;
-    this.highestSequenceIds = new HashMap<byte[], Long>();
+    this.highestSequenceIds = new HashMap<>();
     return old;
   }
 
@@ -215,16 +217,8 @@ class SequenceIdAccounting {
   @VisibleForTesting
   ConcurrentMap<ImmutableByteArray, Long> getOrCreateLowestSequenceIds(byte[] encodedRegionName) {
     // Intentionally, this access is done outside of this.regionSequenceIdLock. Done per append.
-    ConcurrentMap<ImmutableByteArray, Long> m = this.lowestUnflushedSequenceIds
-        .get(encodedRegionName);
-    if (m != null) {
-      return m;
-    }
-    m = new ConcurrentHashMap<>();
-    // Another thread may have added it ahead of us.
-    ConcurrentMap<ImmutableByteArray, Long> alreadyPut = this.lowestUnflushedSequenceIds
-        .putIfAbsent(encodedRegionName, m);
-    return alreadyPut == null ? m : alreadyPut;
+    return computeIfAbsent(this.lowestUnflushedSequenceIds, encodedRegionName,
+      ConcurrentHashMap::new);
   }
 
   /**
@@ -270,6 +264,14 @@ class SequenceIdAccounting {
    * oldest/lowest outstanding edit.
    */
   Long startCacheFlush(final byte[] encodedRegionName, final Set<byte[]> families) {
+    Map<byte[],Long> familytoSeq = new HashMap<>();
+    for (byte[] familyName : families){
+      familytoSeq.put(familyName,HConstants.NO_SEQNUM);
+    }
+    return startCacheFlush(encodedRegionName,familytoSeq);
+  }
+
+  Long startCacheFlush(final byte[] encodedRegionName, final Map<byte[], Long> familyToSeq) {
     Map<ImmutableByteArray, Long> oldSequenceIds = null;
     Long lowestUnflushedInRegion = HConstants.NO_SEQNUM;
     synchronized (tieLock) {
@@ -279,9 +281,14 @@ class SequenceIdAccounting {
         // circumstance because another concurrent thread now may add sequenceids for this family
         // (see above in getOrCreateLowestSequenceId). Make sure you are ok with this. Usually it
         // is fine because updates are blocked when this method is called. Make sure!!!
-        for (byte[] familyName : families) {
-          ImmutableByteArray familyNameWrapper = ImmutableByteArray.wrap(familyName);
-          Long seqId = m.remove(familyNameWrapper);
+        for (Map.Entry<byte[], Long> entry : familyToSeq.entrySet()) {
+          ImmutableByteArray familyNameWrapper = ImmutableByteArray.wrap((byte[]) entry.getKey());
+          Long seqId = null;
+          if(entry.getValue() == HConstants.NO_SEQNUM) {
+            seqId = m.remove(familyNameWrapper);
+          } else {
+            seqId = m.replace(familyNameWrapper, entry.getValue());
+          }
           if (seqId != null) {
             if (oldSequenceIds == null) {
               oldSequenceIds = new HashMap<>();
@@ -350,7 +357,7 @@ class SequenceIdAccounting {
     if (flushing != null) {
       for (Map.Entry<ImmutableByteArray, Long> e : flushing.entrySet()) {
         Long currentId = tmpMap.get(e.getKey());
-        if (currentId != null && currentId.longValue() <= e.getValue().longValue()) {
+        if (currentId != null && currentId.longValue() < e.getValue().longValue()) {
           String errorStr = Bytes.toString(encodedRegionName) + " family "
               + e.getKey().toStringUtf8() + " acquired edits out of order current memstore seq="
               + currentId + ", previous oldest unflushed id=" + e.getValue();
@@ -396,8 +403,8 @@ class SequenceIdAccounting {
 
   /**
    * Iterates over the given Map and compares sequence ids with corresponding entries in
-   * {@link #oldestUnflushedRegionSequenceIds}. If a region in
-   * {@link #oldestUnflushedRegionSequenceIds} has a sequence id less than that passed in
+   * {@link #lowestUnflushedSequenceIds}. If a region in
+   * {@link #lowestUnflushedSequenceIds} has a sequence id less than that passed in
    * <code>sequenceids</code> then return it.
    * @param sequenceids Sequenceids keyed by encoded region name.
    * @return regions found in this instance with sequence ids less than those passed in.
@@ -415,7 +422,7 @@ class SequenceIdAccounting {
         long lowest = getLowestSequenceId(m);
         if (lowest != HConstants.NO_SEQNUM && lowest <= e.getValue()) {
           if (toFlush == null) {
-            toFlush = new ArrayList<byte[]>();
+            toFlush = new ArrayList<>();
           }
           toFlush.add(e.getKey());
         }

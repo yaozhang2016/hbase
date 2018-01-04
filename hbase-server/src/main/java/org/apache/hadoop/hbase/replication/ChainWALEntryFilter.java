@@ -22,7 +22,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.HBaseInterfaceAudience;
 import org.apache.hadoop.hbase.wal.WAL.Entry;
@@ -43,7 +43,7 @@ public class ChainWALEntryFilter implements WALEntryFilter {
   }
 
   public ChainWALEntryFilter(List<WALEntryFilter> filters) {
-    ArrayList<WALEntryFilter> rawFilters = new ArrayList<WALEntryFilter>(filters.size());
+    ArrayList<WALEntryFilter> rawFilters = new ArrayList<>(filters.size());
     // flatten the chains
     for (WALEntryFilter filter : filters) {
       if (filter instanceof ChainWALEntryFilter) {

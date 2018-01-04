@@ -21,7 +21,7 @@ module Shell
   module Commands
     class Create < Command
       def help
-        return <<-EOF
+        <<-EOF
 Creates a table. Pass a table name, and a set of column family
 specifications (at least one), and, optionally, table configuration.
 Column specification can be a simple string (name), or a dictionary
@@ -38,6 +38,7 @@ Create a table with namespace=default and table qualifier=t1
   hbase> create 't1', 'f1', 'f2', 'f3'
   hbase> create 't1', {NAME => 'f1', VERSIONS => 1, TTL => 2592000, BLOCKCACHE => true}
   hbase> create 't1', {NAME => 'f1', CONFIGURATION => {'hbase.hstore.blockingStoreFiles' => '10'}}
+  hbase> create 't1', {NAME => 'f1', IS_MOB => true, MOB_THRESHOLD => 1000000, MOB_COMPACT_PARTITION_POLICY => 'weekly'}
 
 Table configuration options can be put at the end.
 Examples:
@@ -64,9 +65,9 @@ EOF
       def command(table, *args)
         admin.create(table, *args)
         @end_time = Time.now
-        puts "Created table " + table.to_s
+        puts 'Created table ' + table.to_s
 
-        #and then return the table just created
+        # and then return the table just created
         table(table)
       end
     end

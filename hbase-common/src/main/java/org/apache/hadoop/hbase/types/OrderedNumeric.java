@@ -20,12 +20,11 @@ package org.apache.hadoop.hbase.types;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
 import org.apache.hadoop.hbase.util.Order;
 import org.apache.hadoop.hbase.util.OrderedBytes;
 import org.apache.hadoop.hbase.util.PositionedByteRange;
 import org.apache.hadoop.hbase.util.SimplePositionedMutableByteRange;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * An {@link Number} of arbitrary precision and variable-length encoding. The
@@ -36,13 +35,14 @@ import org.apache.hadoop.hbase.util.SimplePositionedMutableByteRange;
  * from text. Built on {@link OrderedBytes#encodeNumeric(PositionedByteRange, BigDecimal, Order)}.
  */
 @InterfaceAudience.Public
-@InterfaceStability.Evolving
 public class OrderedNumeric extends OrderedBytesBase<Number> {
 
   public static final OrderedNumeric ASCENDING = new OrderedNumeric(Order.ASCENDING);
   public static final OrderedNumeric DESCENDING = new OrderedNumeric(Order.DESCENDING);
 
-  protected OrderedNumeric(Order order) { super(order); }
+  protected OrderedNumeric(Order order) {
+    super(order);
+  }
 
   @Override
   public int encodedLength(Number val) {
@@ -52,7 +52,9 @@ public class OrderedNumeric extends OrderedBytesBase<Number> {
   }
 
   @Override
-  public Class<Number> encodedClass() { return Number.class; }
+  public Class<Number> encodedClass() {
+    return Number.class;
+  }
 
   @Override
   public Number decode(PositionedByteRange src) {

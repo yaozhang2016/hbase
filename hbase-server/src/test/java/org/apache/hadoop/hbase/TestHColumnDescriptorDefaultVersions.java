@@ -24,6 +24,8 @@ import java.io.IOException;
 
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.client.Admin;
+import org.apache.hadoop.hbase.client.ColumnFamilyDescriptor;
+import org.apache.hadoop.hbase.client.TableDescriptor;
 import org.apache.hadoop.hbase.master.MasterFileSystem;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.testclassification.MiscTests;
@@ -74,7 +76,7 @@ public class TestHColumnDescriptorDefaultVersions {
 
   @Test
   public void testCreateTableWithDefault() throws IOException {
-    Admin admin = TEST_UTIL.getHBaseAdmin();
+    Admin admin = TEST_UTIL.getAdmin();
     // Create a table with one family
     HTableDescriptor baseHtd = new HTableDescriptor(TABLE_NAME);
     HColumnDescriptor hcd = new HColumnDescriptor(FAMILY);
@@ -95,7 +97,7 @@ public class TestHColumnDescriptorDefaultVersions {
     TEST_UTIL.getConfiguration().setInt("hbase.column.max.version", 3);
     TEST_UTIL.startMiniCluster(1);
 
-    Admin admin = TEST_UTIL.getHBaseAdmin();
+    Admin admin = TEST_UTIL.getAdmin();
     // Create a table with one family
     HTableDescriptor baseHtd = new HTableDescriptor(TABLE_NAME);
     HColumnDescriptor hcd = new HColumnDescriptor(FAMILY);
@@ -117,7 +119,7 @@ public class TestHColumnDescriptorDefaultVersions {
     TEST_UTIL.getConfiguration().setInt("hbase.column.max.version", 3);
     TEST_UTIL.startMiniCluster(1);
 
-    Admin admin = TEST_UTIL.getHBaseAdmin();
+    Admin admin = TEST_UTIL.getAdmin();
     // Create a table with one family
     HTableDescriptor baseHtd = new HTableDescriptor(TABLE_NAME);
     HColumnDescriptor hcd = new HColumnDescriptor(FAMILY);
@@ -149,25 +151,25 @@ public class TestHColumnDescriptorDefaultVersions {
 
   private void verifyHColumnDescriptor(int expected, final TableName tableName,
       final byte[]... families) throws IOException {
-    Admin admin = TEST_UTIL.getHBaseAdmin();
+    Admin admin = TEST_UTIL.getAdmin();
 
     // Verify descriptor from master
-    HTableDescriptor htd = admin.getTableDescriptor(tableName);
-    HColumnDescriptor[] hcds = htd.getColumnFamilies();
+    TableDescriptor htd = admin.getDescriptor(tableName);
+    ColumnFamilyDescriptor[] hcds = htd.getColumnFamilies();
     verifyHColumnDescriptor(expected, hcds, tableName, families);
 
     // Verify descriptor from HDFS
     MasterFileSystem mfs = TEST_UTIL.getMiniHBaseCluster().getMaster().getMasterFileSystem();
     Path tableDir = FSUtils.getTableDir(mfs.getRootDir(), tableName);
-    HTableDescriptor td = FSTableDescriptors.getTableDescriptorFromFs(mfs.getFileSystem(), tableDir);
+    TableDescriptor td = FSTableDescriptors.getTableDescriptorFromFs(mfs.getFileSystem(), tableDir);
     hcds = td.getColumnFamilies();
     verifyHColumnDescriptor(expected, hcds, tableName, families);
   }
 
-  private void verifyHColumnDescriptor(int expected, final HColumnDescriptor[] hcds,
+  private void verifyHColumnDescriptor(int expected, final ColumnFamilyDescriptor[] hcds,
       final TableName tableName,
       final byte[]... families) {
-    for (HColumnDescriptor hcd : hcds) {
+    for (ColumnFamilyDescriptor hcd : hcds) {
       assertEquals(expected, hcd.getMaxVersions());
     }
   }

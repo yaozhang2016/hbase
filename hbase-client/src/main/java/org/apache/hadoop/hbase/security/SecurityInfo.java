@@ -20,7 +20,7 @@ package org.apache.hadoop.hbase.security;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.AdminProtos;
 import org.apache.hadoop.hbase.protobuf.generated.AuthenticationProtos.TokenIdentifier.Kind;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ClientProtos;
@@ -33,7 +33,7 @@ import org.apache.hadoop.hbase.shaded.protobuf.generated.RegionServerStatusProto
 @InterfaceAudience.Private
 public class SecurityInfo {
   /** Maps RPC service names to authentication information */
-  private static ConcurrentMap<String,SecurityInfo> infos = new ConcurrentHashMap<String,SecurityInfo>();
+  private static ConcurrentMap<String,SecurityInfo> infos = new ConcurrentHashMap<>();
   // populate info for known services
   static {
     infos.put(AdminProtos.AdminService.getDescriptor().getName(),

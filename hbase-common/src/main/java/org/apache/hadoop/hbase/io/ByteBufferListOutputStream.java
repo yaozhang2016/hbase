@@ -23,10 +23,10 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.util.ByteBufferUtils;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * An OutputStream which writes data into ByteBuffers. It will try to get ByteBuffer, as and when
@@ -37,15 +37,15 @@ import org.apache.hadoop.hbase.util.ByteBufferUtils;
  */
 @InterfaceAudience.Private
 public class ByteBufferListOutputStream extends ByteBufferOutputStream {
-  private static final Log LOG = LogFactory.getLog(ByteBufferListOutputStream.class);
+  private static final Logger LOG = LoggerFactory.getLogger(ByteBufferListOutputStream.class);
 
   private ByteBufferPool pool;
   // Keep track of the BBs where bytes written to. We will first try to get a BB from the pool. If
   // it is not available will make a new one our own and keep writing to that. We keep track of all
   // the BBs that we got from pool, separately so that on closeAndPutbackBuffers, we can make sure
   // to return back all of them to pool
-  protected List<ByteBuffer> allBufs = new ArrayList<ByteBuffer>();
-  protected List<ByteBuffer> bufsFromPool = new ArrayList<ByteBuffer>();
+  protected List<ByteBuffer> allBufs = new ArrayList<>();
+  protected List<ByteBuffer> bufsFromPool = new ArrayList<>();
 
   private boolean lastBufFlipped = false;// Indicate whether the curBuf/lastBuf is flipped already
 
@@ -115,7 +115,7 @@ public class ByteBufferListOutputStream extends ByteBufferOutputStream {
     try {
       close();
     } catch (IOException e) {
-      LOG.debug(e);
+      LOG.debug(e.toString(), e);
     }
     // Return back all the BBs to pool
     if (this.bufsFromPool != null) {

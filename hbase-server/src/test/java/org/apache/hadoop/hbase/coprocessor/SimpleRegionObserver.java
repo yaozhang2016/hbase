@@ -27,19 +27,16 @@ import static org.junit.Assert.assertTrue;
 import java.io.IOException;
 import java.util.List;
 import java.util.Map;
-import java.util.NavigableSet;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellUtil;
+import org.apache.hadoop.hbase.CompareOperator;
 import org.apache.hadoop.hbase.CoprocessorEnvironment;
-import org.apache.hadoop.hbase.HRegionInfo;
-import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.client.Append;
 import org.apache.hadoop.hbase.client.Delete;
 import org.apache.hadoop.hbase.client.Durability;
@@ -47,38 +44,34 @@ import org.apache.hadoop.hbase.client.Get;
 import org.apache.hadoop.hbase.client.Increment;
 import org.apache.hadoop.hbase.client.Mutation;
 import org.apache.hadoop.hbase.client.Put;
+import org.apache.hadoop.hbase.client.RegionInfo;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.filter.ByteArrayComparable;
-import org.apache.hadoop.hbase.filter.CompareFilter.CompareOp;
 import org.apache.hadoop.hbase.io.FSDataInputStreamWrapper;
 import org.apache.hadoop.hbase.io.Reference;
 import org.apache.hadoop.hbase.io.hfile.CacheConfig;
+import org.apache.hadoop.hbase.regionserver.FlushLifeCycleTracker;
 import org.apache.hadoop.hbase.regionserver.InternalScanner;
-import org.apache.hadoop.hbase.regionserver.KeyValueScanner;
-import org.apache.hadoop.hbase.regionserver.Leases;
 import org.apache.hadoop.hbase.regionserver.MiniBatchOperationInProgress;
-import org.apache.hadoop.hbase.regionserver.Region;
 import org.apache.hadoop.hbase.regionserver.Region.Operation;
 import org.apache.hadoop.hbase.regionserver.RegionScanner;
 import org.apache.hadoop.hbase.regionserver.ScanType;
 import org.apache.hadoop.hbase.regionserver.Store;
 import org.apache.hadoop.hbase.regionserver.StoreFile;
 import org.apache.hadoop.hbase.regionserver.StoreFileReader;
-import org.apache.hadoop.hbase.regionserver.wal.HLogKey;
-import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
+import org.apache.hadoop.hbase.regionserver.compactions.CompactionLifeCycleTracker;
+import org.apache.hadoop.hbase.regionserver.compactions.CompactionRequest;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.Pair;
+import org.apache.hadoop.hbase.wal.WALEdit;
 import org.apache.hadoop.hbase.wal.WALKey;
-
-import com.google.common.collect.ImmutableList;
 
 /**
  * A sample region observer that tests the RegionObserver interface.
  * It works with TestRegionObserverInterface to provide the test case.
  */
-public class SimpleRegionObserver extends BaseRegionObserver {
-  private static final Log LOG = LogFactory.getLog(TestRegionObserverInterface.class);
+public class SimpleRegionObserver implements RegionCoprocessor, RegionObserver {
 
   final AtomicInteger ctBeforeDelete = new AtomicInteger(1);
   final AtomicInteger ctPreOpen = new AtomicInteger(0);
@@ -86,13 +79,9 @@ public class SimpleRegionObserver extends BaseRegionObserver {
   final AtomicInteger ctPreClose = new AtomicInteger(0);
   final AtomicInteger ctPostClose = new AtomicInteger(0);
   final AtomicInteger ctPreFlush = new AtomicInteger(0);
-  final AtomicInteger ctPreFlushScannerOpen = new AtomicInteger(0);
   final AtomicInteger ctPostFlush = new AtomicInteger(0);
-  final AtomicInteger ctPreSplit = new AtomicInteger(0);
-  final AtomicInteger ctPostSplit = new AtomicInteger(0);
   final AtomicInteger ctPreCompactSelect = new AtomicInteger(0);
   final AtomicInteger ctPostCompactSelect = new AtomicInteger(0);
-  final AtomicInteger ctPreCompactScanner = new AtomicInteger(0);
   final AtomicInteger ctPreCompact = new AtomicInteger(0);
   final AtomicInteger ctPostCompact = new AtomicInteger(0);
   final AtomicInteger ctPreGet = new AtomicInteger(0);
@@ -120,7 +109,6 @@ public class SimpleRegionObserver extends BaseRegionObserver {
   final AtomicInteger ctPreScannerClose = new AtomicInteger(0);
   final AtomicInteger ctPostScannerClose = new AtomicInteger(0);
   final AtomicInteger ctPreScannerOpen = new AtomicInteger(0);
-  final AtomicInteger ctPreStoreScannerOpen = new AtomicInteger(0);
   final AtomicInteger ctPostScannerOpen = new AtomicInteger(0);
   final AtomicInteger ctPreBulkLoadHFile = new AtomicInteger(0);
   final AtomicInteger ctPostBulkLoadHFile = new AtomicInteger(0);
@@ -130,10 +118,6 @@ public class SimpleRegionObserver extends BaseRegionObserver {
   final AtomicInteger ctPostReplayWALs = new AtomicInteger(0);
   final AtomicInteger ctPreWALRestore = new AtomicInteger(0);
   final AtomicInteger ctPostWALRestore = new AtomicInteger(0);
-  final AtomicInteger ctPreWALRestoreDeprecated = new AtomicInteger(0);
-  final AtomicInteger ctPostWALRestoreDeprecated = new AtomicInteger(0);
-  final AtomicInteger ctPreSplitBeforePONR = new AtomicInteger(0);
-  final AtomicInteger ctPreSplitAfterPONR = new AtomicInteger(0);
   final AtomicInteger ctPreStoreFileReaderOpen = new AtomicInteger(0);
   final AtomicInteger ctPostStoreFileReaderOpen = new AtomicInteger(0);
   final AtomicInteger ctPostBatchMutateIndispensably = new AtomicInteger(0);
@@ -147,13 +131,12 @@ public class SimpleRegionObserver extends BaseRegionObserver {
   }
 
   @Override
+  public Optional<RegionObserver> getRegionObserver() {
+    return Optional.of(this);
+  }
+
+  @Override
   public void start(CoprocessorEnvironment e) throws IOException {
-    // this only makes sure that leases and locks are available to coprocessors
-    // from external packages
-    RegionCoprocessorEnvironment re = (RegionCoprocessorEnvironment)e;
-    Leases leases = re.getRegionServerServices().getLeases();
-    leases.createLease(re.getRegion().getRegionInfo().getRegionNameAsString(), 2000, null);
-    leases.cancelLease(re.getRegion().getRegionInfo().getRegionNameAsString());
   }
 
   @Override
@@ -186,21 +169,14 @@ public class SimpleRegionObserver extends BaseRegionObserver {
 
   @Override
   public InternalScanner preFlush(ObserverContext<RegionCoprocessorEnvironment> c,
-      Store store, InternalScanner scanner) throws IOException {
+      Store store, InternalScanner scanner, FlushLifeCycleTracker tracker) throws IOException {
     ctPreFlush.incrementAndGet();
     return scanner;
   }
 
   @Override
-  public InternalScanner preFlushScannerOpen(final ObserverContext<RegionCoprocessorEnvironment> c,
-      Store store, KeyValueScanner memstoreScanner, InternalScanner s) throws IOException {
-    ctPreFlushScannerOpen.incrementAndGet();
-    return null;
-  }
-
-  @Override
   public void postFlush(ObserverContext<RegionCoprocessorEnvironment> c,
-      Store store, StoreFile resultFile) throws IOException {
+      Store store, StoreFile resultFile, FlushLifeCycleTracker tracker) throws IOException {
     ctPostFlush.incrementAndGet();
     if (throwOnPostFlush.get()){
       throw new IOException("throwOnPostFlush is true in postFlush");
@@ -212,63 +188,30 @@ public class SimpleRegionObserver extends BaseRegionObserver {
   }
 
   @Override
-  public void preSplit(ObserverContext<RegionCoprocessorEnvironment> c) {
-    ctPreSplit.incrementAndGet();
-  }
-
-  @Override
-  public void preSplitBeforePONR(
-      ObserverContext<RegionCoprocessorEnvironment> ctx, byte[] splitKey,
-      List<Mutation> metaEntries) throws IOException {
-    ctPreSplitBeforePONR.incrementAndGet();
-  }
-
-  @Override
-  public void preSplitAfterPONR(
-      ObserverContext<RegionCoprocessorEnvironment> ctx) throws IOException {
-    ctPreSplitAfterPONR.incrementAndGet();
-  }
-
-  @Override
-  public void postSplit(ObserverContext<RegionCoprocessorEnvironment> c, Region l, Region r) {
-    ctPostSplit.incrementAndGet();
-  }
-
-  public boolean wasSplit() {
-    return ctPreSplit.get() > 0 && ctPostSplit.get() > 0;
-  }
-
-  @Override
-  public void preCompactSelection(ObserverContext<RegionCoprocessorEnvironment> c,
-      Store store, List<StoreFile> candidates) {
+  public void preCompactSelection(ObserverContext<RegionCoprocessorEnvironment> c, Store store,
+      List<? extends StoreFile> candidates, CompactionLifeCycleTracker tracker) throws IOException {
     ctPreCompactSelect.incrementAndGet();
   }
 
   @Override
-  public void postCompactSelection(ObserverContext<RegionCoprocessorEnvironment> c,
-      Store store, ImmutableList<StoreFile> selected) {
+  public void postCompactSelection(ObserverContext<RegionCoprocessorEnvironment> c, Store store,
+      List<? extends StoreFile> selected, CompactionLifeCycleTracker tracker,
+      CompactionRequest request) {
     ctPostCompactSelect.incrementAndGet();
   }
 
   @Override
-  public InternalScanner preCompact(ObserverContext<RegionCoprocessorEnvironment> e,
-      Store store, InternalScanner scanner, ScanType scanType) {
+  public InternalScanner preCompact(ObserverContext<RegionCoprocessorEnvironment> c, Store store,
+      InternalScanner scanner, ScanType scanType, CompactionLifeCycleTracker tracker,
+      CompactionRequest request) throws IOException {
     ctPreCompact.incrementAndGet();
     return scanner;
   }
 
   @Override
-  public InternalScanner preCompactScannerOpen(
-      final ObserverContext<RegionCoprocessorEnvironment> c,
-      Store store, List<? extends KeyValueScanner> scanners, ScanType scanType, long earliestPutTs,
-      InternalScanner s) throws IOException {
-    ctPreCompactScanner.incrementAndGet();
-    return null;
-  }
-
-  @Override
-  public void postCompact(ObserverContext<RegionCoprocessorEnvironment> e,
-      Store store, StoreFile resultFile) {
+  public void postCompact(ObserverContext<RegionCoprocessorEnvironment> c, Store store,
+      StoreFile resultFile, CompactionLifeCycleTracker tracker,
+      CompactionRequest request) throws IOException {
     ctPostCompact.incrementAndGet();
   }
 
@@ -277,19 +220,9 @@ public class SimpleRegionObserver extends BaseRegionObserver {
   }
 
   @Override
-  public RegionScanner preScannerOpen(final ObserverContext<RegionCoprocessorEnvironment> c,
-      final Scan scan,
-      final RegionScanner s) throws IOException {
+  public void preScannerOpen(final ObserverContext<RegionCoprocessorEnvironment> c, final Scan scan)
+      throws IOException {
     ctPreScannerOpen.incrementAndGet();
-    return null;
-  }
-
-  @Override
-  public KeyValueScanner preStoreScannerOpen(final ObserverContext<RegionCoprocessorEnvironment> c,
-      final Store store, final Scan scan, final NavigableSet<byte[]> targetCols,
-      final KeyValueScanner s) throws IOException {
-    ctPreStoreScannerOpen.incrementAndGet();
-    return null;
   }
 
   @Override
@@ -354,7 +287,7 @@ public class SimpleRegionObserver extends BaseRegionObserver {
     assertNotNull(e.getRegion());
     assertNotNull(get);
     assertNotNull(results);
-    if (e.getRegion().getTableDesc().getTableName().equals(
+    if (e.getRegion().getTableDescriptor().getTableName().equals(
         TestRegionObserverInterface.TEST_TABLE)) {
       boolean foundA = false;
       boolean foundB = false;
@@ -386,28 +319,28 @@ public class SimpleRegionObserver extends BaseRegionObserver {
     assertNotNull(e);
     assertNotNull(e.getRegion());
     assertNotNull(familyMap);
-    if (e.getRegion().getTableDesc().getTableName().equals(
+    if (e.getRegion().getTableDescriptor().getTableName().equals(
         TestRegionObserverInterface.TEST_TABLE)) {
       List<Cell> cells = familyMap.get(TestRegionObserverInterface.A);
       assertNotNull(cells);
       assertNotNull(cells.get(0));
-      KeyValue kv = (KeyValue)cells.get(0);
-      assertTrue(Bytes.equals(kv.getQualifierArray(), kv.getQualifierOffset(),
-        kv.getQualifierLength(), TestRegionObserverInterface.A, 0,
+      Cell cell = cells.get(0);
+      assertTrue(Bytes.equals(cell.getQualifierArray(), cell.getQualifierOffset(),
+        cell.getQualifierLength(), TestRegionObserverInterface.A, 0,
         TestRegionObserverInterface.A.length));
       cells = familyMap.get(TestRegionObserverInterface.B);
       assertNotNull(cells);
       assertNotNull(cells.get(0));
-      kv = (KeyValue)cells.get(0);
-      assertTrue(Bytes.equals(kv.getQualifierArray(), kv.getQualifierOffset(),
-        kv.getQualifierLength(), TestRegionObserverInterface.B, 0,
+      cell = cells.get(0);
+      assertTrue(Bytes.equals(cell.getQualifierArray(), cell.getQualifierOffset(),
+        cell.getQualifierLength(), TestRegionObserverInterface.B, 0,
         TestRegionObserverInterface.B.length));
       cells = familyMap.get(TestRegionObserverInterface.C);
       assertNotNull(cells);
       assertNotNull(cells.get(0));
-      kv = (KeyValue)cells.get(0);
-      assertTrue(Bytes.equals(kv.getQualifierArray(), kv.getQualifierOffset(),
-        kv.getQualifierLength(), TestRegionObserverInterface.C, 0,
+      cell = cells.get(0);
+      assertTrue(Bytes.equals(cell.getQualifierArray(), cell.getQualifierOffset(),
+        cell.getQualifierLength(), TestRegionObserverInterface.C, 0,
         TestRegionObserverInterface.C.length));
     }
     ctPrePut.incrementAndGet();
@@ -423,30 +356,30 @@ public class SimpleRegionObserver extends BaseRegionObserver {
     assertNotNull(e.getRegion());
     assertNotNull(familyMap);
     List<Cell> cells = familyMap.get(TestRegionObserverInterface.A);
-    if (e.getRegion().getTableDesc().getTableName().equals(
+    if (e.getRegion().getTableDescriptor().getTableName().equals(
         TestRegionObserverInterface.TEST_TABLE)) {
       assertNotNull(cells);
       assertNotNull(cells.get(0));
       // KeyValue v1 expectation.  Cast for now until we go all Cell all the time. TODO
-      KeyValue kv = (KeyValue)cells.get(0);
-      assertTrue(Bytes.equals(kv.getQualifierArray(), kv.getQualifierOffset(),
-        kv.getQualifierLength(), TestRegionObserverInterface.A, 0,
+      Cell cell = cells.get(0);
+      assertTrue(Bytes.equals(cell.getQualifierArray(), cell.getQualifierOffset(),
+        cell.getQualifierLength(), TestRegionObserverInterface.A, 0,
         TestRegionObserverInterface.A.length));
       cells = familyMap.get(TestRegionObserverInterface.B);
       assertNotNull(cells);
       assertNotNull(cells.get(0));
       // KeyValue v1 expectation.  Cast for now until we go all Cell all the time. TODO
-      kv = (KeyValue)cells.get(0);
-      assertTrue(Bytes.equals(kv.getQualifierArray(), kv.getQualifierOffset(),
-        kv.getQualifierLength(), TestRegionObserverInterface.B, 0,
+      cell = cells.get(0);
+      assertTrue(Bytes.equals(cell.getQualifierArray(), cell.getQualifierOffset(),
+        cell.getQualifierLength(), TestRegionObserverInterface.B, 0,
         TestRegionObserverInterface.B.length));
       cells = familyMap.get(TestRegionObserverInterface.C);
       assertNotNull(cells);
       assertNotNull(cells.get(0));
       // KeyValue v1 expectation.  Cast for now until we go all Cell all the time. TODO
-      kv = (KeyValue)cells.get(0);
-      assertTrue(Bytes.equals(kv.getQualifierArray(), kv.getQualifierOffset(),
-        kv.getQualifierLength(), TestRegionObserverInterface.C, 0,
+      cell = cells.get(0);
+      assertTrue(Bytes.equals(cell.getQualifierArray(), cell.getQualifierOffset(),
+        cell.getQualifierLength(), TestRegionObserverInterface.C, 0,
         TestRegionObserverInterface.C.length));
     }
     ctPostPut.incrementAndGet();
@@ -548,15 +481,15 @@ public class SimpleRegionObserver extends BaseRegionObserver {
 
   @Override
   public boolean preCheckAndPut(ObserverContext<RegionCoprocessorEnvironment> e, byte[] row,
-      byte[] family, byte[] qualifier, CompareOp compareOp, ByteArrayComparable comparator,
-      Put put, boolean result) throws IOException {
+                                byte[] family, byte[] qualifier, CompareOperator compareOp, ByteArrayComparable comparator,
+                                Put put, boolean result) throws IOException {
     ctPreCheckAndPut.incrementAndGet();
     return true;
   }
 
   @Override
   public boolean preCheckAndPutAfterRowLock(ObserverContext<RegionCoprocessorEnvironment> e,
-      byte[] row, byte[] family, byte[] qualifier, CompareOp compareOp,
+      byte[] row, byte[] family, byte[] qualifier, CompareOperator compareOp,
       ByteArrayComparable comparator, Put put, boolean result) throws IOException {
     ctPreCheckAndPutAfterRowLock.incrementAndGet();
     return true;
@@ -564,23 +497,23 @@ public class SimpleRegionObserver extends BaseRegionObserver {
 
   @Override
   public boolean postCheckAndPut(ObserverContext<RegionCoprocessorEnvironment> e, byte[] row,
-      byte[] family, byte[] qualifier, CompareOp compareOp, ByteArrayComparable comparator,
-      Put put, boolean result) throws IOException {
+                                 byte[] family, byte[] qualifier, CompareOperator compareOp, ByteArrayComparable comparator,
+                                 Put put, boolean result) throws IOException {
     ctPostCheckAndPut.incrementAndGet();
     return true;
   }
 
   @Override
   public boolean preCheckAndDelete(ObserverContext<RegionCoprocessorEnvironment> e, byte[] row,
-      byte[] family, byte[] qualifier, CompareOp compareOp, ByteArrayComparable comparator,
-      Delete delete, boolean result) throws IOException {
+                                   byte[] family, byte[] qualifier, CompareOperator compareOp, ByteArrayComparable comparator,
+                                   Delete delete, boolean result) throws IOException {
     ctPreCheckAndDelete.incrementAndGet();
     return true;
   }
 
   @Override
   public boolean preCheckAndDeleteAfterRowLock(ObserverContext<RegionCoprocessorEnvironment> e,
-      byte[] row, byte[] family, byte[] qualifier, CompareOp compareOp,
+      byte[] row, byte[] family, byte[] qualifier, CompareOperator compareOp,
       ByteArrayComparable comparator, Delete delete, boolean result) throws IOException {
     ctPreCheckAndDeleteAfterRowLock.incrementAndGet();
     return true;
@@ -588,8 +521,8 @@ public class SimpleRegionObserver extends BaseRegionObserver {
 
   @Override
   public boolean postCheckAndDelete(ObserverContext<RegionCoprocessorEnvironment> e, byte[] row,
-      byte[] family, byte[] qualifier, CompareOp compareOp, ByteArrayComparable comparator,
-      Delete delete, boolean result) throws IOException {
+                                    byte[] family, byte[] qualifier, CompareOperator compareOp, ByteArrayComparable comparator,
+                                    Delete delete, boolean result) throws IOException {
     ctPostCheckAndDelete.incrementAndGet();
     return true;
   }
@@ -621,7 +554,7 @@ public class SimpleRegionObserver extends BaseRegionObserver {
     RegionCoprocessorEnvironment e = ctx.getEnvironment();
     assertNotNull(e);
     assertNotNull(e.getRegion());
-    if (e.getRegion().getTableDesc().getTableName().equals(
+    if (e.getRegion().getTableDescriptor().getTableName().equals(
         TestRegionObserverInterface.TEST_TABLE)) {
       assertNotNull(familyPaths);
       assertEquals(1,familyPaths.size());
@@ -634,12 +567,13 @@ public class SimpleRegionObserver extends BaseRegionObserver {
   }
 
   @Override
-  public boolean postBulkLoadHFile(ObserverContext<RegionCoprocessorEnvironment> ctx,
-      List<Pair<byte[], String>> familyPaths, boolean hasLoaded) throws IOException {
+  public void postBulkLoadHFile(ObserverContext<RegionCoprocessorEnvironment> ctx,
+      List<Pair<byte[], String>> familyPaths, Map<byte[], List<Path>> map)
+          throws IOException {
     RegionCoprocessorEnvironment e = ctx.getEnvironment();
     assertNotNull(e);
     assertNotNull(e.getRegion());
-    if (e.getRegion().getTableDesc().getTableName().equals(
+    if (e.getRegion().getTableDescriptor().getTableName().equals(
         TestRegionObserverInterface.TEST_TABLE)) {
       assertNotNull(familyPaths);
       assertEquals(1,familyPaths.size());
@@ -649,24 +583,23 @@ public class SimpleRegionObserver extends BaseRegionObserver {
       assertEquals(familyPath.substring(familyPath.length()-familyName.length()-1),"/"+familyName);
     }
     ctPostBulkLoadHFile.incrementAndGet();
-    return hasLoaded;
   }
 
   @Override
   public void preReplayWALs(ObserverContext<? extends RegionCoprocessorEnvironment> env,
-      HRegionInfo info, Path edits) throws IOException {
+      RegionInfo info, Path edits) throws IOException {
     ctPreReplayWALs.incrementAndGet();
   }
 
   @Override
   public void postReplayWALs(ObserverContext<? extends RegionCoprocessorEnvironment> env,
-      HRegionInfo info, Path edits) throws IOException {
+      RegionInfo info, Path edits) throws IOException {
     ctPostReplayWALs.incrementAndGet();
   }
 
   @Override
   public void preWALRestore(ObserverContext<? extends RegionCoprocessorEnvironment> env,
-      HRegionInfo info, WALKey logKey, WALEdit logEdit) throws IOException {
+      RegionInfo info, WALKey logKey, WALEdit logEdit) throws IOException {
     String tableName = logKey.getTablename().getNameAsString();
     if (tableName.equals(TABLE_SKIPPED)) {
       // skip recovery of TABLE_SKIPPED for testing purpose
@@ -677,23 +610,9 @@ public class SimpleRegionObserver extends BaseRegionObserver {
   }
 
   @Override
-  public void preWALRestore(ObserverContext<RegionCoprocessorEnvironment> env, HRegionInfo info,
-                            HLogKey logKey, WALEdit logEdit) throws IOException {
-    preWALRestore(env, info, (WALKey)logKey, logEdit);
-    ctPreWALRestoreDeprecated.incrementAndGet();
-  }
-
-  @Override
   public void postWALRestore(ObserverContext<? extends RegionCoprocessorEnvironment> env,
-                             HRegionInfo info, WALKey logKey, WALEdit logEdit) throws IOException {
+                             RegionInfo info, WALKey logKey, WALEdit logEdit) throws IOException {
     ctPostWALRestore.incrementAndGet();
-  }
-
-  @Override
-  public void postWALRestore(ObserverContext<RegionCoprocessorEnvironment> env,
-                             HRegionInfo info, HLogKey logKey, WALEdit logEdit) throws IOException {
-    postWALRestore(env, info, (WALKey)logKey, logEdit);
-    ctPostWALRestoreDeprecated.incrementAndGet();
   }
 
   @Override
@@ -877,28 +796,8 @@ public class SimpleRegionObserver extends BaseRegionObserver {
     return ctPreFlush.get();
   }
 
-  public int getCtPreFlushScannerOpen() {
-    return ctPreFlushScannerOpen.get();
-  }
-
   public int getCtPostFlush() {
     return ctPostFlush.get();
-  }
-
-  public int getCtPreSplit() {
-    return ctPreSplit.get();
-  }
-
-  public int getCtPreSplitBeforePONR() {
-    return ctPreSplitBeforePONR.get();
-  }
-
-  public int getCtPreSplitAfterPONR() {
-    return ctPreSplitAfterPONR.get();
-  }
-
-  public int getCtPostSplit() {
-    return ctPostSplit.get();
   }
 
   public int getCtPreCompactSelect() {
@@ -907,10 +806,6 @@ public class SimpleRegionObserver extends BaseRegionObserver {
 
   public int getCtPostCompactSelect() {
     return ctPostCompactSelect.get();
-  }
-
-  public int getCtPreCompactScanner() {
-    return ctPreCompactScanner.get();
   }
 
   public int getCtPreCompact() {
@@ -969,22 +864,7 @@ public class SimpleRegionObserver extends BaseRegionObserver {
     return ctPostWALRestore.get();
   }
 
-  public int getCtPreWALRestoreDeprecated() {
-    return ctPreWALRestoreDeprecated.get();
-  }
-
-  public int getCtPostWALRestoreDeprecated() {
-    return ctPostWALRestoreDeprecated.get();
-  }
-
   public boolean wasStoreFileReaderOpenCalled() {
     return ctPreStoreFileReaderOpen.get() > 0 && ctPostStoreFileReaderOpen.get() > 0;
-  }
-
-  /**
-   * This implementation should trigger our legacy support because it does not directly
-   * implement the newer API calls.
-   */
-  public static class Legacy extends SimpleRegionObserver {
   }
 }

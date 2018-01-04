@@ -26,14 +26,14 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
-import org.apache.hadoop.hbase.master.balancer.FavoredNodeAssignmentHelper;
-import org.apache.hadoop.hbase.master.balancer.FavoredNodesPlan;
+import org.apache.hadoop.hbase.client.RegionInfo;
+import org.apache.hadoop.hbase.favored.FavoredNodeAssignmentHelper;
+import org.apache.hadoop.hbase.favored.FavoredNodesPlan;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 /**
  * Helper class that is used by {@link RegionPlacementMaintainer} to print
  * information for favored nodes
@@ -41,7 +41,7 @@ import org.apache.hadoop.hbase.master.balancer.FavoredNodesPlan;
  */
 @InterfaceAudience.Private
 public class AssignmentVerificationReport {
-  private static final Log LOG = LogFactory.getLog(
+  private static final Logger LOG = LoggerFactory.getLogger(
       AssignmentVerificationReport.class.getName());
 
   private TableName tableName = null;
@@ -51,16 +51,13 @@ public class AssignmentVerificationReport {
   private int totalRegions = 0;
   private int totalRegionServers = 0;
   // for unassigned regions
-  private List<HRegionInfo> unAssignedRegionsList =
-    new ArrayList<HRegionInfo>();
+  private List<RegionInfo> unAssignedRegionsList = new ArrayList<>();
 
   // For regions without valid favored nodes
-  private List<HRegionInfo> regionsWithoutValidFavoredNodes =
-    new ArrayList<HRegionInfo>();
+  private List<RegionInfo> regionsWithoutValidFavoredNodes = new ArrayList<>();
 
   // For regions not running on the favored nodes
-  private List<HRegionInfo> nonFavoredAssignedRegionList =
-    new ArrayList<HRegionInfo>();
+  private List<RegionInfo> nonFavoredAssignedRegionList = new ArrayList<>();
 
   // For regions running on the favored nodes
   private int totalFavoredAssignments = 0;
@@ -73,26 +70,20 @@ public class AssignmentVerificationReport {
   private float avgRegionsOnRS = 0;
   private int maxRegionsOnRS = 0;
   private int minRegionsOnRS = Integer.MAX_VALUE;
-  private Set<ServerName> mostLoadedRSSet =
-    new HashSet<ServerName>();
-  private Set<ServerName> leastLoadedRSSet =
-    new HashSet<ServerName>();
+  private Set<ServerName> mostLoadedRSSet = new HashSet<>();
+  private Set<ServerName> leastLoadedRSSet = new HashSet<>();
 
   private float avgDispersionScore = 0;
   private float maxDispersionScore = 0;
-  private Set<ServerName> maxDispersionScoreServerSet =
-    new HashSet<ServerName>();
+  private Set<ServerName> maxDispersionScoreServerSet = new HashSet<>();
   private float minDispersionScore = Float.MAX_VALUE;
-  private Set<ServerName> minDispersionScoreServerSet =
-    new HashSet<ServerName>();
+  private Set<ServerName> minDispersionScoreServerSet = new HashSet<>();
 
   private float avgDispersionNum = 0;
   private float maxDispersionNum = 0;
-  private Set<ServerName> maxDispersionNumServerSet =
-    new HashSet<ServerName>();
+  private Set<ServerName> maxDispersionNumServerSet = new HashSet<>();
   private float minDispersionNum = Float.MAX_VALUE;
-  private Set<ServerName> minDispersionNumServerSet =
-    new HashSet<ServerName>();
+  private Set<ServerName> minDispersionNumServerSet = new HashSet<>();
 
   public void fillUp(TableName tableName, SnapshotOfRegionAssignmentFromMeta snapshot,
       Map<String, Map<String, Float>> regionLocalityMap) {
@@ -100,7 +91,7 @@ public class AssignmentVerificationReport {
     this.tableName = tableName;
 
     // Get all the regions for this table
-    List<HRegionInfo> regionInfoList =
+    List<RegionInfo> regionInfoList =
       snapshot.getTableToRegionMap().get(tableName);
     // Get the total region num for the current table
     this.totalRegions = regionInfoList.size();
@@ -108,20 +99,17 @@ public class AssignmentVerificationReport {
     // Get the existing assignment plan
     FavoredNodesPlan favoredNodesAssignment = snapshot.getExistingAssignmentPlan();
     // Get the region to region server mapping
-    Map<HRegionInfo, ServerName> currentAssignment =
+    Map<RegionInfo, ServerName> currentAssignment =
       snapshot.getRegionToRegionServerMap();
     // Initialize the server to its hosing region counter map
-    Map<ServerName, Integer> serverToHostingRegionCounterMap =
-      new HashMap<ServerName, Integer>();
+    Map<ServerName, Integer> serverToHostingRegionCounterMap = new HashMap<>();
 
-    Map<ServerName, Integer> primaryRSToRegionCounterMap =
-      new HashMap<ServerName, Integer>();
-    Map<ServerName, Set<ServerName>> primaryToSecTerRSMap =
-      new HashMap<ServerName, Set<ServerName>>();
+    Map<ServerName, Integer> primaryRSToRegionCounterMap = new HashMap<>();
+    Map<ServerName, Set<ServerName>> primaryToSecTerRSMap = new HashMap<>();
 
     // Check the favored nodes and its locality information
     // Also keep tracker of the most loaded and least loaded region servers
-    for (HRegionInfo region : regionInfoList) {
+    for (RegionInfo region : regionInfoList) {
       try {
         ServerName currentRS = currentAssignment.get(region);
         // Handle unassigned regions
@@ -164,7 +152,7 @@ public class AssignmentVerificationReport {
         // Update the primary rs to secondary and tertiary rs map
         Set<ServerName> secAndTerSet = primaryToSecTerRSMap.get(primaryRS);
         if (secAndTerSet == null) {
-          secAndTerSet = new HashSet<ServerName>();
+          secAndTerSet = new HashSet<>();
         }
         secAndTerSet.add(secondaryRS);
         secAndTerSet.add(tertiaryRS);
@@ -329,7 +317,7 @@ public class AssignmentVerificationReport {
     // Set the table name
     this.tableName = tableName;
     // Get all the regions for this table
-    List<HRegionInfo> regionInfoList = snapshot.getTableToRegionMap().get(
+    List<RegionInfo> regionInfoList = snapshot.getTableToRegionMap().get(
         tableName);
     // Get the total region num for the current table
     this.totalRegions = regionInfoList.size();
@@ -340,14 +328,12 @@ public class AssignmentVerificationReport {
       plan = newPlan;
     }
     // Get the region to region server mapping
-    Map<ServerName, Integer> primaryRSToRegionCounterMap =
-        new HashMap<ServerName, Integer>();
-    Map<ServerName, Set<ServerName>> primaryToSecTerRSMap =
-        new HashMap<ServerName, Set<ServerName>>();
+    Map<ServerName, Integer> primaryRSToRegionCounterMap = new HashMap<>();
+    Map<ServerName, Set<ServerName>> primaryToSecTerRSMap = new HashMap<>();
 
     // Check the favored nodes and its locality information
     // Also keep tracker of the most loaded and least loaded region servers
-    for (HRegionInfo region : regionInfoList) {
+    for (RegionInfo region : regionInfoList) {
       try {
         // Get the favored nodes from the assignment plan and verify it.
         List<ServerName> favoredNodes = plan.getFavoredNodes(region);
@@ -375,7 +361,7 @@ public class AssignmentVerificationReport {
         // Update the primary rs to secondary and tertiary rs map
         Set<ServerName> secAndTerSet = primaryToSecTerRSMap.get(primaryRS);
         if (secAndTerSet == null) {
-          secAndTerSet = new HashSet<ServerName>();
+          secAndTerSet = new HashSet<>();
         }
         secAndTerSet.add(secondaryRS);
         secAndTerSet.add(tertiaryRS);
@@ -451,7 +437,7 @@ public class AssignmentVerificationReport {
    *
    */
   public List<Float> getDispersionInformation() {
-    List<Float> dispersion = new ArrayList<Float>();
+    List<Float> dispersion = new ArrayList<>();
     dispersion.add(avgDispersionScore);
     dispersion.add(maxDispersionScore);
     dispersion.add(minDispersionScore);
@@ -460,7 +446,7 @@ public class AssignmentVerificationReport {
 
   public void print(boolean isDetailMode) {
     if (!isFilledUp) {
-      System.err.println("[Error] Region assignment verfication report" +
+      System.err.println("[Error] Region assignment verification report" +
           "hasn't been filled up");
     }
     DecimalFormat df = new java.text.DecimalFormat( "#.##");
@@ -480,7 +466,7 @@ public class AssignmentVerificationReport {
     System.out.println("\tTotal unassigned regions: " +
         unAssignedRegionsList.size());
     if (isDetailMode) {
-      for (HRegionInfo region : unAssignedRegionsList) {
+      for (RegionInfo region : unAssignedRegionsList) {
         System.out.println("\t\t" + region.getRegionNameAsString());
       }
     }
@@ -488,7 +474,7 @@ public class AssignmentVerificationReport {
     System.out.println("\tTotal regions NOT on favored nodes: " +
         nonFavoredAssignedRegionList.size());
     if (isDetailMode) {
-      for (HRegionInfo region : nonFavoredAssignedRegionList) {
+      for (RegionInfo region : nonFavoredAssignedRegionList) {
         System.out.println("\t\t" + region.getRegionNameAsString());
       }
     }
@@ -496,7 +482,7 @@ public class AssignmentVerificationReport {
     System.out.println("\tTotal regions without favored nodes: " +
         regionsWithoutValidFavoredNodes.size());
     if (isDetailMode) {
-      for (HRegionInfo region : regionsWithoutValidFavoredNodes) {
+      for (RegionInfo region : regionsWithoutValidFavoredNodes) {
         System.out.println("\t\t" + region.getRegionNameAsString());
       }
     }
@@ -586,7 +572,7 @@ public class AssignmentVerificationReport {
    * Return the unassigned regions
    * @return unassigned regions
    */
-  List<HRegionInfo> getUnassignedRegions() {
+  List<RegionInfo> getUnassignedRegions() {
     return unAssignedRegionsList;
   }
 
@@ -594,7 +580,7 @@ public class AssignmentVerificationReport {
    * Return the regions without favored nodes
    * @return regions without favored nodes
    */
-  List<HRegionInfo> getRegionsWithoutValidFavoredNodes() {
+  List<RegionInfo> getRegionsWithoutValidFavoredNodes() {
     return regionsWithoutValidFavoredNodes;
   }
 
@@ -602,10 +588,10 @@ public class AssignmentVerificationReport {
    * Return the regions not assigned to its favored nodes
    * @return regions not assigned to its favored nodes
    */
-  List<HRegionInfo> getNonFavoredAssignedRegions() {
+  List<RegionInfo> getNonFavoredAssignedRegions() {
     return nonFavoredAssignedRegionList;
   }
-  
+
   /**
    * Return the number of regions assigned to their favored nodes
    * @return number of regions assigned to their favored nodes

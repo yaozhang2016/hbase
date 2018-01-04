@@ -1,4 +1,4 @@
-/**
+/*
  *
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
@@ -18,84 +18,104 @@
  */
 package org.apache.hadoop.hbase.regionserver;
 
+import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.CellComparator;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.ClassSize;
 
 /**
  * The compaction pipeline of a {@link CompactingMemStore}, is a FIFO queue of segments.
- * It supports pushing a segment at the head of the pipeline and pulling a segment from the
- * tail to flush to disk.
- * It also supports swap operation to allow the compactor swap a subset of the segments with a new
- * (compacted) one. This swap succeeds only if the version number passed with the list of segments
- * to swap is the same as the current version of the pipeline.
- * The pipeline version is updated whenever swapping segments or pulling the segment at the tail.
+ * It supports pushing a segment at the head of the pipeline and removing a segment from the
+ * tail when it is flushed to disk.
+ * It also supports swap method to allow the in-memory compaction swap a subset of the segments
+ * at the tail of the pipeline with a new (compacted) one. This swap succeeds only if the version
+ * number passed with the list of segments to swap is the same as the current version of the
+ * pipeline.
+ * Essentially, there are two methods which can change the structure of the pipeline: pushHead()
+ * and swap(), the later is used both by a flush to disk and by an in-memory compaction.
+ * The pipeline version is updated by swap(); it allows to identify conflicting operations at the
+ * suffix of the pipeline.
+ *
+ * The synchronization model is copy-on-write. Methods which change the structure of the
+ * pipeline (pushHead(), flattenOneSegment() and swap()) apply their changes in the context of a
+ * lock. They also make a read-only copy of the pipeline's list. Read methods read from a
+ * read-only copy. If a read method accesses the read-only copy more than once it makes a local
+ * copy of it to ensure it accesses the same copy.
+ *
+ * The methods getVersionedList(), getVersionedTail(), and flattenOneSegment() are also
+ * protected by a lock since they need to have a consistent (atomic) view of the pipeline list
+ * and version number.
  */
 @InterfaceAudience.Private
 public class CompactionPipeline {
-  private static final Log LOG = LogFactory.getLog(CompactionPipeline.class);
+  private static final Logger LOG = LoggerFactory.getLogger(CompactionPipeline.class);
 
   public final static long FIXED_OVERHEAD = ClassSize
-      .align(ClassSize.OBJECT + (2 * ClassSize.REFERENCE) + Bytes.SIZEOF_LONG);
-  public final static long DEEP_OVERHEAD = FIXED_OVERHEAD + ClassSize.LINKEDLIST;
-  public final static long ENTRY_OVERHEAD = ClassSize.LINKEDLIST_ENTRY;
+      .align(ClassSize.OBJECT + (3 * ClassSize.REFERENCE) + Bytes.SIZEOF_LONG);
+  public final static long DEEP_OVERHEAD = FIXED_OVERHEAD + (2 * ClassSize.LINKEDLIST);
 
   private final RegionServicesForStores region;
-  private LinkedList<ImmutableSegment> pipeline;
-  private long version;
-
-  private static final ImmutableSegment EMPTY_MEM_STORE_SEGMENT = SegmentFactory.instance()
-      .createImmutableSegment((CellComparator) null);
+  private final LinkedList<ImmutableSegment> pipeline = new LinkedList<>();
+  // The list is volatile to avoid reading a new allocated reference before the c'tor is executed
+  private volatile LinkedList<ImmutableSegment> readOnlyCopy = new LinkedList<>();
+  // Version is volatile to ensure it is atomically read when not using a lock
+  private volatile long version = 0;
 
   public CompactionPipeline(RegionServicesForStores region) {
     this.region = region;
-    this.pipeline = new LinkedList<ImmutableSegment>();
-    this.version = 0;
   }
 
   public boolean pushHead(MutableSegment segment) {
     ImmutableSegment immutableSegment = SegmentFactory.instance().
         createImmutableSegment(segment);
     synchronized (pipeline){
-      return addFirst(immutableSegment);
-    }
-  }
-
-  public ImmutableSegment pullTail() {
-    synchronized (pipeline){
-      if(pipeline.isEmpty()) {
-        return EMPTY_MEM_STORE_SEGMENT;
-      }
-      return removeLast();
+      boolean res = addFirst(immutableSegment);
+      readOnlyCopy = new LinkedList<>(pipeline);
+      return res;
     }
   }
 
   public VersionedSegmentsList getVersionedList() {
     synchronized (pipeline){
-      LinkedList<ImmutableSegment> segmentList = new LinkedList<ImmutableSegment>(pipeline);
-      VersionedSegmentsList res = new VersionedSegmentsList(segmentList, version);
-      return res;
+      return new VersionedSegmentsList(readOnlyCopy, version);
+    }
+  }
+
+  public VersionedSegmentsList getVersionedTail() {
+    synchronized (pipeline){
+      List<ImmutableSegment> segmentList = new ArrayList<>();
+      if(!pipeline.isEmpty()) {
+        segmentList.add(0, pipeline.getLast());
+      }
+      return new VersionedSegmentsList(segmentList, version);
     }
   }
 
   /**
-   * Swaps the versioned list at the tail of the pipeline with the new compacted segment.
-   * Swapping only if there were no changes to the suffix of the list while it was compacted.
-   * @param versionedList tail of the pipeline that was compacted
-   * @param segment new compacted segment
+   * Swaps the versioned list at the tail of the pipeline with a new segment.
+   * Swapping only if there were no changes to the suffix of the list since the version list was
+   * created.
+   * @param versionedList suffix of the pipeline to be replaced can be tail or all the pipeline
+   * @param segment new segment to replace the suffix. Can be null if the suffix just needs to be
+   *                removed.
    * @param closeSuffix whether to close the suffix (to release memory), as part of swapping it out
    *        During index merge op this will be false and for compaction it will be true.
-   * @return true iff swapped tail with new compacted segment
+   * @param updateRegionSize whether to update the region size. Update the region size,
+   *                         when the pipeline is swapped as part of in-memory-flush and
+   *                         further merge/compaction. Don't update the region size when the
+   *                         swap is result of the snapshot (flush-to-disk).
+   * @return true iff swapped tail with new segment
    */
-  public boolean swap(
-      VersionedSegmentsList versionedList, ImmutableSegment segment, boolean closeSuffix) {
+  @edu.umd.cs.findbugs.annotations.SuppressWarnings(value="VO_VOLATILE_INCREMENT",
+      justification="Increment is done under a synchronize block so safe")
+  public boolean swap(VersionedSegmentsList versionedList, ImmutableSegment segment,
+      boolean closeSuffix, boolean updateRegionSize) {
     if (versionedList.getVersion() != version) {
       return false;
     }
@@ -105,36 +125,37 @@ public class CompactionPipeline {
         return false;
       }
       suffix = versionedList.getStoreSegments();
-      if (LOG.isDebugEnabled()) {
-        LOG.debug("Swapping pipeline suffix with compacted item. "
-            + "Just before the swap the number of segments in pipeline is:"
-            + versionedList.getStoreSegments().size()
-            + ", and the number of cells in new segment is:" + segment.getCellsCount());
-      }
-      swapSuffix(suffix,segment, closeSuffix);
+      LOG.debug("Swapping pipeline suffix; before={}, new segement={}",
+          versionedList.getStoreSegments().size(), segment);
+      swapSuffix(suffix, segment, closeSuffix);
+      readOnlyCopy = new LinkedList<>(pipeline);
+      version++;
     }
-    if (region != null) {
+    if (updateRegionSize && region != null) {
       // update the global memstore size counter
       long suffixDataSize = getSegmentsKeySize(suffix);
-      long newDataSize = segment.keySize();
+      long newDataSize = 0;
+      if(segment != null) newDataSize = segment.keySize();
       long dataSizeDelta = suffixDataSize - newDataSize;
-      long suffixHeapOverhead = getSegmentsHeapOverhead(suffix);
-      long newHeapOverhead = segment.heapOverhead();
-      long heapOverheadDelta = suffixHeapOverhead - newHeapOverhead;
-      region.addMemstoreSize(new MemstoreSize(-dataSizeDelta, -heapOverheadDelta));
-      if (LOG.isDebugEnabled()) {
-        LOG.debug("Suffix data size: " + suffixDataSize + " compacted item data size: "
-            + newDataSize + ". Suffix heap overhead: " + suffixHeapOverhead
-            + " compacted item heap overhead: " + newHeapOverhead);
-      }
+      long suffixHeapSize = getSegmentsHeapSize(suffix);
+      long newHeapSize = 0;
+      if(segment != null) newHeapSize = segment.heapSize();
+      long heapSizeDelta = suffixHeapSize - newHeapSize;
+      region.addMemStoreSize(new MemStoreSizing(-dataSizeDelta, -heapSizeDelta));
+      LOG.debug("Suffix data size={}, new segment data size={}, suffix heap size={}," +
+              "new segment heap size={}",
+          suffixDataSize,
+          newDataSize,
+          suffixHeapSize,
+          newHeapSize);
     }
     return true;
   }
 
-  private static long getSegmentsHeapOverhead(List<? extends Segment> list) {
+  private static long getSegmentsHeapSize(List<? extends Segment> list) {
     long res = 0;
     for (Segment segment : list) {
-      res += segment.heapOverhead();
+      res += segment.heapSize();
     }
     return res;
   }
@@ -155,7 +176,9 @@ public class CompactionPipeline {
    *
    * @return true iff a segment was successfully flattened
    */
-  public boolean flattenYoungestSegment(long requesterVersion) {
+  public boolean flattenOneSegment(long requesterVersion,
+      CompactingMemStore.IndexType idxType,
+      MemStoreCompactionStrategy.Action action) {
 
     if(requesterVersion != version) {
       LOG.warn("Segment flattening failed, because versions do not match. Requester version: "
@@ -168,17 +191,22 @@ public class CompactionPipeline {
         LOG.warn("Segment flattening failed, because versions do not match");
         return false;
       }
-
+      int i = 0;
       for (ImmutableSegment s : pipeline) {
-        // remember the old size in case this segment is going to be flatten
-        MemstoreSize memstoreSize = new MemstoreSize();
-        if (s.flatten(memstoreSize)) {
+        if ( s.canBeFlattened() ) {
+          MemStoreSizing newMemstoreAccounting = new MemStoreSizing(); // the size to be updated
+          ImmutableSegment newS = SegmentFactory.instance().createImmutableSegmentByFlattening(
+              (CSLMImmutableSegment)s,idxType,newMemstoreAccounting,action);
+          replaceAtIndex(i,newS);
           if(region != null) {
-            region.addMemstoreSize(memstoreSize);
+            // update the global memstore size counter
+            // upon flattening there is no change in the data size
+            region.addMemStoreSize(new MemStoreSize(0, newMemstoreAccounting.getHeapSize()));
           }
-          LOG.debug("Compaction pipeline segment " + s + " was flattened");
+          LOG.debug("Compaction pipeline segment {} flattened", s);
           return true;
         }
+        i++;
       }
 
     }
@@ -188,36 +216,48 @@ public class CompactionPipeline {
   }
 
   public boolean isEmpty() {
-    return pipeline.isEmpty();
+    return readOnlyCopy.isEmpty();
   }
 
-  public List<Segment> getSegments() {
-    synchronized (pipeline){
-      List<Segment> res = new LinkedList<Segment>(pipeline);
-      return res;
-    }
+  public List<? extends Segment> getSegments() {
+    return readOnlyCopy;
   }
 
   public long size() {
-    return pipeline.size();
+    return readOnlyCopy.size();
   }
 
   public long getMinSequenceId() {
     long minSequenceId = Long.MAX_VALUE;
-    if (!isEmpty()) {
-      minSequenceId = pipeline.getLast().getMinSequenceId();
+    LinkedList<? extends Segment> localCopy = readOnlyCopy;
+    if (!localCopy.isEmpty()) {
+      minSequenceId = localCopy.getLast().getMinSequenceId();
     }
     return minSequenceId;
   }
 
-  public MemstoreSize getTailSize() {
-    if (isEmpty()) return MemstoreSize.EMPTY_SIZE;
-    return new MemstoreSize(pipeline.peekLast().keySize(), pipeline.peekLast().heapOverhead());
+  public MemStoreSizing getTailSizing() {
+    LinkedList<? extends Segment> localCopy = readOnlyCopy;
+    if (localCopy.isEmpty()) return new MemStoreSizing();
+    return new MemStoreSizing(localCopy.peekLast().keySize(), localCopy.peekLast().heapSize());
   }
 
-  private void swapSuffix(List<ImmutableSegment> suffix, ImmutableSegment segment,
+  public MemStoreSizing getPipelineSizing() {
+    long keySize = 0;
+    long heapSize = 0;
+    LinkedList<? extends Segment> localCopy = readOnlyCopy;
+    if (localCopy.isEmpty()) return new MemStoreSizing();
+    for (Segment segment : localCopy) {
+      keySize += segment.keySize();
+      heapSize += segment.heapSize();
+    }
+    return new MemStoreSizing(keySize, heapSize);
+  }
+
+  private void swapSuffix(List<? extends Segment> suffix, ImmutableSegment segment,
       boolean closeSegmentsInSuffix) {
-    version++;
+    pipeline.removeAll(suffix);
+    if(segment != null) pipeline.addLast(segment);
     // During index merge we won't be closing the segments undergoing the merge. Segment#close()
     // will release the MSLAB chunks to pool. But in case of index merge there wont be any data copy
     // from old MSLABs. So the new cells in new segment also refers to same chunks. In case of data
@@ -229,13 +269,28 @@ public class CompactionPipeline {
         itemInSuffix.close();
       }
     }
-    pipeline.removeAll(suffix);
-    pipeline.addLast(segment);
   }
 
-  private ImmutableSegment removeLast() {
+  // replacing one segment in the pipeline with a new one exactly at the same index
+  // need to be called only within synchronized block
+  @edu.umd.cs.findbugs.annotations.SuppressWarnings(value="VO_VOLATILE_INCREMENT",
+      justification="replaceAtIndex is invoked under a synchronize block so safe")
+  private void replaceAtIndex(int idx, ImmutableSegment newSegment) {
+    pipeline.set(idx, newSegment);
+    readOnlyCopy = new LinkedList<>(pipeline);
+    // the version increment is indeed needed, because the swap uses removeAll() method of the
+    // linked-list that compares the objects to find what to remove.
+    // The flattening changes the segment object completely (creation pattern) and so
+    // swap will not proceed correctly after concurrent flattening.
     version++;
-    return pipeline.removeLast();
+  }
+
+  public Segment getTail() {
+    List<? extends Segment> localCopy = getSegments();
+    if(localCopy.isEmpty()) {
+      return null;
+    }
+    return localCopy.get(localCopy.size() - 1);
   }
 
   private boolean addFirst(ImmutableSegment segment) {

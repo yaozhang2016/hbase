@@ -32,8 +32,6 @@ import java.util.Map;
 import java.util.NavigableMap;
 import java.util.TreeMap;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
@@ -47,13 +45,13 @@ import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.KeyValue;
+import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.MultiVersionConcurrencyControl;
-import org.apache.hadoop.hbase.regionserver.wal.HLogKey;
 import org.apache.hadoop.hbase.regionserver.wal.WALCoprocessorHost;
-import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
+import org.apache.hadoop.hbase.wal.WALEdit;
 import org.apache.hadoop.hbase.security.User;
 import org.apache.hadoop.hbase.testclassification.CoprocessorTests;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
@@ -64,7 +62,7 @@ import org.apache.hadoop.hbase.util.FSUtils;
 import org.apache.hadoop.hbase.wal.AbstractFSWALProvider;
 import org.apache.hadoop.hbase.wal.WAL;
 import org.apache.hadoop.hbase.wal.WALFactory;
-import org.apache.hadoop.hbase.wal.WALKey;
+import org.apache.hadoop.hbase.wal.WALKeyImpl;
 import org.apache.hadoop.hbase.wal.WALSplitter;
 import org.junit.After;
 import org.junit.AfterClass;
@@ -74,6 +72,8 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.junit.rules.TestName;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Tests invocation of the
@@ -82,7 +82,7 @@ import org.junit.rules.TestName;
  */
 @Category({CoprocessorTests.class, MediumTests.class})
 public class TestWALObserver {
-  private static final Log LOG = LogFactory.getLog(TestWALObserver.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestWALObserver.class);
   private final static HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
 
   private static byte[] TEST_TABLE = Bytes.toBytes("observedTable");
@@ -99,9 +99,8 @@ public class TestWALObserver {
 
   private Configuration conf;
   private FileSystem fs;
-  private Path dir;
   private Path hbaseRootDir;
-  private String logName;
+  private Path hbaseWALRootDir;
   private Path oldLogDir;
   private Path logDir;
   private WALFactory wals;
@@ -110,16 +109,19 @@ public class TestWALObserver {
   public static void setupBeforeClass() throws Exception {
     Configuration conf = TEST_UTIL.getConfiguration();
     conf.setStrings(CoprocessorHost.WAL_COPROCESSOR_CONF_KEY,
-        SampleRegionWALObserver.class.getName(), SampleRegionWALObserver.Legacy.class.getName());
+        SampleRegionWALCoprocessor.class.getName());
     conf.set(CoprocessorHost.REGION_COPROCESSOR_CONF_KEY,
-        SampleRegionWALObserver.class.getName());
+        SampleRegionWALCoprocessor.class.getName());
     conf.setInt("dfs.client.block.recovery.retries", 2);
 
     TEST_UTIL.startMiniCluster(1);
     Path hbaseRootDir = TEST_UTIL.getDFSCluster().getFileSystem()
         .makeQualified(new Path("/hbase"));
+    Path hbaseWALRootDir = TEST_UTIL.getDFSCluster().getFileSystem()
+            .makeQualified(new Path("/hbaseLogRoot"));
     LOG.info("hbase.rootdir=" + hbaseRootDir);
     FSUtils.setRootDir(conf, hbaseRootDir);
+    FSUtils.setWALRootDir(conf, hbaseWALRootDir);
   }
 
   @AfterClass
@@ -133,17 +135,21 @@ public class TestWALObserver {
     // this.cluster = TEST_UTIL.getDFSCluster();
     this.fs = TEST_UTIL.getDFSCluster().getFileSystem();
     this.hbaseRootDir = FSUtils.getRootDir(conf);
-    this.dir = new Path(this.hbaseRootDir, TestWALObserver.class.getName());
-    this.oldLogDir = new Path(this.hbaseRootDir,
+    this.hbaseWALRootDir = FSUtils.getWALRootDir(conf);
+    this.oldLogDir = new Path(this.hbaseWALRootDir,
         HConstants.HREGION_OLDLOGDIR_NAME);
-    this.logDir = new Path(this.hbaseRootDir,
-      AbstractFSWALProvider.getWALDirectoryName(currentTest.getMethodName()));
-    this.logName = HConstants.HREGION_LOGDIR_NAME;
+    String serverName = ServerName.valueOf(currentTest.getMethodName(), 16010,
+        System.currentTimeMillis()).toString();
+    this.logDir = new Path(this.hbaseWALRootDir,
+      AbstractFSWALProvider.getWALDirectoryName(serverName));
 
     if (TEST_UTIL.getDFSCluster().getFileSystem().exists(this.hbaseRootDir)) {
       TEST_UTIL.getDFSCluster().getFileSystem().delete(this.hbaseRootDir, true);
     }
-    this.wals = new WALFactory(conf, null, currentTest.getMethodName());
+    if (TEST_UTIL.getDFSCluster().getFileSystem().exists(this.hbaseWALRootDir)) {
+      TEST_UTIL.getDFSCluster().getFileSystem().delete(this.hbaseWALRootDir, true);
+    }
+    this.wals = new WALFactory(conf, null, serverName);
   }
 
   @After
@@ -156,6 +162,7 @@ public class TestWALObserver {
       LOG.debug("details of failure to close wal factory.", exception);
     }
     TEST_UTIL.getDFSCluster().getFileSystem().delete(this.hbaseRootDir, true);
+    TEST_UTIL.getDFSCluster().getFileSystem().delete(this.hbaseWALRootDir, true);
   }
 
   /**
@@ -166,27 +173,15 @@ public class TestWALObserver {
   @Test
   public void testWALObserverWriteToWAL() throws Exception {
     final WAL log = wals.getWAL(UNSPECIFIED_REGION, null);
-    verifyWritesSeen(log, getCoprocessor(log, SampleRegionWALObserver.class), false);
+    verifyWritesSeen(log, getCoprocessor(log, SampleRegionWALCoprocessor.class), false);
   }
 
-  /**
-   * Test WAL write behavior with WALObserver. The coprocessor monitors a
-   * WALEdit written to WAL, and ignore, modify, and add KeyValue's for the
-   * WALEdit.
-   */
-  @Test
-  public void testLegacyWALObserverWriteToWAL() throws Exception {
-    final WAL log = wals.getWAL(UNSPECIFIED_REGION, null);
-    verifyWritesSeen(log, getCoprocessor(log, SampleRegionWALObserver.Legacy.class), true);
-  }
-
-  private void verifyWritesSeen(final WAL log, final SampleRegionWALObserver cp,
+  private void verifyWritesSeen(final WAL log, final SampleRegionWALCoprocessor cp,
       final boolean seesLegacy) throws Exception {
     HRegionInfo hri = createBasic3FamilyHRegionInfo(Bytes.toString(TEST_TABLE));
     final HTableDescriptor htd = createBasic3FamilyHTD(Bytes
         .toString(TEST_TABLE));
-    NavigableMap<byte[], Integer> scopes = new TreeMap<byte[], Integer>(
-        Bytes.BYTES_COMPARATOR);
+    NavigableMap<byte[], Integer> scopes = new TreeMap<>(Bytes.BYTES_COMPARATOR);
     for(byte[] fam : htd.getFamiliesKeys()) {
       scopes.put(fam, 0);
     }
@@ -202,8 +197,6 @@ public class TestWALObserver {
 
     assertFalse(cp.isPreWALWriteCalled());
     assertFalse(cp.isPostWALWriteCalled());
-    assertFalse(cp.isPreWALWriteDeprecatedCalled());
-    assertFalse(cp.isPostWALWriteDeprecatedCalled());
 
     // TEST_FAMILY[2] is not in the put, however it shall be added by the tested
     // coprocessor.
@@ -239,9 +232,10 @@ public class TestWALObserver {
 
     // it's where WAL write cp should occur.
     long now = EnvironmentEdgeManager.currentTime();
-    // we use HLogKey here instead of WALKey directly to support legacy coprocessors.
-    long txid = log.append(hri,
-        new HLogKey(hri.getEncodedNameAsBytes(), hri.getTable(), now, scopes), edit, true);
+    // we use HLogKey here instead of WALKeyImpl directly to support legacy coprocessors.
+    long txid = log.append(hri, new WALKeyImpl(hri.getEncodedNameAsBytes(), hri.getTable(), now,
+        new MultiVersionConcurrencyControl(), scopes),
+      edit, true);
     log.sync(txid);
 
     // the edit shall have been change now by the coprocessor.
@@ -267,88 +261,6 @@ public class TestWALObserver {
 
     assertTrue(cp.isPreWALWriteCalled());
     assertTrue(cp.isPostWALWriteCalled());
-    assertEquals(seesLegacy, cp.isPreWALWriteDeprecatedCalled());
-    assertEquals(seesLegacy, cp.isPostWALWriteDeprecatedCalled());
-  }
-
-  @Test
-  public void testNonLegacyWALKeysDoNotExplode() throws Exception {
-    TableName tableName = TableName.valueOf(TEST_TABLE);
-    final HTableDescriptor htd = createBasic3FamilyHTD(Bytes
-        .toString(TEST_TABLE));
-    final HRegionInfo hri = new HRegionInfo(tableName, null, null);
-    MultiVersionConcurrencyControl mvcc = new MultiVersionConcurrencyControl();
-
-    fs.mkdirs(new Path(FSUtils.getTableDir(hbaseRootDir, tableName), hri.getEncodedName()));
-
-    final Configuration newConf = HBaseConfiguration.create(this.conf);
-
-    final WAL wal = wals.getWAL(UNSPECIFIED_REGION, null);
-    final SampleRegionWALObserver newApi = getCoprocessor(wal, SampleRegionWALObserver.class);
-    newApi.setTestValues(TEST_TABLE, TEST_ROW, null, null, null, null, null, null);
-    final SampleRegionWALObserver oldApi = getCoprocessor(wal,
-        SampleRegionWALObserver.Legacy.class);
-    oldApi.setTestValues(TEST_TABLE, TEST_ROW, null, null, null, null, null, null);
-
-    LOG.debug("ensuring wal entries haven't happened before we start");
-    assertFalse(newApi.isPreWALWriteCalled());
-    assertFalse(newApi.isPostWALWriteCalled());
-    assertFalse(newApi.isPreWALWriteDeprecatedCalled());
-    assertFalse(newApi.isPostWALWriteDeprecatedCalled());
-    assertFalse(oldApi.isPreWALWriteCalled());
-    assertFalse(oldApi.isPostWALWriteCalled());
-    assertFalse(oldApi.isPreWALWriteDeprecatedCalled());
-    assertFalse(oldApi.isPostWALWriteDeprecatedCalled());
-
-    LOG.debug("writing to WAL with non-legacy keys.");
-    NavigableMap<byte[], Integer> scopes = new TreeMap<byte[], Integer>(
-        Bytes.BYTES_COMPARATOR);
-    for (HColumnDescriptor hcd : htd.getFamilies()) {
-      scopes.put(hcd.getName(), 0);
-    }
-    final int countPerFamily = 5;
-    for (HColumnDescriptor hcd : htd.getFamilies()) {
-      addWALEdits(tableName, hri, TEST_ROW, hcd.getName(), countPerFamily,
-          EnvironmentEdgeManager.getDelegate(), wal, scopes, mvcc);
-    }
-
-    LOG.debug("Verify that only the non-legacy CP saw edits.");
-    assertTrue(newApi.isPreWALWriteCalled());
-    assertTrue(newApi.isPostWALWriteCalled());
-    assertFalse(newApi.isPreWALWriteDeprecatedCalled());
-    assertFalse(newApi.isPostWALWriteDeprecatedCalled());
-    // wish we could test that the log message happened :/
-    assertFalse(oldApi.isPreWALWriteCalled());
-    assertFalse(oldApi.isPostWALWriteCalled());
-    assertFalse(oldApi.isPreWALWriteDeprecatedCalled());
-    assertFalse(oldApi.isPostWALWriteDeprecatedCalled());
-
-    LOG.debug("reseting cp state.");
-    newApi.setTestValues(TEST_TABLE, TEST_ROW, null, null, null, null, null, null);
-    oldApi.setTestValues(TEST_TABLE, TEST_ROW, null, null, null, null, null, null);
-
-    LOG.debug("write a log edit that supports legacy cps.");
-    final long now = EnvironmentEdgeManager.currentTime();
-    final WALKey legacyKey = new HLogKey(hri.getEncodedNameAsBytes(), hri.getTable(), now);
-    final WALEdit edit = new WALEdit();
-    final byte[] nonce = Bytes.toBytes("1772");
-    edit.add(new KeyValue(TEST_ROW, TEST_FAMILY[0], nonce, now, nonce));
-    final long txid = wal.append(hri, legacyKey, edit, true);
-    wal.sync(txid);
-
-    LOG.debug("Make sure legacy cps can see supported edits after having been skipped.");
-    assertTrue("non-legacy WALObserver didn't see pre-write.", newApi.isPreWALWriteCalled());
-    assertTrue("non-legacy WALObserver didn't see post-write.", newApi.isPostWALWriteCalled());
-    assertFalse("non-legacy WALObserver shouldn't have seen legacy pre-write.",
-        newApi.isPreWALWriteDeprecatedCalled());
-    assertFalse("non-legacy WALObserver shouldn't have seen legacy post-write.",
-        newApi.isPostWALWriteDeprecatedCalled());
-    assertTrue("legacy WALObserver didn't see pre-write.", oldApi.isPreWALWriteCalled());
-    assertTrue("legacy WALObserver didn't see post-write.", oldApi.isPostWALWriteCalled());
-    assertTrue("legacy WALObserver didn't see legacy pre-write.",
-        oldApi.isPreWALWriteDeprecatedCalled());
-    assertTrue("legacy WALObserver didn't see legacy post-write.",
-        oldApi.isPostWALWriteDeprecatedCalled());
   }
 
   /**
@@ -359,14 +271,13 @@ public class TestWALObserver {
     final HRegionInfo hri = createBasic3FamilyHRegionInfo(Bytes.toString(TEST_TABLE));
     final HTableDescriptor htd = createBasic3FamilyHTD(Bytes.toString(TEST_TABLE));
     final MultiVersionConcurrencyControl mvcc = new MultiVersionConcurrencyControl();
-    NavigableMap<byte[], Integer> scopes = new TreeMap<byte[], Integer>(
-        Bytes.BYTES_COMPARATOR);
+    NavigableMap<byte[], Integer> scopes = new TreeMap<>(Bytes.BYTES_COMPARATOR);
     for(byte[] fam : htd.getFamiliesKeys()) {
       scopes.put(fam, 0);
     }
     WAL log = wals.getWAL(UNSPECIFIED_REGION, null);
     try {
-      SampleRegionWALObserver cp = getCoprocessor(log, SampleRegionWALObserver.class);
+      SampleRegionWALCoprocessor cp = getCoprocessor(log, SampleRegionWALCoprocessor.class);
 
       cp.setTestValues(TEST_TABLE, null, null, null, null, null, null, null);
 
@@ -375,7 +286,7 @@ public class TestWALObserver {
 
       final long now = EnvironmentEdgeManager.currentTime();
       long txid = log.append(hri,
-          new WALKey(hri.getEncodedNameAsBytes(), hri.getTable(), now, mvcc, scopes),
+          new WALKeyImpl(hri.getEncodedNameAsBytes(), hri.getTable(), now, mvcc, scopes),
           new WALEdit(), true);
       log.sync(txid);
 
@@ -393,7 +304,7 @@ public class TestWALObserver {
   public void testWALCoprocessorReplay() throws Exception {
     // WAL replay is handled at HRegion::replayRecoveredEdits(), which is
     // ultimately called by HRegion::initialize()
-    TableName tableName = TableName.valueOf("testWALCoprocessorReplay");
+    final TableName tableName = TableName.valueOf(currentTest.getMethodName());
     final HTableDescriptor htd = getBasic3FamilyHTableDescriptor(tableName);
     MultiVersionConcurrencyControl mvcc = new MultiVersionConcurrencyControl();
     // final HRegionInfo hri =
@@ -415,8 +326,7 @@ public class TestWALObserver {
     WALEdit edit = new WALEdit();
     long now = EnvironmentEdgeManager.currentTime();
     final int countPerFamily = 1000;
-    NavigableMap<byte[], Integer> scopes = new TreeMap<byte[], Integer>(
-        Bytes.BYTES_COMPARATOR);
+    NavigableMap<byte[], Integer> scopes = new TreeMap<>(Bytes.BYTES_COMPARATOR);
     for (HColumnDescriptor hcd : htd.getFamilies()) {
       scopes.put(hcd.getName(), 0);
     }
@@ -424,34 +334,32 @@ public class TestWALObserver {
       addWALEdits(tableName, hri, TEST_ROW, hcd.getName(), countPerFamily,
           EnvironmentEdgeManager.getDelegate(), wal, scopes, mvcc);
     }
-    wal.append(hri, new WALKey(hri.getEncodedNameAsBytes(), tableName, now, mvcc, scopes), edit,
+    wal.append(hri, new WALKeyImpl(hri.getEncodedNameAsBytes(), tableName, now, mvcc, scopes), edit,
         true);
     // sync to fs.
     wal.sync();
 
     User user = HBaseTestingUtility.getDifferentUser(newConf,
         ".replay.wal.secondtime");
-    user.runAs(new PrivilegedExceptionAction() {
-      public Object run() throws Exception {
+    user.runAs(new PrivilegedExceptionAction<Void>() {
+      public Void run() throws Exception {
         Path p = runWALSplit(newConf);
         LOG.info("WALSplit path == " + p);
         FileSystem newFS = FileSystem.get(newConf);
         // Make a new wal for new region open.
-        final WALFactory wals2 = new WALFactory(conf, null, currentTest.getMethodName()+"2");
+        final WALFactory wals2 = new WALFactory(conf, null,
+            ServerName.valueOf(currentTest.getMethodName()+"2", 16010, System.currentTimeMillis()).toString());
         WAL wal2 = wals2.getWAL(UNSPECIFIED_REGION, null);;
         HRegion region = HRegion.openHRegion(newConf, FileSystem.get(newConf), hbaseRootDir,
             hri, htd, wal2, TEST_UTIL.getHBaseCluster().getRegionServer(0), null);
         long seqid2 = region.getOpenSeqNum();
 
-        SampleRegionWALObserver cp2 =
-          (SampleRegionWALObserver)region.getCoprocessorHost().findCoprocessor(
-              SampleRegionWALObserver.class.getName());
+        SampleRegionWALCoprocessor cp2 =
+          region.getCoprocessorHost().findCoprocessor(SampleRegionWALCoprocessor.class);
         // TODO: asserting here is problematic.
         assertNotNull(cp2);
         assertTrue(cp2.isPreWALRestoreCalled());
         assertTrue(cp2.isPostWALRestoreCalled());
-        assertFalse(cp2.isPreWALRestoreDeprecatedCalled());
-        assertFalse(cp2.isPostWALRestoreDeprecatedCalled());
         region.close();
         wals2.close();
         return null;
@@ -467,13 +375,13 @@ public class TestWALObserver {
   @Test
   public void testWALObserverLoaded() throws Exception {
     WAL log = wals.getWAL(UNSPECIFIED_REGION, null);
-    assertNotNull(getCoprocessor(log, SampleRegionWALObserver.class));
+    assertNotNull(getCoprocessor(log, SampleRegionWALCoprocessor.class));
   }
 
   @Test
   public void testWALObserverRoll() throws Exception {
     final WAL wal = wals.getWAL(UNSPECIFIED_REGION, null);
-    final SampleRegionWALObserver cp = getCoprocessor(wal, SampleRegionWALObserver.class);
+    final SampleRegionWALCoprocessor cp = getCoprocessor(wal, SampleRegionWALCoprocessor.class);
     cp.setTestValues(TEST_TABLE, null, null, null, null, null, null, null);
 
     assertFalse(cp.isPreWALRollCalled());
@@ -484,11 +392,11 @@ public class TestWALObserver {
     assertTrue(cp.isPostWALRollCalled());
   }
 
-  private SampleRegionWALObserver getCoprocessor(WAL wal,
-      Class<? extends SampleRegionWALObserver> clazz) throws Exception {
+  private SampleRegionWALCoprocessor getCoprocessor(WAL wal,
+      Class<? extends SampleRegionWALCoprocessor> clazz) throws Exception {
     WALCoprocessorHost host = wal.getCoprocessorHost();
     Coprocessor c = host.findCoprocessor(clazz.getName());
-    return (SampleRegionWALObserver) c;
+    return (SampleRegionWALCoprocessor) c;
   }
 
   /*
@@ -568,9 +476,9 @@ public class TestWALObserver {
       byte[] columnBytes = Bytes.toBytes(familyStr + ":" + Integer.toString(j));
       WALEdit edit = new WALEdit();
       edit.add(new KeyValue(rowName, family, qualifierBytes, ee.currentTime(), columnBytes));
-      // uses WALKey instead of HLogKey on purpose. will only work for tests where we don't care
+      // uses WALKeyImpl instead of HLogKey on purpose. will only work for tests where we don't care
       // about legacy coprocessors
-      txid = wal.append(hri, new WALKey(hri.getEncodedNameAsBytes(), tableName,
+      txid = wal.append(hri, new WALKeyImpl(hri.getEncodedNameAsBytes(), tableName,
           ee.currentTime(), mvcc), edit, true);
     }
     if (-1 != txid) {

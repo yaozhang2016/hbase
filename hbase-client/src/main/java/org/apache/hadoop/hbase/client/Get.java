@@ -20,6 +20,7 @@ package org.apache.hadoop.hbase.client;
 
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -29,11 +30,10 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.hbase.filter.Filter;
 import org.apache.hadoop.hbase.io.TimeRange;
 import org.apache.hadoop.hbase.security.access.Permission;
@@ -64,10 +64,8 @@ import org.apache.hadoop.hbase.util.Bytes;
  * To add a filter, call {@link #setFilter(Filter) setFilter}.
  */
 @InterfaceAudience.Public
-@InterfaceStability.Stable
-public class Get extends Query
-  implements Row, Comparable<Row> {
-  private static final Log LOG = LogFactory.getLog(Get.class);
+public class Get extends Query implements Row {
+  private static final Logger LOG = LoggerFactory.getLogger(Get.class);
 
   private byte [] row = null;
   private int maxVersions = 1;
@@ -77,8 +75,7 @@ public class Get extends Query
   private TimeRange tr = new TimeRange();
   private boolean checkExistenceOnly = false;
   private boolean closestRowBefore = false;
-  private Map<byte [], NavigableSet<byte []>> familyMap =
-    new TreeMap<byte [], NavigableSet<byte []>>(Bytes.BYTES_COMPARATOR);
+  private Map<byte [], NavigableSet<byte []>> familyMap = new TreeMap<>(Bytes.BYTES_COMPARATOR);
 
   /**
    * Create a Get operation for the specified row.
@@ -130,6 +127,28 @@ public class Get extends Query
       TimeRange tr = entry.getValue();
       setColumnFamilyTimeRange(entry.getKey(), tr.getMin(), tr.getMax());
     }
+    super.setPriority(get.getPriority());
+  }
+
+  /**
+   * Create a Get operation for the specified row.
+   * @param row
+   * @param rowOffset
+   * @param rowLength
+   */
+  public Get(byte[] row, int rowOffset, int rowLength) {
+    Mutation.checkRow(row, rowOffset, rowLength);
+    this.row = Bytes.copy(row, rowOffset, rowLength);
+  }
+
+  /**
+   * Create a Get operation for the specified row.
+   * @param row
+   */
+  public Get(ByteBuffer row) {
+    Mutation.checkRow(row);
+    this.row = new byte[row.remaining()];
+    row.get(this.row);
   }
 
   public boolean isCheckExistenceOnly() {
@@ -185,13 +204,13 @@ public class Get extends Query
   public Get addColumn(byte [] family, byte [] qualifier) {
     NavigableSet<byte []> set = familyMap.get(family);
     if(set == null) {
-      set = new TreeSet<byte []>(Bytes.BYTES_COMPARATOR);
+      set = new TreeSet<>(Bytes.BYTES_COMPARATOR);
+      familyMap.put(family, set);
     }
     if (qualifier == null) {
       qualifier = HConstants.EMPTY_BYTE_ARRAY;
     }
     set.add(qualifier);
-    familyMap.put(family, set);
     return this;
   }
 
@@ -232,10 +251,12 @@ public class Get extends Query
   /**
    * Get all available versions.
    * @return this for invocation chaining
+   * @deprecated It is easy to misunderstand with column family's max versions, so use
+   *             {@link #readAllVersions()} instead.
    */
+  @Deprecated
   public Get setMaxVersions() {
-    this.maxVersions = Integer.MAX_VALUE;
-    return this;
+    return readAllVersions();
   }
 
   /**
@@ -243,15 +264,38 @@ public class Get extends Query
    * @param maxVersions maximum versions for each column
    * @throws IOException if invalid number of versions
    * @return this for invocation chaining
+   * @deprecated It is easy to misunderstand with column family's max versions, so use
+   *             {@link #readVersions(int)} instead.
    */
+  @Deprecated
   public Get setMaxVersions(int maxVersions) throws IOException {
-    if(maxVersions <= 0) {
-      throw new IOException("maxVersions must be positive");
-    }
-    this.maxVersions = maxVersions;
+    return readVersions(maxVersions);
+  }
+
+  /**
+   * Get all available versions.
+   * @return this for invocation chaining
+   */
+  public Get readAllVersions() {
+    this.maxVersions = Integer.MAX_VALUE;
     return this;
   }
 
+  /**
+   * Get up to the specified number of versions of each column.
+   * @param versions specified number of versions for each column
+   * @throws IOException if invalid number of versions
+   * @return this for invocation chaining
+   */
+  public Get readVersions(int versions) throws IOException {
+    if (versions <= 0) {
+      throw new IOException("versions must be positive");
+    }
+    this.maxVersions = versions;
+    return this;
+  }
+
+  @Override
   public Get setLoadColumnFamiliesOnDemand(boolean value) {
     return (Get) super.setLoadColumnFamiliesOnDemand(value);
   }
@@ -392,8 +436,8 @@ public class Get extends Query
    */
   @Override
   public Map<String, Object> getFingerprint() {
-    Map<String, Object> map = new HashMap<String, Object>();
-    List<String> families = new ArrayList<String>();
+    Map<String, Object> map = new HashMap<>();
+    List<String> families = new ArrayList<>(this.familyMap.entrySet().size());
     map.put("families", families);
     for (Map.Entry<byte [], NavigableSet<byte[]>> entry :
       this.familyMap.entrySet()) {
@@ -415,13 +459,13 @@ public class Get extends Query
     Map<String, Object> map = getFingerprint();
     // replace the fingerprint's simple list of families with a
     // map from column families to lists of qualifiers and kv details
-    Map<String, List<String>> columns = new HashMap<String, List<String>>();
+    Map<String, List<String>> columns = new HashMap<>();
     map.put("families", columns);
     // add scalar information first
     map.put("row", Bytes.toStringBinary(this.row));
     map.put("maxVersions", this.maxVersions);
     map.put("cacheBlocks", this.cacheBlocks);
-    List<Long> timeRange = new ArrayList<Long>();
+    List<Long> timeRange = new ArrayList<>(2);
     timeRange.add(this.tr.getMin());
     timeRange.add(this.tr.getMax());
     map.put("timeRange", timeRange);
@@ -429,7 +473,7 @@ public class Get extends Query
     // iterate through affected families and add details
     for (Map.Entry<byte [], NavigableSet<byte[]>> entry :
       this.familyMap.entrySet()) {
-      List<String> familyList = new ArrayList<String>();
+      List<String> familyList = new ArrayList<>();
       columns.put(Bytes.toStringBinary(entry.getKey()), familyList);
       if(entry.getValue() == null) {
         colCount++;
@@ -526,4 +570,8 @@ public class Get extends Query
       return (Get) super.setIsolationLevel(level);
   }
 
+  @Override
+  public Get setPriority(int priority) {
+    return (Get) super.setPriority(priority);
+  }
 }

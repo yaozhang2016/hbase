@@ -20,11 +20,14 @@ package org.apache.hadoop.hbase.replication.regionserver;
 
 import org.apache.hadoop.metrics2.lib.MutableFastCounter;
 import org.apache.hadoop.metrics2.lib.MutableGaugeLong;
+import org.apache.hadoop.metrics2.lib.MutableHistogram;
 
 public class MetricsReplicationGlobalSourceSource implements MetricsReplicationSourceSource{
+  private static final String KEY_PREFIX = "source.";
+
   private final MetricsReplicationSourceImpl rms;
 
-  private final MutableGaugeLong ageOfLastShippedOpGauge;
+  private final MutableHistogram ageOfLastShippedOpHist;
   private final MutableGaugeLong sizeOfLogQueueGauge;
   private final MutableFastCounter logReadInEditsCounter;
   private final MutableFastCounter logEditsFilteredCounter;
@@ -47,7 +50,7 @@ public class MetricsReplicationGlobalSourceSource implements MetricsReplicationS
   public MetricsReplicationGlobalSourceSource(MetricsReplicationSourceImpl rms) {
     this.rms = rms;
 
-    ageOfLastShippedOpGauge = rms.getMetricsRegistry().getGauge(SOURCE_AGE_OF_LAST_SHIPPED_OP, 0L);
+    ageOfLastShippedOpHist = rms.getMetricsRegistry().getHistogram(SOURCE_AGE_OF_LAST_SHIPPED_OP);
 
     sizeOfLogQueueGauge = rms.getMetricsRegistry().getGauge(SOURCE_SIZE_OF_LOG_QUEUE, 0L);
 
@@ -80,7 +83,7 @@ public class MetricsReplicationGlobalSourceSource implements MetricsReplicationS
   }
 
   @Override public void setLastShippedAge(long age) {
-    ageOfLastShippedOpGauge.set(age);
+    ageOfLastShippedOpHist.add(age);
   }
 
   @Override public void incrSizeOfLogQueue(int size) {
@@ -137,7 +140,7 @@ public class MetricsReplicationGlobalSourceSource implements MetricsReplicationS
 
   @Override
   public long getLastShippedAge() {
-    return ageOfLastShippedOpGauge.value();
+    return ageOfLastShippedOpHist.getMax();
   }
 
   @Override public void incrHFilesShipped(long hfiles) {
@@ -195,32 +198,32 @@ public class MetricsReplicationGlobalSourceSource implements MetricsReplicationS
 
   @Override
   public void setGauge(String gaugeName, long value) {
-    rms.setGauge(gaugeName, value);
+    rms.setGauge(KEY_PREFIX + gaugeName, value);
   }
 
   @Override
   public void incGauge(String gaugeName, long delta) {
-    rms.incGauge(gaugeName, delta);
+    rms.incGauge(KEY_PREFIX + gaugeName, delta);
   }
 
   @Override
   public void decGauge(String gaugeName, long delta) {
-    rms.decGauge(gaugeName, delta);
+    rms.decGauge(KEY_PREFIX + gaugeName, delta);
   }
 
   @Override
   public void removeMetric(String key) {
-    rms.removeMetric(key);
+    rms.removeMetric(KEY_PREFIX + key);
   }
 
   @Override
   public void incCounters(String counterName, long delta) {
-    rms.incCounters(counterName, delta);
+    rms.incCounters(KEY_PREFIX + counterName, delta);
   }
 
   @Override
   public void updateHistogram(String name, long value) {
-    rms.updateHistogram(name, value);
+    rms.updateHistogram(KEY_PREFIX + name, value);
   }
 
   @Override

@@ -29,15 +29,17 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.apache.hadoop.hbase.CallQueueTooBigException;
 import org.apache.hadoop.hbase.DoNotRetryIOException;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.exceptions.PreemptiveFastFailException;
-import org.apache.hadoop.hbase.shaded.com.google.protobuf.ServiceException;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.hadoop.hbase.util.ExceptionUtil;
 import org.apache.hadoop.ipc.RemoteException;
+import org.apache.hadoop.util.StringUtils;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.apache.hbase.thirdparty.com.google.protobuf.ServiceException;
 
 /**
  * Runs an rpc'ing {@link RetryingCallable}. Sets into rpc client
@@ -51,12 +53,13 @@ import org.apache.hadoop.ipc.RemoteException;
 @InterfaceAudience.Private
 public class RpcRetryingCallerImpl<T> implements RpcRetryingCaller<T> {
   // LOG is being used in TestMultiRowRangeFilter, hence leaving it public
-  public static final Log LOG = LogFactory.getLog(RpcRetryingCallerImpl.class);
+  public static final Logger LOG = LoggerFactory.getLogger(RpcRetryingCallerImpl.class);
 
   /** How many retries are allowed before we start to log */
   private final int startLogErrorsCnt;
 
   private final long pause;
+  private final long pauseForCQTBE;
   private final int maxAttempts;// how many times to try
   private final int rpcTimeout;// timeout for each rpc request
   private final AtomicBoolean cancelled = new AtomicBoolean(false);
@@ -64,13 +67,15 @@ public class RpcRetryingCallerImpl<T> implements RpcRetryingCaller<T> {
   private final RetryingCallerInterceptorContext context;
   private final RetryingTimeTracker tracker;
 
-  public RpcRetryingCallerImpl(long pause, int retries, int startLogErrorsCnt) {
-    this(pause, retries, RetryingCallerInterceptorFactory.NO_OP_INTERCEPTOR, startLogErrorsCnt, 0);
+  public RpcRetryingCallerImpl(long pause, long pauseForCQTBE, int retries, int startLogErrorsCnt) {
+    this(pause, pauseForCQTBE, retries, RetryingCallerInterceptorFactory.NO_OP_INTERCEPTOR,
+        startLogErrorsCnt, 0);
   }
 
-  public RpcRetryingCallerImpl(long pause, int retries,
+  public RpcRetryingCallerImpl(long pause, long pauseForCQTBE, int retries,
       RetryingCallerInterceptor interceptor, int startLogErrorsCnt, int rpcTimeout) {
     this.pause = pause;
+    this.pauseForCQTBE = pauseForCQTBE;
     this.maxAttempts = retries2Attempts(retries);
     this.interceptor = interceptor;
     context = interceptor.createEmptyContext();
@@ -90,8 +95,7 @@ public class RpcRetryingCallerImpl<T> implements RpcRetryingCaller<T> {
   @Override
   public T callWithRetries(RetryingCallable<T> callable, int callTimeout)
   throws IOException, RuntimeException {
-    List<RetriesExhaustedException.ThrowableWithExtraContext> exceptions =
-      new ArrayList<RetriesExhaustedException.ThrowableWithExtraContext>();
+    List<RetriesExhaustedException.ThrowableWithExtraContext> exceptions = new ArrayList<>();
     tracker.start();
     context.clear();
     for (int tries = 0;; tries++) {
@@ -104,17 +108,32 @@ public class RpcRetryingCallerImpl<T> implements RpcRetryingCaller<T> {
       } catch (PreemptiveFastFailException e) {
         throw e;
       } catch (Throwable t) {
+        Throwable e = t.getCause();
         ExceptionUtil.rethrowIfInterrupt(t);
-
+        Throwable cause = t.getCause();
+        if (cause instanceof DoNotRetryIOException) {
+          // Fail fast
+          throw (DoNotRetryIOException) cause;
+        }
         // translateException throws exception when should not retry: i.e. when request is bad.
         interceptor.handleFailure(context, t);
         t = translateException(t);
 
         if (tries > startLogErrorsCnt) {
-          LOG.info("Call exception, tries=" + tries + ", maxAttempts=" + maxAttempts + ", started="
-              + (EnvironmentEdgeManager.currentTime() - tracker.getStartTime()) + " ms ago, "
-              + "cancelled=" + cancelled.get() + ", msg="
-              + t.getMessage() + " " + callable.getExceptionMessageAdditionalDetail());
+          if (LOG.isInfoEnabled()) {
+            StringBuilder builder = new StringBuilder("Call exception, tries=").append(tries)
+              .append(", retries=").append(tries).append(", started=")
+              .append((EnvironmentEdgeManager.currentTime() - tracker.getStartTime()))
+              .append(" ms ago, ").append("cancelled=").append(cancelled.get())
+              .append(", msg=").append(t.getMessage())
+              .append(", details=").append(callable.getExceptionMessageAdditionalDetail());
+            if (LOG.isDebugEnabled()) {
+              builder.append(", exception=").append(StringUtils.stringifyException(t));
+              LOG.debug(builder.toString());
+            } else {
+              LOG.info(builder.toString());
+            }
+          }
         }
 
         callable.throwable(t, maxAttempts != 1);
@@ -126,9 +145,11 @@ public class RpcRetryingCallerImpl<T> implements RpcRetryingCaller<T> {
           throw new RetriesExhaustedException(tries, exceptions);
         }
         // If the server is dead, we need to wait a little before retrying, to give
-        //  a chance to the regions to be
-        // get right pause time, start by RETRY_BACKOFF[0] * pause
-        expectedSleep = callable.sleep(pause, tries);
+        // a chance to the regions to be moved
+        // get right pause time, start by RETRY_BACKOFF[0] * pauseBase, where pauseBase might be
+        // special when encountering CallQueueTooBigException, see #HBASE-17114
+        long pauseBase = (t instanceof CallQueueTooBigException) ? pauseForCQTBE : pause;
+        expectedSleep = callable.sleep(pauseBase, tries);
 
         // If, after the planned sleep, there won't be enough time left, we stop now.
         long duration = singleCallDuration(expectedSleep);
@@ -180,7 +201,7 @@ public class RpcRetryingCallerImpl<T> implements RpcRetryingCaller<T> {
       }
     }
   }
-  
+
   /**
    * Get the good or the remote exception if any, throws the DoNotRetryIOException.
    * @param t the throwable to analyze

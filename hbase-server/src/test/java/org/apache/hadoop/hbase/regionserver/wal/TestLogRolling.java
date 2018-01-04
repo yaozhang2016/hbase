@@ -30,22 +30,23 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hbase.CategoryBasedTimeout;
 import org.apache.hadoop.hbase.Cell;
-import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.HRegionInfo;
-import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.client.ColumnFamilyDescriptorBuilder;
 import org.apache.hadoop.hbase.client.Put;
+import org.apache.hadoop.hbase.client.RegionInfo;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.ResultScanner;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.client.Table;
+import org.apache.hadoop.hbase.client.TableDescriptor;
+import org.apache.hadoop.hbase.client.TableDescriptorBuilder;
 import org.apache.hadoop.hbase.fs.HFileSystem;
-import org.apache.hadoop.hbase.regionserver.Region;
+import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.testclassification.LargeTests;
 import org.apache.hadoop.hbase.testclassification.VerySlowRegionServerTests;
 import org.apache.hadoop.hbase.util.Bytes;
@@ -57,13 +58,19 @@ import org.apache.hadoop.hbase.wal.WALFactory;
 import org.apache.hadoop.hdfs.protocol.DatanodeInfo;
 import org.apache.hadoop.hdfs.server.datanode.DataNode;
 import org.junit.BeforeClass;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.junit.rules.TestRule;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Category({ VerySlowRegionServerTests.class, LargeTests.class })
 public class TestLogRolling extends AbstractTestLogRolling {
 
-  private static final Log LOG = LogFactory.getLog(TestLogRolling.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestLogRolling.class);
+  @Rule public final TestRule timeout = CategoryBasedTimeout.builder().withTimeout(this.getClass()).
+      withLookingForStuckThread(true).build();
 
   @BeforeClass
   public static void setUpBeforeClass() throws Exception {
@@ -74,14 +81,16 @@ public class TestLogRolling extends AbstractTestLogRolling {
     /**** configuration for testLogRollOnDatanodeDeath ****/
     // lower the namenode & datanode heartbeat so the namenode
     // quickly detects datanode failures
-    TEST_UTIL.getConfiguration().setInt("dfs.namenode.heartbeat.recheck-interval", 5000);
-    TEST_UTIL.getConfiguration().setInt("dfs.heartbeat.interval", 1);
+    Configuration conf= TEST_UTIL.getConfiguration();
+    conf.setInt("dfs.namenode.heartbeat.recheck-interval", 5000);
+    conf.setInt("dfs.heartbeat.interval", 1);
     // the namenode might still try to choose the recently-dead datanode
     // for a pipeline, so try to a new pipeline multiple times
-    TEST_UTIL.getConfiguration().setInt("dfs.client.block.write.retries", 30);
-    TEST_UTIL.getConfiguration().setInt("hbase.regionserver.hlog.tolerable.lowreplication", 2);
-    TEST_UTIL.getConfiguration().setInt("hbase.regionserver.hlog.lowreplication.rolllimit", 3);
-    TEST_UTIL.getConfiguration().set(WALFactory.WAL_PROVIDER, "filesystem");
+    conf.setInt("dfs.client.block.write.retries", 30);
+    conf.setInt("hbase.regionserver.hlog.tolerable.lowreplication", 2);
+    conf.setInt("hbase.regionserver.hlog.lowreplication.rolllimit", 3);
+    conf.set(WALFactory.WAL_PROVIDER, "filesystem");
+    conf.set(WALFactory.META_WAL_PROVIDER, "filesystem");
     AbstractTestLogRolling.setUpBeforeClass();
   }
 
@@ -126,18 +135,18 @@ public class TestLogRolling extends AbstractTestLogRolling {
     this.server = cluster.getRegionServer(0);
 
     // Create the test table and open it
-    HTableDescriptor desc = new HTableDescriptor(TableName.valueOf(getName()));
-    desc.addFamily(new HColumnDescriptor(HConstants.CATALOG_FAMILY));
+    TableDescriptor desc = TableDescriptorBuilder.newBuilder(TableName.valueOf(getName()))
+        .addColumnFamily(ColumnFamilyDescriptorBuilder.of(HConstants.CATALOG_FAMILY)).build();
 
     admin.createTable(desc);
     Table table = TEST_UTIL.getConnection().getTable(desc.getTableName());
 
     server = TEST_UTIL.getRSForFirstRegionInTable(desc.getTableName());
-    HRegionInfo region = server.getOnlineRegions(desc.getTableName()).get(0).getRegionInfo();
+    RegionInfo region = server.getRegions(desc.getTableName()).get(0).getRegionInfo();
     final FSHLog log = (FSHLog) server.getWAL(region);
     final AtomicBoolean lowReplicationHookCalled = new AtomicBoolean(false);
 
-    log.registerWALActionsListener(new WALActionsListener.Base() {
+    log.registerWALActionsListener(new WALActionsListener() {
       @Override
       public void logRollRequested(boolean lowReplication) {
         if (lowReplication) {
@@ -234,20 +243,20 @@ public class TestLogRolling extends AbstractTestLogRolling {
       this.server = cluster.getRegionServer(0);
 
       // Create the test table and open it
-      HTableDescriptor desc = new HTableDescriptor(TableName.valueOf(getName()));
-      desc.addFamily(new HColumnDescriptor(HConstants.CATALOG_FAMILY));
+      TableDescriptor desc = TableDescriptorBuilder.newBuilder(TableName.valueOf(getName()))
+          .addColumnFamily(ColumnFamilyDescriptorBuilder.of(HConstants.CATALOG_FAMILY)).build();
 
       admin.createTable(desc);
       Table table = TEST_UTIL.getConnection().getTable(desc.getTableName());
 
       server = TEST_UTIL.getRSForFirstRegionInTable(desc.getTableName());
-      HRegionInfo region = server.getOnlineRegions(desc.getTableName()).get(0).getRegionInfo();
+      RegionInfo region = server.getRegions(desc.getTableName()).get(0).getRegionInfo();
       final WAL log = server.getWAL(region);
-      final List<Path> paths = new ArrayList<Path>();
-      final List<Integer> preLogRolledCalled = new ArrayList<Integer>();
+      final List<Path> paths = new ArrayList<>(1);
+      final List<Integer> preLogRolledCalled = new ArrayList<>();
 
       paths.add(AbstractFSWALProvider.getCurrentFileName(log));
-      log.registerWALActionsListener(new WALActionsListener.Base() {
+      log.registerWALActionsListener(new WALActionsListener() {
 
         @Override
         public void preLogRoll(Path oldFile, Path newFile) {
@@ -305,7 +314,7 @@ public class TestLogRolling extends AbstractTestLogRolling {
         preLogRolledCalled.size() >= 1);
 
       // read back the data written
-      Set<String> loggedRows = new HashSet<String>();
+      Set<String> loggedRows = new HashSet<>();
       FSUtils fsUtils = FSUtils.getInstance(fs, TEST_UTIL.getConfiguration());
       for (Path p : paths) {
         LOG.debug("recovering lease for " + p);
@@ -338,7 +347,7 @@ public class TestLogRolling extends AbstractTestLogRolling {
       assertTrue(loggedRows.contains("row1005"));
 
       // flush all regions
-      for (Region r : server.getOnlineRegionsLocalContext()) {
+      for (HRegion r : server.getOnlineRegionsLocalContext()) {
         try {
           r.flush(true);
         } catch (Exception e) {
@@ -347,7 +356,7 @@ public class TestLogRolling extends AbstractTestLogRolling {
           // a failed append could not be followed by a successful
           // sync. What is coming out here is a failed sync, a sync
           // that used to 'pass'.
-          LOG.info(e);
+          LOG.info(e.toString(), e);
         }
       }
 

@@ -22,8 +22,7 @@ import java.io.IOException;
 import java.util.NavigableMap;
 import java.util.TreeMap;
 import java.util.concurrent.ThreadLocalRandom;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.CategoryBasedTimeout;
@@ -40,12 +39,15 @@ import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.FSUtils;
 import org.apache.hadoop.hbase.util.Threads;
 import org.apache.hadoop.hbase.wal.WAL;
+import org.apache.hadoop.hbase.wal.WALEdit;
 import org.apache.hadoop.hbase.wal.WALFactory;
-import org.apache.hadoop.hbase.wal.WALKey;
+import org.apache.hadoop.hbase.wal.WALKeyImpl;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.junit.rules.TestRule;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Test many concurrent appenders to an WAL while rolling the log.
@@ -118,7 +120,7 @@ public class TestLogRollingNoCluster {
    * Appender thread.  Appends to passed wal file.
    */
   static class Appender extends Thread {
-    private final Log log;
+    private final Logger log;
     private final WAL wal;
     private final int count;
     private Exception e = null;
@@ -127,7 +129,7 @@ public class TestLogRollingNoCluster {
       super("" + index);
       this.wal = wal;
       this.count = count;
-      this.log = LogFactory.getLog("Appender:" + getName());
+      this.log = LoggerFactory.getLogger("Appender:" + getName());
     }
 
     /**
@@ -157,12 +159,11 @@ public class TestLogRollingNoCluster {
           edit.add(new KeyValue(bytes, bytes, bytes, now, EMPTY_1K_ARRAY));
           final HRegionInfo hri = HRegionInfo.FIRST_META_REGIONINFO;
           final HTableDescriptor htd = TEST_UTIL.getMetaTableDescriptor();
-          NavigableMap<byte[], Integer> scopes = new TreeMap<byte[], Integer>(
-              Bytes.BYTES_COMPARATOR);
+          NavigableMap<byte[], Integer> scopes = new TreeMap<>(Bytes.BYTES_COMPARATOR);
           for(byte[] fam : htd.getFamiliesKeys()) {
             scopes.put(fam, 0);
           }
-          final long txid = wal.append(hri, new WALKey(hri.getEncodedNameAsBytes(),
+          final long txid = wal.append(hri, new WALKeyImpl(hri.getEncodedNameAsBytes(),
               TableName.META_TABLE_NAME, now, mvcc, scopes), edit, true);
           Threads.sleep(ThreadLocalRandom.current().nextInt(5));
           wal.sync(txid);

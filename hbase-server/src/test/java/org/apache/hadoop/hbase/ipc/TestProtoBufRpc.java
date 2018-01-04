@@ -24,6 +24,8 @@ import static org.junit.Assert.fail;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.util.Arrays;
+import java.util.Collection;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HBaseConfiguration;
@@ -40,14 +42,19 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.junit.runner.RunWith;
+import org.junit.runners.Parameterized;
+import org.junit.runners.Parameterized.Parameter;
+import org.junit.runners.Parameterized.Parameters;
 
-import com.google.common.collect.Lists;
+import org.apache.hbase.thirdparty.com.google.common.collect.Lists;
 
 /**
  * Test for testing protocol buffer based RPC mechanism. This test depends on test.proto definition
  * of types in <code>src/test/protobuf/test.proto</code> and protobuf service definition from
  * <code>src/test/protobuf/test_rpc_service.proto</code>
  */
+@RunWith(Parameterized.class)
 @Category({ RPCTests.class, MediumTests.class })
 public class TestProtoBufRpc {
   public final static String ADDRESS = "localhost";
@@ -56,16 +63,27 @@ public class TestProtoBufRpc {
   private Configuration conf;
   private RpcServerInterface server;
 
+  @Parameters(name = "{index}: rpcServerImpl={0}")
+  public static Collection<Object[]> parameters() {
+    return Arrays.asList(new Object[] { SimpleRpcServer.class.getName() },
+        new Object[] { NettyRpcServer.class.getName() });
+  }
+
+  @Parameter(0)
+  public String rpcServerImpl;
+
   @Before
   public void setUp() throws IOException { // Setup server for both protocols
     this.conf = HBaseConfiguration.create();
+    this.conf.set(RpcServerFactory.CUSTOM_RPC_SERVER_IMPL_CONF_KEY,
+        rpcServerImpl);
     Logger log = Logger.getLogger("org.apache.hadoop.ipc.HBaseServer");
     log.setLevel(Level.DEBUG);
     log = Logger.getLogger("org.apache.hadoop.ipc.HBaseServer.trace");
     log.setLevel(Level.TRACE);
     // Create server side implementation
     // Get RPC server for server side implementation
-    this.server = new RpcServer(null, "testrpc",
+    this.server = RpcServerFactory.createRpcServer(null, "testrpc",
         Lists.newArrayList(new RpcServer.BlockingServiceAndInterface(SERVICE, null)),
         new InetSocketAddress(ADDRESS, PORT), conf, new FifoRpcScheduler(conf, 10));
     InetSocketAddress address = server.getListenerAddress();
@@ -81,7 +99,7 @@ public class TestProtoBufRpc {
     server.stop();
   }
 
-  @Test (expected=org.apache.hadoop.hbase.shaded.com.google.protobuf.ServiceException.class
+  @Test (expected=org.apache.hbase.thirdparty.com.google.protobuf.ServiceException.class
       /*Thrown when we call stub.error*/)
   public void testProtoBufRpc() throws Exception {
     RpcClient rpcClient = RpcClientFactory.createClient(conf, HConstants.CLUSTER_ID_DEFAULT);

@@ -21,9 +21,6 @@ package org.apache.hadoop.hbase.regionserver.wal;
 
 import java.io.IOException;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FileSystem;
@@ -32,13 +29,15 @@ import org.apache.hadoop.hbase.HBaseInterfaceAudience;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.io.util.LRUDictionary;
 import org.apache.hadoop.hbase.util.FSUtils;
-
 import org.apache.hadoop.hbase.wal.AbstractFSWALProvider;
 import org.apache.hadoop.hbase.wal.WAL.Entry;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @InterfaceAudience.LimitedPrivate({HBaseInterfaceAudience.COPROC, HBaseInterfaceAudience.PHOENIX})
 public abstract class ReaderBase implements AbstractFSWALProvider.Reader {
-  private static final Log LOG = LogFactory.getLog(ReaderBase.class);
+  private static final Logger LOG = LoggerFactory.getLogger(ReaderBase.class);
   protected Configuration conf;
   protected FileSystem fs;
   protected Path path;
@@ -91,9 +90,7 @@ public abstract class ReaderBase implements AbstractFSWALProvider.Reader {
   public Entry next(Entry reuse) throws IOException {
     Entry e = reuse;
     if (e == null) {
-      // we use HLogKey here instead of WALKey directly to support legacy coprocessors,
-      // seqencefile based readers, and HLogInputFormat.
-      e = new Entry(new HLogKey(), new WALEdit());
+      e = new Entry();
     }
     if (compressionContext != null) {
       e.setCompressionContext(compressionContext);

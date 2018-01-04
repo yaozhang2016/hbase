@@ -18,14 +18,12 @@
 
 package org.apache.hadoop.hbase;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * Thrown when a namespace exists but should not
  */
 @InterfaceAudience.Public
-@InterfaceStability.Stable
 public class NamespaceExistException extends DoNotRetryIOException {
 
   private static final long serialVersionUID = -1582357514338825412L;
@@ -34,6 +32,6 @@ public class NamespaceExistException extends DoNotRetryIOException {
   }
 
   public NamespaceExistException(String namespace) {
-    super(namespace);
+    super("Namespace " + namespace + " already exists");
   }
 }

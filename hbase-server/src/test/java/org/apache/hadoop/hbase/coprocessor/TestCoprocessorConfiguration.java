@@ -26,7 +26,6 @@ import static org.mockito.Mockito.*;
 import static org.junit.Assert.*;
 
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.hbase.Coprocessor;
 import org.apache.hadoop.hbase.CoprocessorEnvironment;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.HRegionInfo;
@@ -40,14 +39,17 @@ import org.apache.hadoop.hbase.regionserver.RegionServerCoprocessorHost;
 import org.apache.hadoop.hbase.regionserver.RegionServerServices;
 import org.apache.hadoop.hbase.testclassification.CoprocessorTests;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.junit.rules.ExpectedException;
 
 /**
  * Tests for global coprocessor loading configuration
  */
 @Category({CoprocessorTests.class, SmallTests.class})
 public class TestCoprocessorConfiguration {
+  @Rule public ExpectedException thrown = ExpectedException.none();
 
   private static final Configuration CONF = HBaseConfiguration.create();
   static {
@@ -74,7 +76,8 @@ public class TestCoprocessorConfiguration {
   private static final AtomicBoolean systemCoprocessorLoaded = new AtomicBoolean();
   private static final AtomicBoolean tableCoprocessorLoaded = new AtomicBoolean();
 
-  public static class SystemCoprocessor implements Coprocessor {
+  public static class SystemCoprocessor implements MasterCoprocessor, RegionCoprocessor,
+      RegionServerCoprocessor {
     @Override
     public void start(CoprocessorEnvironment env) throws IOException {
       systemCoprocessorLoaded.set(true);
@@ -84,7 +87,7 @@ public class TestCoprocessorConfiguration {
     public void stop(CoprocessorEnvironment env) throws IOException { }
   }
 
-  public static class TableCoprocessor implements Coprocessor {
+  public static class TableCoprocessor implements RegionCoprocessor {
     @Override
     public void start(CoprocessorEnvironment env) throws IOException {
       tableCoprocessorLoaded.set(true);
@@ -99,7 +102,7 @@ public class TestCoprocessorConfiguration {
     Configuration conf = new Configuration(CONF);
     HRegion region = mock(HRegion.class);
     when(region.getRegionInfo()).thenReturn(REGIONINFO);
-    when(region.getTableDesc()).thenReturn(TABLEDESC);
+    when(region.getTableDescriptor()).thenReturn(TABLEDESC);
     RegionServerServices rsServices = mock(RegionServerServices.class);
     systemCoprocessorLoaded.set(false);
     tableCoprocessorLoaded.set(false);
@@ -108,7 +111,7 @@ public class TestCoprocessorConfiguration {
       systemCoprocessorLoaded.get(),
       CoprocessorHost.DEFAULT_COPROCESSORS_ENABLED);
     assertEquals("Table coprocessors loading default was not honored",
-      tableCoprocessorLoaded.get(), 
+      tableCoprocessorLoaded.get(),
       CoprocessorHost.DEFAULT_COPROCESSORS_ENABLED &&
       CoprocessorHost.DEFAULT_USER_COPROCESSORS_ENABLED);
   }
@@ -141,7 +144,7 @@ public class TestCoprocessorConfiguration {
     conf.setBoolean(CoprocessorHost.COPROCESSORS_ENABLED_CONF_KEY, false);
     HRegion region = mock(HRegion.class);
     when(region.getRegionInfo()).thenReturn(REGIONINFO);
-    when(region.getTableDesc()).thenReturn(TABLEDESC);
+    when(region.getTableDescriptor()).thenReturn(TABLEDESC);
     RegionServerServices rsServices = mock(RegionServerServices.class);
     systemCoprocessorLoaded.set(false);
     tableCoprocessorLoaded.set(false);
@@ -159,7 +162,7 @@ public class TestCoprocessorConfiguration {
     conf.setBoolean(CoprocessorHost.USER_COPROCESSORS_ENABLED_CONF_KEY, false);
     HRegion region = mock(HRegion.class);
     when(region.getRegionInfo()).thenReturn(REGIONINFO);
-    when(region.getTableDesc()).thenReturn(TABLEDESC);
+    when(region.getTableDescriptor()).thenReturn(TABLEDESC);
     RegionServerServices rsServices = mock(RegionServerServices.class);
     systemCoprocessorLoaded.set(false);
     tableCoprocessorLoaded.set(false);
@@ -168,5 +171,30 @@ public class TestCoprocessorConfiguration {
       systemCoprocessorLoaded.get());
     assertFalse("Table coprocessors should not have been loaded",
       tableCoprocessorLoaded.get());
+  }
+
+  /**
+   * Rough test that Coprocessor Environment is Read-Only.
+   * Just check a random CP and see that it returns a read-only config.
+   */
+  @Test
+  public void testReadOnlyConfiguration() throws Exception {
+    Configuration conf = new Configuration(CONF);
+    HRegion region = mock(HRegion.class);
+    when(region.getRegionInfo()).thenReturn(REGIONINFO);
+    when(region.getTableDescriptor()).thenReturn(TABLEDESC);
+    RegionServerServices rsServices = mock(RegionServerServices.class);
+    RegionCoprocessorHost rcp = new RegionCoprocessorHost(region, rsServices, conf);
+    boolean found = false;
+    for (String cpStr: rcp.getCoprocessors()) {
+      CoprocessorEnvironment cpenv = rcp.findCoprocessorEnvironment(cpStr);
+      if (cpenv != null) {
+        found = true;
+      }
+      Configuration c = cpenv.getConfiguration();
+      thrown.expect(UnsupportedOperationException.class);
+      c.set("one.two.three", "four.five.six");
+    }
+    assertTrue("Should be at least one CP found", found);
   }
 }

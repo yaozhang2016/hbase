@@ -24,6 +24,7 @@ import java.io.DataInputStream;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -31,22 +32,19 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.AuthUtil;
 import org.apache.hadoop.hbase.Cell;
+import org.apache.hadoop.hbase.Cell.Type;
+import org.apache.hadoop.hbase.CellBuilderFactory;
+import org.apache.hadoop.hbase.CellBuilderType;
 import org.apache.hadoop.hbase.CellUtil;
-import org.apache.hadoop.hbase.HColumnDescriptor;
-import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.HRegionInfo;
-import org.apache.hadoop.hbase.HTableDescriptor;
+import org.apache.hadoop.hbase.CompareOperator;
 import org.apache.hadoop.hbase.NamespaceDescriptor;
+import org.apache.hadoop.hbase.PrivateCellUtil;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.Tag;
 import org.apache.hadoop.hbase.TagType;
-import org.apache.hadoop.hbase.TagUtil;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.client.Connection;
 import org.apache.hadoop.hbase.client.ConnectionFactory;
 import org.apache.hadoop.hbase.client.Delete;
@@ -56,24 +54,27 @@ import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.ResultScanner;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.client.Table;
+import org.apache.hadoop.hbase.client.TableDescriptor;
 import org.apache.hadoop.hbase.exceptions.DeserializationException;
-import org.apache.hadoop.hbase.filter.CompareFilter.CompareOp;
 import org.apache.hadoop.hbase.filter.QualifierFilter;
 import org.apache.hadoop.hbase.filter.RegexStringComparator;
-import org.apache.hadoop.hbase.master.MasterServices;
 import org.apache.hadoop.hbase.protobuf.ProtobufUtil;
 import org.apache.hadoop.hbase.protobuf.generated.AccessControlProtos;
-import org.apache.hadoop.hbase.regionserver.BloomType;
 import org.apache.hadoop.hbase.regionserver.InternalScanner;
 import org.apache.hadoop.hbase.regionserver.Region;
 import org.apache.hadoop.hbase.security.User;
+import org.apache.hbase.thirdparty.com.google.common.collect.ArrayListMultimap;
+import org.apache.hbase.thirdparty.com.google.common.collect.ListMultimap;
+import org.apache.hbase.thirdparty.com.google.common.collect.Lists;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.io.Text;
-
-import com.google.common.collect.ArrayListMultimap;
-import com.google.common.collect.ListMultimap;
-import com.google.common.collect.Lists;
+import org.apache.hadoop.io.Writable;
+import org.apache.hadoop.io.WritableFactories;
+import org.apache.hadoop.io.WritableUtils;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Maintains lists of permission grants to users and groups to allow for
@@ -118,28 +119,7 @@ public class AccessControlLists {
    * _acl_ table info: column keys */
   public static final char ACL_KEY_DELIMITER = ',';
 
-  private static final Log LOG = LogFactory.getLog(AccessControlLists.class);
-
-  /**
-   * Create the ACL table
-   * @param master
-   * @throws IOException
-   */
-  static void createACLTable(MasterServices master) throws IOException {
-    /** Table descriptor for ACL table */
-    final HTableDescriptor ACL_TABLEDESC = new HTableDescriptor(ACL_TABLE_NAME)
-        .addFamily(new HColumnDescriptor(ACL_LIST_FAMILY)
-            .setMaxVersions(1)
-            .setInMemory(true)
-            .setBlockCacheEnabled(true)
-            .setBlocksize(8 * 1024)
-            .setBloomFilterType(BloomType.NONE)
-            .setScope(HConstants.REPLICATION_SCOPE_LOCAL)
-            // Set cache data blocks in L1 if more than one cache tier deployed; e.g. this will
-            // be the case if we are using CombinedBlockCache (Bucket Cache).
-            .setCacheDataInL1(true));
-    master.createSystemTable(ACL_TABLEDESC);
-  }
+  private static final Logger LOG = LoggerFactory.getLogger(AccessControlLists.class);
 
   /**
    * Stores a new user permission grant in the access control lists table.
@@ -148,8 +128,8 @@ public class AccessControlLists {
    * @param t acl table instance. It is closed upon method return.
    * @throws IOException in the case of an error accessing the metadata table
    */
-  static void addUserPermission(Configuration conf, UserPermission userPerm, Table t)
-      throws IOException {
+  static void addUserPermission(Configuration conf, UserPermission userPerm, Table t,
+                                boolean mergeExistingPermissions) throws IOException {
     Permission.Action[] actions = userPerm.getActions();
     byte[] rowKey = userPermissionRowKey(userPerm);
     Put p = new Put(rowKey);
@@ -161,11 +141,41 @@ public class AccessControlLists {
       throw new IOException(msg);
     }
 
-    byte[] value = new byte[actions.length];
-    for (int i = 0; i < actions.length; i++) {
-      value[i] = actions[i].code();
+    Set<Permission.Action> actionSet = new TreeSet<Permission.Action>();
+    if(mergeExistingPermissions){
+      List<UserPermission> perms = getUserPermissions(conf, rowKey);
+      UserPermission currentPerm = null;
+      for (UserPermission perm : perms) {
+        if (Bytes.equals(perm.getUser(), userPerm.getUser())
+                && ((userPerm.isGlobal() && ACL_TABLE_NAME.equals(perm.getTableName()))
+                || perm.tableFieldsEqual(userPerm))) {
+          currentPerm = perm;
+          break;
+        }
+      }
+
+      if(currentPerm != null && currentPerm.getActions() != null){
+        actionSet.addAll(Arrays.asList(currentPerm.getActions()));
+      }
     }
-    p.addImmutable(ACL_LIST_FAMILY, key, value);
+
+    // merge current action with new action.
+    actionSet.addAll(Arrays.asList(actions));
+
+    // serialize to byte array.
+    byte[] value = new byte[actionSet.size()];
+    int index = 0;
+    for (Permission.Action action : actionSet) {
+      value[index++] = action.code();
+    }
+    p.add(CellBuilderFactory.create(CellBuilderType.SHALLOW_COPY)
+        .setRow(p.getRow())
+        .setFamily(ACL_LIST_FAMILY)
+        .setQualifier(key)
+        .setTimestamp(p.getTimeStamp())
+        .setType(Type.Put)
+        .setValue(value)
+        .build());
     if (LOG.isDebugEnabled()) {
       LOG.debug("Writing permission with rowKey "+
           Bytes.toString(rowKey)+" "+
@@ -173,10 +183,28 @@ public class AccessControlLists {
           );
     }
     try {
-      t.put(p);
+      /**
+       * TODO: Use Table.put(Put) instead. This Table.put() happens within the RS. We are already in
+       * AccessController. Means already there was an RPC happened to server (Actual grant call from
+       * client side). At RpcServer we have a ThreadLocal where we keep the CallContext and inside
+       * that the current RPC called user info is set. The table on which put was called is created
+       * via the RegionCP env and that uses a special Connection. The normal RPC channel will be by
+       * passed here means there would have no further contact on to the RpcServer. So the
+       * ThreadLocal is never getting reset. We ran the new put as a super user (User.runAsLoginUser
+       * where the login user is the user who started RS process) but still as per the RPC context
+       * it is the old user. When AsyncProcess was used, the execute happen via another thread from
+       * pool and so old ThreadLocal variable is not accessible and so it looks as if no Rpc context
+       * and we were relying on the super user who starts the RS process.
+       */
+      t.put(Collections.singletonList(p));
     } finally {
       t.close();
     }
+  }
+
+  static void addUserPermission(Configuration conf, UserPermission userPerm, Table t)
+          throws IOException{
+    addUserPermission(conf, userPerm, t, false);
   }
 
   /**
@@ -195,13 +223,40 @@ public class AccessControlLists {
    */
   static void removeUserPermission(Configuration conf, UserPermission userPerm, Table t)
       throws IOException {
-    Delete d = new Delete(userPermissionRowKey(userPerm));
-    byte[] key = userPermissionKey(userPerm);
-
-    if (LOG.isDebugEnabled()) {
-      LOG.debug("Removing permission "+ userPerm.toString());
+    if (null == userPerm.getActions()) {
+      removePermissionRecord(conf, userPerm, t);
+    } else {
+      // Get all the global user permissions from the acl table
+      List<UserPermission> permsList = getUserPermissions(conf, userPermissionRowKey(userPerm));
+      List<Permission.Action> remainingActions = new ArrayList<>();
+      List<Permission.Action> dropActions = Arrays.asList(userPerm.getActions());
+      for (UserPermission perm : permsList) {
+        // Find the user and remove only the requested permissions
+        if (Bytes.toString(perm.getUser()).equals(Bytes.toString(userPerm.getUser()))) {
+          for (Permission.Action oldAction : perm.getActions()) {
+            if (!dropActions.contains(oldAction)) {
+              remainingActions.add(oldAction);
+            }
+          }
+          if (!remainingActions.isEmpty()) {
+            perm.setActions(remainingActions.toArray(new Permission.Action[remainingActions.size()]));
+            addUserPermission(conf, perm, t);
+          } else {
+            removePermissionRecord(conf, userPerm, t);
+          }
+          break;
+        }
+      }
     }
-    d.addColumns(ACL_LIST_FAMILY, key);
+    if (LOG.isDebugEnabled()) {
+      LOG.debug("Removed permission "+ userPerm.toString());
+    }
+  }
+
+  private static void removePermissionRecord(Configuration conf, UserPermission userPerm, Table t)
+      throws IOException {
+    Delete d = new Delete(userPermissionRowKey(userPerm));
+    d.addColumns(ACL_LIST_FAMILY, userPermissionKey(userPerm));
     try {
       t.delete(d);
     } finally {
@@ -250,12 +305,12 @@ public class AccessControlLists {
     scan.addFamily(ACL_LIST_FAMILY);
 
     String columnName = Bytes.toString(column);
-    scan.setFilter(new QualifierFilter(CompareOp.EQUAL, new RegexStringComparator(
+    scan.setFilter(new QualifierFilter(CompareOperator.EQUAL, new RegexStringComparator(
         String.format("(%s%s%s)|(%s%s)$",
             ACL_KEY_DELIMITER, columnName, ACL_KEY_DELIMITER,
             ACL_KEY_DELIMITER, columnName))));
 
-    Set<byte[]> qualifierSet = new TreeSet<byte[]>(Bytes.BYTES_COMPARATOR);
+    Set<byte[]> qualifierSet = new TreeSet<>(Bytes.BYTES_COMPARATOR);
     ResultScanner scanner = null;
     try {
       scanner = table.getScanner(scan);
@@ -328,13 +383,13 @@ public class AccessControlLists {
    * metadata table.
    */
   static boolean isAclRegion(Region region) {
-    return ACL_TABLE_NAME.equals(region.getTableDesc().getTableName());
+    return ACL_TABLE_NAME.equals(region.getTableDescriptor().getTableName());
   }
 
   /**
    * Returns {@code true} if the given table is {@code _acl_} metadata table.
    */
-  static boolean isAclTable(HTableDescriptor desc) {
+  static boolean isAclTable(TableDescriptor desc) {
     return ACL_TABLE_NAME.equals(desc.getTableName());
   }
 
@@ -353,8 +408,7 @@ public class AccessControlLists {
       throw new IOException("Can only load permissions from "+ACL_TABLE_NAME);
     }
 
-    Map<byte[], ListMultimap<String, TablePermission>> allPerms =
-        new TreeMap<byte[], ListMultimap<String, TablePermission>>(Bytes.BYTES_RAWCOMPARATOR);
+    Map<byte[], ListMultimap<String, TablePermission>> allPerms = new TreeMap<>(Bytes.BYTES_RAWCOMPARATOR);
 
     // do a full scan of _acl_ table
 
@@ -366,7 +420,7 @@ public class AccessControlLists {
       iScanner = aclRegion.getScanner(scan);
 
       while (true) {
-        List<Cell> row = new ArrayList<Cell>();
+        List<Cell> row = new ArrayList<>();
 
         boolean hasNext = iScanner.next(row);
         ListMultimap<String,TablePermission> perms = ArrayListMultimap.create();
@@ -405,8 +459,7 @@ public class AccessControlLists {
    */
   static Map<byte[], ListMultimap<String,TablePermission>> loadAll(
       Configuration conf) throws IOException {
-    Map<byte[], ListMultimap<String,TablePermission>> allPerms =
-        new TreeMap<byte[], ListMultimap<String,TablePermission>>(Bytes.BYTES_RAWCOMPARATOR);
+    Map<byte[], ListMultimap<String,TablePermission>> allPerms = new TreeMap<>(Bytes.BYTES_RAWCOMPARATOR);
 
     // do a full scan of _acl_, filtering on only first table region rows
 
@@ -432,7 +485,7 @@ public class AccessControlLists {
     return allPerms;
   }
 
-  static ListMultimap<String, TablePermission> getTablePermissions(Configuration conf,
+  public static ListMultimap<String, TablePermission> getTablePermissions(Configuration conf,
       TableName tableName) throws IOException {
     return getPermissions(conf, tableName != null ? tableName.getName() : null, null);
   }
@@ -499,7 +552,7 @@ public class AccessControlLists {
     ListMultimap<String,TablePermission> allPerms = getPermissions(
         conf, entryName, null);
 
-    List<UserPermission> perms = new ArrayList<UserPermission>();
+    List<UserPermission> perms = new ArrayList<>();
 
     if(isNamespaceEntry(entryName)) {  // Namespace
       for (Map.Entry<String, TablePermission> entry : allPerms.entries()) {
@@ -560,8 +613,7 @@ public class AccessControlLists {
 
     //Handle namespace entry
     if(isNamespaceEntry(entryName)) {
-      return new Pair<String, TablePermission>(username,
-          new TablePermission(Bytes.toString(fromNamespaceEntry(entryName)), value));
+      return new Pair<>(username, new TablePermission(Bytes.toString(fromNamespaceEntry(entryName)), value));
     }
 
     //Handle table and global entry
@@ -581,8 +633,7 @@ public class AccessControlLists {
       }
     }
 
-    return new Pair<String,TablePermission>(username,
-        new TablePermission(TableName.valueOf(entryName), permFamily, permQualifier, value));
+    return new Pair<>(username, new TablePermission(TableName.valueOf(entryName), permFamily, permQualifier, value));
   }
 
   /**
@@ -596,13 +647,36 @@ public class AccessControlLists {
     return ProtobufUtil.prependPBMagic(AccessControlUtil.toUserTablePermissions(perms).toByteArray());
   }
 
+  // This is part of the old HbaseObjectWritableFor96Migration.
+  private static final int LIST_CODE = 61;
+
+  private static final int WRITABLE_CODE = 14;
+
+  private static final int WRITABLE_NOT_ENCODED = 0;
+
+  private static List<TablePermission> readWritablePermissions(DataInput in, Configuration conf)
+      throws IOException, ClassNotFoundException {
+    assert WritableUtils.readVInt(in) == LIST_CODE;
+    int length = in.readInt();
+    List<TablePermission> list = new ArrayList<>(length);
+    for (int i = 0; i < length; i++) {
+      assert WritableUtils.readVInt(in) == WRITABLE_CODE;
+      assert WritableUtils.readVInt(in) == WRITABLE_NOT_ENCODED;
+      String className = Text.readString(in);
+      Class<? extends Writable> clazz = conf.getClassByName(className).asSubclass(Writable.class);
+      Writable instance = WritableFactories.newInstance(clazz, conf);
+      instance.readFields(in);
+      list.add((TablePermission) instance);
+    }
+    return list;
+  }
+
   /**
-   * Reads a set of permissions as {@link org.apache.hadoop.io.Writable} instances
-   * from the input stream.
+   * Reads a set of permissions as {@link org.apache.hadoop.io.Writable} instances from the input
+   * stream.
    */
   public static ListMultimap<String, TablePermission> readPermissions(byte[] data,
-      Configuration conf)
-          throws DeserializationException {
+      Configuration conf) throws DeserializationException {
     if (ProtobufUtil.isPBMagicPrefix(data)) {
       int pblen = ProtobufUtil.lengthOfPBMagic();
       try {
@@ -614,17 +688,18 @@ public class AccessControlLists {
         throw new DeserializationException(e);
       }
     } else {
-      ListMultimap<String,TablePermission> perms = ArrayListMultimap.create();
+      // TODO: We have to re-write non-PB data as PB encoded. Otherwise we will carry old Writables
+      // forever (here and a couple of other places).
+      ListMultimap<String, TablePermission> perms = ArrayListMultimap.create();
       try {
         DataInput in = new DataInputStream(new ByteArrayInputStream(data));
         int length = in.readInt();
-        for (int i=0; i<length; i++) {
+        for (int i = 0; i < length; i++) {
           String user = Text.readString(in);
-          List<TablePermission> userPerms =
-              (List)HbaseObjectWritableFor96Migration.readObject(in, conf);
+          List<TablePermission> userPerms = readWritablePermissions(in, conf);
           perms.putAll(user, userPerms);
         }
-      } catch (IOException e) {
+      } catch (IOException | ClassNotFoundException e) {
         throw new DeserializationException(e);
       }
       return perms;
@@ -671,19 +746,19 @@ public class AccessControlLists {
       return null;
     }
     List<Permission> results = Lists.newArrayList();
-    Iterator<Tag> tagsIterator = CellUtil.tagsIterator(cell);
+    Iterator<Tag> tagsIterator = PrivateCellUtil.tagsIterator(cell);
     while (tagsIterator.hasNext()) {
       Tag tag = tagsIterator.next();
       if (tag.getType() == ACL_TAG_TYPE) {
         // Deserialize the table permissions from the KV
         // TODO: This can be improved. Don't build UsersAndPermissions just to unpack it again,
         // use the builder
-        AccessControlProtos.UsersAndPermissions.Builder builder = 
+        AccessControlProtos.UsersAndPermissions.Builder builder =
             AccessControlProtos.UsersAndPermissions.newBuilder();
         if (tag.hasArray()) {
           ProtobufUtil.mergeFrom(builder, tag.getValueArray(), tag.getValueOffset(), tag.getValueLength());
         } else {
-          ProtobufUtil.mergeFrom(builder, TagUtil.cloneValue(tag));
+          ProtobufUtil.mergeFrom(builder, Tag.cloneValue(tag));
         }
         ListMultimap<String,Permission> kvPerms =
             AccessControlUtil.toUsersAndPermissions(builder.build());

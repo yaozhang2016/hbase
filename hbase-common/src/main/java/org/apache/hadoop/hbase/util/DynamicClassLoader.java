@@ -23,13 +23,13 @@ import java.net.MalformedURLException;
 import java.net.URL;
 import java.util.HashMap;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * This is a class loader that can load classes dynamically from new
@@ -57,8 +57,8 @@ import org.apache.hadoop.hbase.classification.InterfaceAudience;
  */
 @InterfaceAudience.Private
 public class DynamicClassLoader extends ClassLoaderBase {
-  private static final Log LOG =
-      LogFactory.getLog(DynamicClassLoader.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(DynamicClassLoader.class);
 
   // Dynamic jars are put under ${hbase.local.dir}/jars/
   private static final String DYNAMIC_JARS_DIR = File.separator
@@ -102,7 +102,7 @@ public class DynamicClassLoader extends ClassLoaderBase {
   // FindBugs: Making synchronized to avoid IS2_INCONSISTENT_SYNC complaints about
   // remoteDirFs and jarModifiedTime being part synchronized protected.
   private synchronized void initTempDir(final Configuration conf) {
-    jarModifiedTime = new HashMap<String, Long>();
+    jarModifiedTime = new HashMap<>();
     String localDirPath = conf.get(
       LOCAL_DIR_KEY, DEFAULT_LOCAL_DIR) + DYNAMIC_JARS_DIR;
     localDir = new File(localDirPath);
@@ -179,8 +179,9 @@ public class DynamicClassLoader extends ClassLoaderBase {
 
   private synchronized void loadNewJars() {
     // Refresh local jar file lists
-    if (localDir != null) {
-      for (File file : localDir.listFiles()) {
+    File[] files = localDir == null ? null : localDir.listFiles();
+    if (files != null) {
+      for (File file : files) {
         String fileName = file.getName();
         if (jarModifiedTime.containsKey(fileName)) {
           continue;

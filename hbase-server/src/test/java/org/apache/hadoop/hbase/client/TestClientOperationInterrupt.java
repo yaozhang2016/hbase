@@ -19,17 +19,16 @@
 package org.apache.hadoop.hbase.client;
 
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.TableName;
-import org.apache.hadoop.hbase.coprocessor.BaseRegionObserver;
 import org.apache.hadoop.hbase.coprocessor.CoprocessorHost;
 import org.apache.hadoop.hbase.coprocessor.ObserverContext;
+import org.apache.hadoop.hbase.coprocessor.RegionCoprocessor;
 import org.apache.hadoop.hbase.coprocessor.RegionCoprocessorEnvironment;
+import org.apache.hadoop.hbase.coprocessor.RegionObserver;
 import org.apache.hadoop.hbase.testclassification.ClientTests;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.util.Bytes;
@@ -39,17 +38,20 @@ import org.junit.Assert;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.net.SocketTimeoutException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 
 @Category({MediumTests.class, ClientTests.class})
 public class TestClientOperationInterrupt {
-  private static final Log LOG = LogFactory.getLog(TestClientOperationInterrupt.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestClientOperationInterrupt.class);
 
   private static HBaseTestingUtility util;
   private static final TableName tableName = TableName.valueOf("test");
@@ -58,7 +60,12 @@ public class TestClientOperationInterrupt {
   private static final byte[] test = Bytes.toBytes("test");
   private static Configuration conf;
 
-  public static class TestCoprocessor extends BaseRegionObserver {
+  public static class TestCoprocessor implements RegionCoprocessor, RegionObserver {
+    @Override
+    public Optional<RegionObserver> getRegionObserver() {
+      return Optional.of(this);
+    }
+
     @Override
     public void preGetOp(final ObserverContext<RegionCoprocessorEnvironment> e,
                          final Get get, final List<Cell> results) throws IOException {
@@ -75,7 +82,7 @@ public class TestClientOperationInterrupt {
     util = new HBaseTestingUtility(conf);
     util.startMiniCluster();
 
-    Admin admin = util.getHBaseAdmin();
+    Admin admin = util.getAdmin();
     if (admin.tableExists(tableName)) {
       if (admin.isTableEnabled(tableName)) {
         admin.disableTable(tableName);
@@ -96,7 +103,7 @@ public class TestClientOperationInterrupt {
     final AtomicInteger badEx = new AtomicInteger(0);
     final AtomicInteger noInt = new AtomicInteger(0);
     final AtomicInteger done = new AtomicInteger(0);
-    List<Thread> threads = new ArrayList<Thread>();
+    List<Thread> threads = new ArrayList<>();
 
     final int nbThread = 100;
 

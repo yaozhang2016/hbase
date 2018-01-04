@@ -15,37 +15,41 @@
  */
 package org.apache.hadoop.hbase.client;
 
-import com.google.common.annotations.VisibleForTesting;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.hbase.HConstants; // Needed for write rpc timeout
-import org.apache.hadoop.hbase.TableName;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
-import org.apache.hadoop.hbase.ipc.RpcControllerFactory;
-
+import static org.apache.hadoop.hbase.client.BufferedMutatorParams.UNSET;
 import java.io.IOException;
 import java.io.InterruptedIOException;
-import java.util.Arrays;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 import java.util.NoSuchElementException;
+import java.util.Timer;
+import java.util.TimerTask;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.ipc.RpcControllerFactory;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceStability;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
 
 /**
  * <p>
  * Used to communicate with a single HBase table similar to {@link Table}
  * but meant for batched, potentially asynchronous puts. Obtain an instance from
- * a {@link Connection} and call {@link #close()} afterwards.
+ * a {@link Connection} and call {@link #close()} afterwards. Provide an alternate
+ * to this implementation by setting {@link BufferedMutatorParams#implementationClassName(String)}
+ * or by setting alternate classname via the key {} in Configuration.
  * </p>
  *
  * <p>
- * While this can be used accross threads, great care should be used when doing so.
+ * While this can be used across threads, great care should be used when doing so.
  * Errors are global to the buffered mutator and the Exceptions can be thrown on any
  * thread that causes the flush for requests.
  * </p>
@@ -58,62 +62,96 @@ import java.util.concurrent.atomic.AtomicLong;
 @InterfaceStability.Evolving
 public class BufferedMutatorImpl implements BufferedMutator {
 
-  private static final Log LOG = LogFactory.getLog(BufferedMutatorImpl.class);
-  
+  private static final Logger LOG = LoggerFactory.getLogger(BufferedMutatorImpl.class);
+
   private final ExceptionListener listener;
 
-  protected ClusterConnection connection; // non-final so can be overridden in test
   private final TableName tableName;
-  private volatile Configuration conf;
 
-  @VisibleForTesting
-  final ConcurrentLinkedQueue<Mutation> writeAsyncBuffer = new ConcurrentLinkedQueue<Mutation>();
-  @VisibleForTesting
-  AtomicLong currentWriteBufferSize = new AtomicLong(0);
-
+  private final Configuration conf;
+  private final ConcurrentLinkedQueue<Mutation> writeAsyncBuffer = new ConcurrentLinkedQueue<>();
+  private final AtomicLong currentWriteBufferSize = new AtomicLong(0);
   /**
    * Count the size of {@link BufferedMutatorImpl#writeAsyncBuffer}.
    * The {@link ConcurrentLinkedQueue#size()} is NOT a constant-time operation.
    */
-  @VisibleForTesting
-  AtomicInteger undealtMutationCount = new AtomicInteger(0);
-  private long writeBufferSize;
+  private final AtomicInteger undealtMutationCount = new AtomicInteger(0);
+  private final long writeBufferSize;
+
+  private final AtomicLong writeBufferPeriodicFlushTimeoutMs = new AtomicLong(0);
+  private final AtomicLong writeBufferPeriodicFlushTimerTickMs =
+          new AtomicLong(MIN_WRITE_BUFFER_PERIODIC_FLUSH_TIMERTICK_MS);
+  private Timer writeBufferPeriodicFlushTimer = null;
+
   private final int maxKeyValueSize;
-  private boolean closed = false;
   private final ExecutorService pool;
-  private int writeRpcTimeout; // needed to pass in through AsyncProcess constructor
-  private int operationTimeout;
+  private final AtomicInteger rpcTimeout;
+  private final AtomicInteger operationTimeout;
+  private final boolean cleanupPoolOnClose;
+  private volatile boolean closed = false;
+  private final AsyncProcess ap;
 
   @VisibleForTesting
-  protected AsyncProcess ap; // non-final so can be overridden in test
-
-  BufferedMutatorImpl(ClusterConnection conn, RpcRetryingCallerFactory rpcCallerFactory,
-      RpcControllerFactory rpcFactory, BufferedMutatorParams params) {
+  BufferedMutatorImpl(ClusterConnection conn, BufferedMutatorParams params, AsyncProcess ap) {
     if (conn == null || conn.isClosed()) {
       throw new IllegalArgumentException("Connection is null or closed.");
     }
-
     this.tableName = params.getTableName();
-    this.connection = conn;
-    this.conf = connection.getConfiguration();
-    this.pool = params.getPool();
+    this.conf = conn.getConfiguration();
     this.listener = params.getListener();
-
+    if (params.getPool() == null) {
+      this.pool = HTable.getDefaultExecutor(conf);
+      cleanupPoolOnClose = true;
+    } else {
+      this.pool = params.getPool();
+      cleanupPoolOnClose = false;
+    }
     ConnectionConfiguration tableConf = new ConnectionConfiguration(conf);
-    this.writeBufferSize = params.getWriteBufferSize() != BufferedMutatorParams.UNSET ?
-        params.getWriteBufferSize() : tableConf.getWriteBufferSize();
-    this.maxKeyValueSize = params.getMaxKeyValueSize() != BufferedMutatorParams.UNSET ?
-        params.getMaxKeyValueSize() : tableConf.getMaxKeyValueSize();
+    this.writeBufferSize =
+            params.getWriteBufferSize() != UNSET ?
+            params.getWriteBufferSize() : tableConf.getWriteBufferSize();
 
-    this.writeRpcTimeout = conn.getConfiguration().getInt(HConstants.HBASE_RPC_WRITE_TIMEOUT_KEY,
-        conn.getConfiguration().getInt(HConstants.HBASE_RPC_TIMEOUT_KEY,
-            HConstants.DEFAULT_HBASE_RPC_TIMEOUT));
-    this.operationTimeout = conn.getConfiguration().getInt(
-        HConstants.HBASE_CLIENT_OPERATION_TIMEOUT,
-        HConstants.DEFAULT_HBASE_CLIENT_OPERATION_TIMEOUT);
-    // puts need to track errors globally due to how the APIs currently work.
-    ap = new AsyncProcess(connection, conf, pool, rpcCallerFactory, true, rpcFactory,
-        writeRpcTimeout, operationTimeout);
+    // Set via the setter because it does value validation and starts/stops the TimerTask
+    long newWriteBufferPeriodicFlushTimeoutMs =
+            params.getWriteBufferPeriodicFlushTimeoutMs() != UNSET
+              ? params.getWriteBufferPeriodicFlushTimeoutMs()
+              : tableConf.getWriteBufferPeriodicFlushTimeoutMs();
+    long newWriteBufferPeriodicFlushTimerTickMs =
+            params.getWriteBufferPeriodicFlushTimerTickMs() != UNSET
+              ? params.getWriteBufferPeriodicFlushTimerTickMs()
+              : tableConf.getWriteBufferPeriodicFlushTimerTickMs();
+    this.setWriteBufferPeriodicFlush(
+            newWriteBufferPeriodicFlushTimeoutMs,
+            newWriteBufferPeriodicFlushTimerTickMs);
+
+    this.maxKeyValueSize =
+            params.getMaxKeyValueSize() != UNSET ?
+            params.getMaxKeyValueSize() : tableConf.getMaxKeyValueSize();
+
+    this.rpcTimeout = new AtomicInteger(
+            params.getRpcTimeout() != UNSET ?
+            params.getRpcTimeout() : conn.getConnectionConfiguration().getWriteRpcTimeout());
+
+    this.operationTimeout = new AtomicInteger(
+            params.getOperationTimeout() != UNSET ?
+            params.getOperationTimeout() : conn.getConnectionConfiguration().getOperationTimeout());
+    this.ap = ap;
+  }
+  BufferedMutatorImpl(ClusterConnection conn, RpcRetryingCallerFactory rpcCallerFactory,
+      RpcControllerFactory rpcFactory, BufferedMutatorParams params) {
+    this(conn, params,
+      // puts need to track errors globally due to how the APIs currently work.
+      new AsyncProcess(conn, conn.getConfiguration(), rpcCallerFactory, true, rpcFactory));
+  }
+
+  @VisibleForTesting
+  ExecutorService getPool() {
+    return pool;
+  }
+
+  @VisibleForTesting
+  AsyncProcess getAsyncProcess() {
+    return ap;
   }
 
   @Override
@@ -129,7 +167,7 @@ public class BufferedMutatorImpl implements BufferedMutator {
   @Override
   public void mutate(Mutation m) throws InterruptedIOException,
       RetriesExhaustedWithDetailsException {
-    mutate(Arrays.asList(m));
+    mutate(Collections.singletonList(m));
   }
 
   @Override
@@ -148,6 +186,10 @@ public class BufferedMutatorImpl implements BufferedMutator {
       }
       toAddSize += m.heapSize();
       ++toAddCount;
+    }
+
+    if (currentWriteBufferSize.get() == 0) {
+      firstRecordInBufferTimestamp.set(System.currentTimeMillis());
     }
 
     // This behavior is highly non-intuitive... it does not protect us against
@@ -171,6 +213,31 @@ public class BufferedMutatorImpl implements BufferedMutator {
     }
   }
 
+  @VisibleForTesting
+  protected long getExecutedWriteBufferPeriodicFlushes() {
+    return executedWriteBufferPeriodicFlushes.get();
+  }
+
+  private final AtomicLong firstRecordInBufferTimestamp = new AtomicLong(0);
+  private final AtomicLong executedWriteBufferPeriodicFlushes = new AtomicLong(0);
+
+  private void timerCallbackForWriteBufferPeriodicFlush() {
+    if (currentWriteBufferSize.get() == 0) {
+      return; // Nothing to flush
+    }
+    long now = System.currentTimeMillis();
+    if (firstRecordInBufferTimestamp.get() + writeBufferPeriodicFlushTimeoutMs.get() > now) {
+      return; // No need to flush yet
+    }
+    // The first record in the writebuffer has been in there too long --> flush
+    try {
+      executedWriteBufferPeriodicFlushes.incrementAndGet();
+      flush();
+    } catch (InterruptedIOException | RetriesExhaustedWithDetailsException e) {
+      LOG.error("Exception during timerCallbackForWriteBufferPeriodicFlush --> " + e.getMessage());
+    }
+  }
+
   // validate for well-formedness
   public void validatePut(final Put put) throws IllegalArgumentException {
     HTable.validatePut(put, maxKeyValueSize);
@@ -182,25 +249,29 @@ public class BufferedMutatorImpl implements BufferedMutator {
       if (this.closed) {
         return;
       }
+
+      // Stop any running Periodic Flush timer.
+      disableWriteBufferPeriodicFlush();
+
       // As we can have an operation in progress even if the buffer is empty, we call
       // backgroundFlushCommits at least one time.
       backgroundFlushCommits(true);
-      this.pool.shutdown();
-      boolean terminated;
-      int loopCnt = 0;
-      do {
-        // wait until the pool has terminated
-        terminated = this.pool.awaitTermination(60, TimeUnit.SECONDS);
-        loopCnt += 1;
-        if (loopCnt >= 10) {
-          LOG.warn("close() failed to terminate pool after 10 minutes. Abandoning pool.");
-          break;
-        }
-      } while (!terminated);
-
+      if (cleanupPoolOnClose) {
+        this.pool.shutdown();
+        boolean terminated;
+        int loopCnt = 0;
+        do {
+          // wait until the pool has terminated
+          terminated = this.pool.awaitTermination(60, TimeUnit.SECONDS);
+          loopCnt += 1;
+          if (loopCnt >= 10) {
+            LOG.warn("close() failed to terminate pool after 10 minutes. Abandoning pool.");
+            break;
+          }
+        } while (!terminated);
+      }
     } catch (InterruptedException e) {
       LOG.warn("waitForTermination interrupted");
-
     } finally {
       this.closed = true;
     }
@@ -231,8 +302,9 @@ public class BufferedMutatorImpl implements BufferedMutator {
 
     if (!synchronous) {
       QueueRowAccess taker = new QueueRowAccess();
+      AsyncProcessTask task = wrapAsyncProcessTask(taker);
       try {
-        ap.submit(tableName, taker, true, null, false);
+        ap.submit(task);
         if (ap.hasError()) {
           LOG.debug(tableName + ": One or more of the operations have failed -"
               + " waiting for all operation in progress to finish (successfully or not)");
@@ -243,17 +315,17 @@ public class BufferedMutatorImpl implements BufferedMutator {
     }
     if (synchronous || ap.hasError()) {
       QueueRowAccess taker = new QueueRowAccess();
+      AsyncProcessTask task = wrapAsyncProcessTask(taker);
       try {
         while (!taker.isEmpty()) {
-          ap.submit(tableName, taker, true, null, false);
+          ap.submit(task);
           taker.reset();
         }
       } finally {
         taker.restoreRemainder();
       }
-
       RetriesExhaustedWithDetailsException error =
-          ap.waitForAllPreviousOpsAndReset(null, tableName.getNameAsString());
+          ap.waitForAllPreviousOpsAndReset(null, tableName);
       if (error != null) {
         if (listener == null) {
           throw error;
@@ -265,17 +337,29 @@ public class BufferedMutatorImpl implements BufferedMutator {
   }
 
   /**
-   * This is used for legacy purposes in {@link HTable#setWriteBufferSize(long)} only. This ought
-   * not be called for production uses.
-   * @deprecated Going away when we drop public support for {@link HTable}.
+   * Reuse the AsyncProcessTask when calling
+   * {@link BufferedMutatorImpl#backgroundFlushCommits(boolean)}.
+   * @param taker access the inner buffer.
+   * @return An AsyncProcessTask which always returns the latest rpc and operation timeout.
    */
-  @Deprecated
-  public void setWriteBufferSize(long writeBufferSize) throws RetriesExhaustedWithDetailsException,
-      InterruptedIOException {
-    this.writeBufferSize = writeBufferSize;
-    if (currentWriteBufferSize.get() > writeBufferSize) {
-      flush();
-    }
+  private AsyncProcessTask wrapAsyncProcessTask(QueueRowAccess taker) {
+    AsyncProcessTask task = AsyncProcessTask.newBuilder()
+        .setPool(pool)
+        .setTableName(tableName)
+        .setRowAccess(taker)
+        .setSubmittedRows(AsyncProcessTask.SubmittedRows.AT_LEAST_ONE)
+        .build();
+    return new AsyncProcessTask(task) {
+      @Override
+      public int getRpcTimeout() {
+        return rpcTimeout.get();
+      }
+
+      @Override
+      public int getOperationTimeout() {
+        return operationTimeout.get();
+      }
+    };
   }
 
   /**
@@ -287,15 +371,66 @@ public class BufferedMutatorImpl implements BufferedMutator {
   }
 
   @Override
-  public void setRpcTimeout(int timeout) {
-    this.writeRpcTimeout = timeout;
-    ap.setRpcTimeout(timeout);
+  public synchronized void setWriteBufferPeriodicFlush(long timeoutMs, long timerTickMs) {
+    long originalTimeoutMs   = this.writeBufferPeriodicFlushTimeoutMs.get();
+    long originalTimerTickMs = this.writeBufferPeriodicFlushTimerTickMs.get();
+
+    // Both parameters have minimal values.
+    writeBufferPeriodicFlushTimeoutMs.set(Math.max(0, timeoutMs));
+    writeBufferPeriodicFlushTimerTickMs.set(
+            Math.max(MIN_WRITE_BUFFER_PERIODIC_FLUSH_TIMERTICK_MS, timerTickMs));
+
+    // If something changed we stop the old Timer.
+    if (writeBufferPeriodicFlushTimeoutMs.get() != originalTimeoutMs ||
+        writeBufferPeriodicFlushTimerTickMs.get() != originalTimerTickMs) {
+      if (writeBufferPeriodicFlushTimer != null) {
+        writeBufferPeriodicFlushTimer.cancel();
+        writeBufferPeriodicFlushTimer = null;
+      }
+    }
+
+    // If we have the need for a timer and there is none we start it
+    if (writeBufferPeriodicFlushTimer == null &&
+        writeBufferPeriodicFlushTimeoutMs.get() > 0) {
+      writeBufferPeriodicFlushTimer = new Timer(true); // Create Timer running as Daemon.
+      writeBufferPeriodicFlushTimer.schedule(new TimerTask() {
+        @Override
+        public void run() {
+          BufferedMutatorImpl.this.timerCallbackForWriteBufferPeriodicFlush();
+        }
+      }, writeBufferPeriodicFlushTimerTickMs.get(),
+         writeBufferPeriodicFlushTimerTickMs.get());
+    }
   }
 
   @Override
-  public void setOperationTimeout(int timeout) {
-    this.operationTimeout = timeout;
-    ap.setOperationTimeout(operationTimeout);
+  public long getWriteBufferPeriodicFlushTimeoutMs() {
+    return writeBufferPeriodicFlushTimeoutMs.get();
+  }
+
+  @Override
+  public long getWriteBufferPeriodicFlushTimerTickMs() {
+    return writeBufferPeriodicFlushTimerTickMs.get();
+  }
+
+  @Override
+  public void setRpcTimeout(int rpcTimeout) {
+    this.rpcTimeout.set(rpcTimeout);
+  }
+
+  @Override
+  public void setOperationTimeout(int operationTimeout) {
+    this.operationTimeout.set(operationTimeout);
+  }
+
+  @VisibleForTesting
+  long getCurrentWriteBufferSize() {
+    return currentWriteBufferSize.get();
+  }
+
+  @VisibleForTesting
+  int size() {
+    return undealtMutationCount.get();
   }
 
   private class QueueRowAccess implements RowAccess<Row> {

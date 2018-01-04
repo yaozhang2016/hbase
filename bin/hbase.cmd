@@ -16,7 +16,7 @@
 @rem * See the License for the specific language governing permissions and
 @rem * limitations under the License.
 @rem */
-@rem 
+@rem
 @rem The hbase command script.  Based on the hadoop command script putting
 @rem in hbase classes, libs and configurations ahead of hadoop's.
 @rem
@@ -41,7 +41,7 @@
 @rem   JRUBY_HOME       JRuby path: $JRUBY_HOME\lib\jruby.jar should exist.
 @rem                    Defaults to the jar packaged with HBase.
 @rem
-@rem   JRUBY_OPTS       Extra options (eg '--1.9') passed to the hbase shell.
+@rem   JRUBY_OPTS       Extra options (eg '--1.9') passed to hbase.
 @rem                    Empty by default.
 @rem   HBASE_SHELL_OPTS Extra options passed to the hbase shell.
 @rem                    Empty by default.
@@ -103,7 +103,7 @@ if defined HBASE_OFFHEAPSIZE (
 set CLASSPATH=%HBASE_CONF_DIR%;%JAVA_HOME%\lib\tools.jar
 
 rem Add maven target directory
-set cached_classpath_filename=%HBASE_HOME%\target\cached_classpath.txt
+set cached_classpath_filename=%HBASE_HOME%\hbase-build-configuration\target\cached_classpath.txt
 if "%in_dev_env%"=="true" (
 
   rem adding maven main classes to classpath
@@ -197,7 +197,7 @@ if exist "%HBASE_HOME%\build\native" (
 rem This loop would set %hbase-command-arguments%
 set _hbasearguments=
 :MakeCmdArgsLoop
-  if [%1]==[] goto :EndLoop 
+  if [%1]==[] goto :EndLoop
 
   if not defined _hbasearguments (
     set _hbasearguments=%1
@@ -205,8 +205,8 @@ set _hbasearguments=
     set _hbasearguments=!_hbasearguments! %1
   )
   shift
-goto :MakeCmdArgsLoop 
-:EndLoop 
+goto :MakeCmdArgsLoop
+:EndLoop
 
 set hbase-command-arguments=%_hbasearguments%
 
@@ -262,6 +262,50 @@ if defined service_entry (
   )
 )
 
+@rem for jruby
+@rem (1) for the commands which need jruby (see jruby-commands defined below)
+@rem     A. when JRUBY_HOME is defined
+@rem        CLASSPATH and HBASE_OPTS are updated according to JRUBY_HOME defined
+@rem     B. when JRUBY_HOME is not defined
+@rem        add jruby packaged with HBase to CLASSPATH
+@rem (2) for other commands, do nothing
+
+@rem check if the commmand needs jruby
+set jruby-commands=shell org.jruby.Main
+for %%i in ( %jruby-commands% ) do (
+  if "%hbase-command%"=="%%i" set jruby-needed=true
+)
+
+@rem the command needs jruby
+if defined jruby-needed (
+  @rem JRUBY_HOME is defined
+  if defined JRUBY_HOME (
+    set CLASSPATH=%JRUBY_HOME%\lib\jruby.jar;%CLASSPATH%
+    set HBASE_OPTS=%HBASE_OPTS% -Djruby.home="%JRUBY_HOME%" -Djruby.lib="%JRUBY_HOME%\lib"
+  )
+
+  @rem JRUBY_HOME is not defined
+  if not defined JRUBY_HOME (
+    @rem in dev environment
+    if "%in_dev_env%"=="true" (
+      set cached_classpath_jruby_filename=%HBASE_HOME%\hbase-build-configuration\target\cached_classpath_jruby.txt
+      if not exist "!cached_classpath_jruby_filename!" (
+        echo "As this is a development environment, we need !cached_classpath_jruby_filename! to be generated from maven (command: mvn install -DskipTests)"
+        goto :eof
+      )
+      for /f "delims=" %%i in ('type "!cached_classpath_jruby_filename!"') do set CLASSPATH=%%i;%CLASSPATH%
+    )
+
+    @rem not in dev environment
+    if "%in_dev_env%"=="false" (
+      @rem add jruby packaged with HBase to CLASSPATH
+      set JRUBY_PACKAGED_WITH_HBASE=%HBASE_HOME%\lib\ruby\*
+      if defined jruby-needed (
+        set CLASSPATH=!JRUBY_PACKAGED_WITH_HBASE!;!CLASSPATH!
+      )
+    )
+  )
+)
 
 @rem Have JVM dump heap if we run out of memory.  Files will be 'launch directory'
 @rem and are named like the following: java_pid21612.hprof. Apparently it does not
@@ -307,11 +351,6 @@ endlocal
 goto :eof
 
 :shell
-  rem eg export JRUBY_HOME=/usr/local/share/jruby
-  if defined JRUBY_HOME (
-    set CLASSPATH=%CLASSPATH%;%JRUBY_HOME%\lib\jruby.jar
-    set HBASE_OPTS=%HBASE_OPTS% -Djruby.home="%JRUBY_HOME%" -Djruby.lib="%JRUBY_HOME%\lib"
-  )
   rem find the hbase ruby sources
   if exist "%HBASE_HOME%\lib\ruby" (
     set HBASE_OPTS=%HBASE_OPTS% -Dhbase.ruby.sources="%HBASE_HOME%\lib\ruby"
@@ -376,11 +415,6 @@ goto :eof
   set CLASS=org.apache.hadoop.hbase.util.HBaseFsck
   goto :eof
 
-@rem TODO remove older 'hlog' command
-:hlog
-  set CLASS=org.apache.hadoop.hbase.wal.WALPrettyPrinter
-  goto :eof
-
 :wal
   set CLASS=org.apache.hadoop.hbase.wal.WALPrettyPrinter
   goto :eof
@@ -390,7 +424,7 @@ goto :eof
   goto :eof
 
 :zkcli
-  set CLASS=org.apache.hadoop.hbase.zookeeper.ZooKeeperMainServer
+  set CLASS=org.apache.hadoop.hbase.zookeeper.ZKMainServer
   goto :eof
 
 :mapredcp

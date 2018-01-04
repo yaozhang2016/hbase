@@ -21,6 +21,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
+import edu.umd.cs.findbugs.annotations.Nullable;
 import java.io.File;
 import java.io.IOException;
 import java.io.OutputStream;
@@ -37,6 +38,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.EnumSet;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -48,23 +50,21 @@ import java.util.TreeSet;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
-
-import edu.umd.cs.findbugs.annotations.Nullable;
+import java.util.stream.Collectors;
 import org.apache.commons.io.FileUtils;
-import org.apache.commons.lang.RandomStringUtils;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.apache.commons.lang3.RandomStringUtils;
 import org.apache.commons.logging.impl.Jdk14Logger;
 import org.apache.commons.logging.impl.Log4JLogger;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hbase.ClusterMetrics.Option;
 import org.apache.hadoop.hbase.Waiter.ExplainingPredicate;
 import org.apache.hadoop.hbase.Waiter.Predicate;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
 import org.apache.hadoop.hbase.client.Admin;
 import org.apache.hadoop.hbase.client.BufferedMutator;
+import org.apache.hadoop.hbase.client.ColumnFamilyDescriptor;
+import org.apache.hadoop.hbase.client.ColumnFamilyDescriptorBuilder;
 import org.apache.hadoop.hbase.client.Connection;
 import org.apache.hadoop.hbase.client.ConnectionFactory;
 import org.apache.hadoop.hbase.client.Consistency;
@@ -72,13 +72,18 @@ import org.apache.hadoop.hbase.client.Delete;
 import org.apache.hadoop.hbase.client.Durability;
 import org.apache.hadoop.hbase.client.Get;
 import org.apache.hadoop.hbase.client.HBaseAdmin;
-import org.apache.hadoop.hbase.client.HTable;
+import org.apache.hadoop.hbase.client.ImmutableHRegionInfo;
+import org.apache.hadoop.hbase.client.ImmutableHTableDescriptor;
 import org.apache.hadoop.hbase.client.Put;
+import org.apache.hadoop.hbase.client.RegionInfo;
+import org.apache.hadoop.hbase.client.RegionInfoBuilder;
 import org.apache.hadoop.hbase.client.RegionLocator;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.ResultScanner;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.client.Table;
+import org.apache.hadoop.hbase.client.TableDescriptor;
+import org.apache.hadoop.hbase.client.TableDescriptorBuilder;
 import org.apache.hadoop.hbase.client.TableState;
 import org.apache.hadoop.hbase.fs.HFileSystem;
 import org.apache.hadoop.hbase.io.compress.Compression;
@@ -89,15 +94,19 @@ import org.apache.hadoop.hbase.io.hfile.HFile;
 import org.apache.hadoop.hbase.ipc.RpcServerInterface;
 import org.apache.hadoop.hbase.ipc.ServerNotRunningYetException;
 import org.apache.hadoop.hbase.mapreduce.MapreduceTestingShim;
-import org.apache.hadoop.hbase.master.AssignmentManager;
 import org.apache.hadoop.hbase.master.HMaster;
-import org.apache.hadoop.hbase.master.RegionStates;
+import org.apache.hadoop.hbase.master.RegionState;
 import org.apache.hadoop.hbase.master.ServerManager;
+import org.apache.hadoop.hbase.master.assignment.AssignmentManager;
+import org.apache.hadoop.hbase.master.assignment.RegionStateStore;
+import org.apache.hadoop.hbase.master.assignment.RegionStates;
 import org.apache.hadoop.hbase.regionserver.BloomType;
+import org.apache.hadoop.hbase.regionserver.ChunkCreator;
 import org.apache.hadoop.hbase.regionserver.HRegion;
 import org.apache.hadoop.hbase.regionserver.HRegionServer;
 import org.apache.hadoop.hbase.regionserver.HStore;
 import org.apache.hadoop.hbase.regionserver.InternalScanner;
+import org.apache.hadoop.hbase.regionserver.MemStoreLABImpl;
 import org.apache.hadoop.hbase.regionserver.Region;
 import org.apache.hadoop.hbase.regionserver.RegionScanner;
 import org.apache.hadoop.hbase.regionserver.RegionServerServices;
@@ -107,8 +116,7 @@ import org.apache.hadoop.hbase.regionserver.wal.WALActionsListener;
 import org.apache.hadoop.hbase.security.HBaseKerberosUtils;
 import org.apache.hadoop.hbase.security.User;
 import org.apache.hadoop.hbase.security.visibility.VisibilityLabelsCache;
-import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
-import org.apache.hadoop.hbase.tool.Canary;
+import org.apache.hadoop.hbase.trace.TraceUtil;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.FSTableDescriptors;
 import org.apache.hadoop.hbase.util.FSUtils;
@@ -117,14 +125,14 @@ import org.apache.hadoop.hbase.util.JVMClusterUtil.MasterThread;
 import org.apache.hadoop.hbase.util.JVMClusterUtil.RegionServerThread;
 import org.apache.hadoop.hbase.util.Pair;
 import org.apache.hadoop.hbase.util.RegionSplitter;
+import org.apache.hadoop.hbase.util.RegionSplitter.SplitAlgorithm;
 import org.apache.hadoop.hbase.util.RetryCounter;
 import org.apache.hadoop.hbase.util.Threads;
 import org.apache.hadoop.hbase.wal.WAL;
 import org.apache.hadoop.hbase.wal.WALFactory;
 import org.apache.hadoop.hbase.zookeeper.EmptyWatcher;
-import org.apache.hadoop.hbase.zookeeper.MiniZooKeeperCluster;
 import org.apache.hadoop.hbase.zookeeper.ZKConfig;
-import org.apache.hadoop.hbase.zookeeper.ZooKeeperWatcher;
+import org.apache.hadoop.hbase.zookeeper.ZKWatcher;
 import org.apache.hadoop.hdfs.DFSClient;
 import org.apache.hadoop.hdfs.DistributedFileSystem;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
@@ -133,9 +141,16 @@ import org.apache.hadoop.mapred.JobConf;
 import org.apache.hadoop.mapred.MiniMRCluster;
 import org.apache.hadoop.mapred.TaskLog;
 import org.apache.hadoop.minikdc.MiniKdc;
+import org.apache.log4j.LogManager;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.zookeeper.WatchedEvent;
 import org.apache.zookeeper.ZooKeeper;
 import org.apache.zookeeper.ZooKeeper.States;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.slf4j.impl.Log4jLoggerAdapter;
+
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
 
 /**
  * Facility for testing HBase. Replacement for
@@ -155,10 +170,17 @@ import org.apache.zookeeper.ZooKeeper.States;
  * setting it to true.
  */
 @InterfaceAudience.Public
-@InterfaceStability.Evolving
 @SuppressWarnings("deprecation")
-public class HBaseTestingUtility extends HBaseCommonTestingUtility {
-   private MiniZooKeeperCluster zkCluster = null;
+public class HBaseTestingUtility extends HBaseZKTestingUtility {
+
+  /**
+   * System property key to get test directory value. Name is as it is because mini dfs has
+   * hard-codings to put test data here. It should NOT be used directly in HBase, as it's a property
+   * used in mini dfs.
+   * @deprecated can be used only with mini dfs
+   */
+  @Deprecated
+  private static final String TEST_DIRECTORY_KEY = "test.build.data";
 
   public static final String REGIONS_PER_SERVER_KEY = "hbase.test.regions-per-server";
   /**
@@ -170,11 +192,7 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
 
   public static final String PRESPLIT_TEST_TABLE_KEY = "hbase.test.pre-split-table";
   public static final boolean PRESPLIT_TEST_TABLE = true;
-  /**
-   * Set if we were passed a zkCluster.  If so, we won't shutdown zk as
-   * part of general shutdown.
-   */
-  private boolean passedZkCluster = false;
+
   private MiniDFSCluster dfsCluster = null;
 
   private volatile HBaseCluster hbaseCluster = null;
@@ -185,9 +203,6 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
 
   private String hadoopLogDir;
 
-  /** Directory (a subdirectory of dataTestDir) used by the dfs cluster if any */
-  private File clusterTestDir = null;
-
   /** Directory on test filesystem where we put the data for this instance of
     * HBaseTestingUtility*/
   private Path dataTestDirOnTestFS = null;
@@ -197,39 +212,13 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
    */
   private volatile Connection connection;
 
-  /**
-   * System property key to get test directory value.
-   * Name is as it is because mini dfs has hard-codings to put test data here.
-   * It should NOT be used directly in HBase, as it's a property used in
-   *  mini dfs.
-   *  @deprecated can be used only with mini dfs
-   */
-  @Deprecated
-  private static final String TEST_DIRECTORY_KEY = "test.build.data";
+  private boolean localMode = false;
 
   /** Filesystem URI used for map-reduce mini-cluster setup */
   private static String FS_URI;
 
-  /** Compression algorithms to use in parameterized JUnit 4 tests */
-  public static final List<Object[]> COMPRESSION_ALGORITHMS_PARAMETERIZED =
-    Arrays.asList(new Object[][] {
-      { Compression.Algorithm.NONE },
-      { Compression.Algorithm.GZ }
-    });
-
-  /** This is for unit tests parameterized with a two booleans. */
-  public static final List<Object[]> BOOLEAN_PARAMETERIZED =
-      Arrays.asList(new Object[][] {
-          {false},
-          {true}
-      });
-
   /** This is for unit tests parameterized with a single boolean. */
   public static final List<Object[]> MEMSTORETS_TAGS_PARAMETRIZED = memStoreTSAndTagsCombination();
-  /** Compression algorithms to use in testing */
-  public static final Compression.Algorithm[] COMPRESSION_ALGORITHMS ={
-      Compression.Algorithm.NONE, Compression.Algorithm.GZ
-    };
 
   /**
    * Checks to see if a specific port is available.
@@ -272,7 +261,7 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
   private static List<Object[]> bloomAndCompressionCombinations() {
     List<Object[]> configurations = new ArrayList<>();
     for (Compression.Algorithm comprAlgo :
-         HBaseTestingUtility.COMPRESSION_ALGORITHMS) {
+         HBaseCommonTestingUtility.COMPRESSION_ALGORITHMS) {
       for (BloomType bloomType : BloomType.values()) {
         configurations.add(new Object[] { comprAlgo, bloomType });
       }
@@ -354,8 +343,10 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
   public static HBaseTestingUtility createLocalHTU(Configuration c) {
     HBaseTestingUtility htu = new HBaseTestingUtility(c);
     String dataTestDir = htu.getDataTestDir().toString();
-    htu.getConfiguration().set(HConstants.HBASE_DIR, dataTestDir);
+    htu.getConfiguration().set("fs.defaultFS","file:///");
+    htu.getConfiguration().set(HConstants.HBASE_DIR, "file://" + dataTestDir);
     LOG.debug("Setting " + HConstants.HBASE_DIR + " to " + dataTestDir);
+    htu.localMode = true;
     return htu;
   }
 
@@ -476,44 +467,23 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
 
   /**
    * @return META table descriptor
+   * @deprecated since 2.0 version and will be removed in 3.0 version.
+   *             use {@link #getMetaTableDescriptorBuilder()}
    */
+  @Deprecated
   public HTableDescriptor getMetaTableDescriptor() {
+    return new ImmutableHTableDescriptor(getMetaTableDescriptorBuilder().build());
+  }
+
+  /**
+   * @return META table descriptor
+   */
+  public TableDescriptorBuilder getMetaTableDescriptorBuilder() {
     try {
-      return new FSTableDescriptors(conf).get(TableName.META_TABLE_NAME);
+      return FSTableDescriptors.createMetaTableDescriptorBuilder(conf);
     } catch (IOException e) {
       throw new RuntimeException("Unable to create META table descriptor", e);
     }
-  }
-
-  /**
-   * @return Where the DFS cluster will write data on the local subsystem.
-   * Creates it if it does not exist already.  A subdir of {@link #getBaseTestDir()}
-   * @see #getTestFileSystem()
-   */
-  Path getClusterTestDir() {
-    if (clusterTestDir == null){
-      setupClusterTestDir();
-    }
-    return new Path(clusterTestDir.getAbsolutePath());
-  }
-
-  /**
-   * Creates a directory for the DFS cluster, under the test data
-   */
-  private void setupClusterTestDir() {
-    if (clusterTestDir != null) {
-      return;
-    }
-
-    // Using randomUUID ensures that multiple clusters can be launched by
-    //  a same test, if it stops & starts them
-    Path testDir = getDataTestDir("dfscluster_" + UUID.randomUUID().toString());
-    clusterTestDir = new File(testDir.toString()).getAbsoluteFile();
-    // Have it cleaned up on exit
-    boolean b = deleteOnExit();
-    if (b) clusterTestDir.deleteOnExit();
-    conf.set(TEST_DIRECTORY_KEY, clusterTestDir.getPath());
-    LOG.info("Created new mini-cluster data directory: " + clusterTestDir + ", deleteOnExit=" + b);
   }
 
   /**
@@ -564,13 +534,13 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
     //the working directory, and create a unique sub dir there
     FileSystem fs = getTestFileSystem();
     Path newDataTestDir;
+    String randomStr = UUID.randomUUID().toString();
     if (fs.getUri().getScheme().equals(FileSystem.getLocal(conf).getUri().getScheme())) {
-      File dataTestDir = new File(getDataTestDir().toString());
+      newDataTestDir = new Path(getDataTestDir(), randomStr);
+      File dataTestDir = new File(newDataTestDir.toString());
       if (deleteOnExit()) dataTestDir.deleteOnExit();
-      newDataTestDir = new Path(dataTestDir.getAbsolutePath());
     } else {
       Path base = getBaseTestDirOnTestFS();
-      String randomStr = UUID.randomUUID().toString();
       newDataTestDir = new Path(base, randomStr);
       if (deleteOnExit()) fs.deleteOnExit(newDataTestDir);
     }
@@ -650,6 +620,7 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
     org.apache.log4j.Logger.getLogger(org.apache.hadoop.metrics2.impl.MetricsSystemImpl.class).
         setLevel(org.apache.log4j.Level.ERROR);
 
+    TraceUtil.initTracer(conf);
 
     this.dfsCluster = new MiniDFSCluster(0, this.conf, servers, true, true,
       true, null, null, hosts, null);
@@ -704,6 +675,7 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
   /** This is used before starting HDFS and map-reduce mini-clusters */
   private void createDirsAndSetProperties() throws IOException {
     setupClusterTestDir();
+    conf.set(TEST_DIRECTORY_KEY, clusterTestDir.getPath());
     System.setProperty(TEST_DIRECTORY_KEY, clusterTestDir.getPath());
     createDirAndSetProperty("cache_data", "test.cache.data");
     createDirAndSetProperty("hadoop_tmp", "hadoop.tmp.dir");
@@ -719,6 +691,8 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
     conf.set("mapreduce.jobtracker.staging.root.dir",
       new Path(root, "mapreduce-jobtracker-staging-root-dir").toString());
     conf.set("mapreduce.job.working.dir", new Path(root, "mapred-working-dir").toString());
+    conf.set("yarn.app.mapreduce.am.staging-dir",
+      new Path(root, "mapreduce-am-staging-root-dir").toString());
   }
 
 
@@ -779,83 +753,6 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
     }
   }
 
-  /**
-   * Call this if you only want a zk cluster.
-   * @see #startMiniZKCluster() if you want zk + dfs + hbase mini cluster.
-   * @throws Exception
-   * @see #shutdownMiniZKCluster()
-   * @return zk cluster started.
-   */
-  public MiniZooKeeperCluster startMiniZKCluster() throws Exception {
-    return startMiniZKCluster(1);
-  }
-
-  /**
-   * Call this if you only want a zk cluster.
-   * @param zooKeeperServerNum
-   * @see #startMiniZKCluster() if you want zk + dfs + hbase mini cluster.
-   * @throws Exception
-   * @see #shutdownMiniZKCluster()
-   * @return zk cluster started.
-   */
-  public MiniZooKeeperCluster startMiniZKCluster(
-      final int zooKeeperServerNum,
-      final int ... clientPortList)
-      throws Exception {
-    setupClusterTestDir();
-    return startMiniZKCluster(clusterTestDir, zooKeeperServerNum, clientPortList);
-  }
-
-  private MiniZooKeeperCluster startMiniZKCluster(final File dir)
-    throws Exception {
-    return startMiniZKCluster(dir, 1, null);
-  }
-
-  /**
-   * Start a mini ZK cluster. If the property "test.hbase.zookeeper.property.clientPort" is set
-   *  the port mentionned is used as the default port for ZooKeeper.
-   */
-  private MiniZooKeeperCluster startMiniZKCluster(final File dir,
-      final int zooKeeperServerNum,
-      final int [] clientPortList)
-  throws Exception {
-    if (this.zkCluster != null) {
-      throw new IOException("Cluster already running at " + dir);
-    }
-    this.passedZkCluster = false;
-    this.zkCluster = new MiniZooKeeperCluster(this.getConfiguration());
-    final int defPort = this.conf.getInt("test.hbase.zookeeper.property.clientPort", 0);
-    if (defPort > 0){
-      // If there is a port in the config file, we use it.
-      this.zkCluster.setDefaultClientPort(defPort);
-    }
-
-    if (clientPortList != null) {
-      // Ignore extra client ports
-      int clientPortListSize = (clientPortList.length <= zooKeeperServerNum) ?
-          clientPortList.length : zooKeeperServerNum;
-      for (int i=0; i < clientPortListSize; i++) {
-        this.zkCluster.addClientPort(clientPortList[i]);
-      }
-    }
-    int clientPort =   this.zkCluster.startup(dir,zooKeeperServerNum);
-    this.conf.set(HConstants.ZOOKEEPER_CLIENT_PORT,
-      Integer.toString(clientPort));
-    return this.zkCluster;
-  }
-
-  /**
-   * Shuts down zk cluster created by call to {@link #startMiniZKCluster(File)}
-   * or does nothing.
-   * @throws IOException
-   * @see #startMiniZKCluster()
-   */
-  public void shutdownMiniZKCluster() throws IOException {
-    if (this.zkCluster != null) {
-      this.zkCluster.shutdown();
-      this.zkCluster = null;
-    }
-  }
 
   /**
    * Start up a minicluster of hbase, dfs, and zookeeper.
@@ -865,6 +762,16 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
    */
   public MiniHBaseCluster startMiniCluster() throws Exception {
     return startMiniCluster(1, 1);
+  }
+
+  /**
+   * Start up a minicluster of hbase, dfs, and zookeeper where WAL's walDir is created separately.
+   * @throws Exception
+   * @return Mini hbase cluster instance created.
+   * @see {@link #shutdownMiniDFSCluster()}
+   */
+  public MiniHBaseCluster startMiniCluster(boolean withWALDir) throws Exception {
+    return startMiniCluster(1, 1, 1, null, null, null, false, withWALDir);
   }
 
   /**
@@ -898,6 +805,11 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
     return startMiniCluster(1, numSlaves, false);
   }
 
+  public MiniHBaseCluster startMiniCluster(final int numSlaves, boolean create, boolean withWALDir)
+          throws Exception {
+    return startMiniCluster(1, numSlaves, numSlaves, null, null, null, create, withWALDir);
+  }
+
   /**
    * Start minicluster. Whether to create a new root or data dir path even if such a path
    * has been created earlier is decided based on flag <code>create</code>
@@ -927,7 +839,7 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
       final int numSlaves, final String[] dataNodeHosts, boolean create)
       throws Exception {
     return startMiniCluster(numMasters, numSlaves, numSlaves, dataNodeHosts,
-        null, null, create);
+        null, null, create, false);
   }
 
   /**
@@ -1010,7 +922,7 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
       Class<? extends MiniHBaseCluster.MiniHBaseClusterRegionServer> regionserverClass)
     throws Exception {
     return startMiniCluster(numMasters, numSlaves, numDataNodes, dataNodeHosts,
-        masterClass, regionserverClass, false);
+        masterClass, regionserverClass, false, false);
   }
 
   /**
@@ -1024,7 +936,7 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
     final int numSlaves, int numDataNodes, final String[] dataNodeHosts,
     Class<? extends HMaster> masterClass,
     Class<? extends MiniHBaseCluster.MiniHBaseClusterRegionServer> regionserverClass,
-    boolean create)
+    boolean create, boolean withWALDir)
   throws Exception {
     if (dataNodeHosts != null && dataNodeHosts.length != 0) {
       numDataNodes = dataNodeHosts.length;
@@ -1044,31 +956,39 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
 
     // Bring up mini dfs cluster. This spews a bunch of warnings about missing
     // scheme. Complaints are 'Scheme is undefined for build/test/data/dfs/name1'.
-    if(this.dfsCluster == null) {
+    if(this.dfsCluster == null && !localMode) {
+      LOG.info("STARTING DFS");
       dfsCluster = startMiniDFSCluster(numDataNodes, dataNodeHosts);
-    }
+    } else LOG.info("NOT STARTING DFS");
 
     // Start up a zk cluster.
-    if (this.zkCluster == null) {
-      startMiniZKCluster(clusterTestDir);
+    if (getZkCluster() == null) {
+      startMiniZKCluster();
     }
 
     // Start the MiniHBaseCluster
-    return startMiniHBaseCluster(numMasters, numSlaves, masterClass,
-      regionserverClass, create);
+    return startMiniHBaseCluster(numMasters, numSlaves, null, masterClass,
+      regionserverClass, create, withWALDir);
   }
 
   public MiniHBaseCluster startMiniHBaseCluster(final int numMasters, final int numSlaves)
-      throws IOException, InterruptedException{
-    return startMiniHBaseCluster(numMasters, numSlaves, null, null, false);
+      throws IOException, InterruptedException {
+     return startMiniHBaseCluster(numMasters, numSlaves, null);
+  }
+
+  public MiniHBaseCluster startMiniHBaseCluster(final int numMasters, final int numSlaves,
+      List<Integer> rsPorts) throws IOException, InterruptedException {
+    return startMiniHBaseCluster(numMasters, numSlaves, rsPorts, null, null, false, false);
   }
 
   /**
    * Starts up mini hbase cluster.  Usually used after call to
    * {@link #startMiniCluster(int, int)} when doing stepped startup of clusters.
    * Usually you won't want this.  You'll usually want {@link #startMiniCluster()}.
-   * @param numMasters
-   * @param numSlaves
+   * @param rsPorts Ports that RegionServer should use; pass ports if you want to test cluster
+   *                restart where for sure the regionservers come up on same address+port (but
+   *                just with different startcode); by default mini hbase clusters choose new
+   *                arbitrary ports on each cluster start.
    * @param create Whether to create a
    * root or data directory path or not; will overwrite if exists already.
    * @return Reference to the hbase mini hbase cluster.
@@ -1077,13 +997,15 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
    * @see {@link #startMiniCluster()}
    */
   public MiniHBaseCluster startMiniHBaseCluster(final int numMasters,
-        final int numSlaves, Class<? extends HMaster> masterClass,
+        final int numSlaves, List<Integer> rsPorts, Class<? extends HMaster> masterClass,
         Class<? extends MiniHBaseCluster.MiniHBaseClusterRegionServer> regionserverClass,
-        boolean create)
+        boolean create, boolean withWALDir)
   throws IOException, InterruptedException {
     // Now do the mini hbase cluster.  Set the hbase.rootdir in config.
     createRootDir(create);
-
+    if (withWALDir) {
+      createWALRootDir();
+    }
     // Set the hbase.fs.tmp.dir config to make sure that we have some default value. This is
     // for tests that do not read hbase-defaults.xml
     setHBaseFsTmpDir();
@@ -1098,8 +1020,9 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
     }
 
     Configuration c = new Configuration(this.conf);
+    TraceUtil.initTracer(c);
     this.hbaseCluster =
-        new MiniHBaseCluster(c, numMasters, numSlaves, masterClass, regionserverClass);
+        new MiniHBaseCluster(c, numMasters, numSlaves, rsPorts, masterClass, regionserverClass);
     // Don't leave here till we've done a successful scan of the hbase:meta
     Table t = getConnection().getTable(TableName.META_TABLE_NAME);
     ResultScanner s = t.getScanner(new Scan());
@@ -1165,28 +1088,12 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
       this.connection = null;
     }
     shutdownMiniHBaseCluster();
-    if (!this.passedZkCluster){
-      shutdownMiniZKCluster();
-    }
     shutdownMiniDFSCluster();
+    shutdownMiniZKCluster();
 
     cleanupTestDir();
     miniClusterRunning = false;
     LOG.info("Minicluster is down");
-  }
-
-  /**
-   * @return True if we removed the test dirs
-   * @throws IOException
-   */
-  @Override
-  public boolean cleanupTestDir() throws IOException {
-    boolean ret = super.cleanupTestDir();
-    if (deleteDir(this.clusterTestDir)) {
-      this.clusterTestDir = null;
-      return ret & true;
-    }
-    return false;
   }
 
   /**
@@ -1273,6 +1180,22 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
     return createRootDir(false);
   }
 
+  /**
+   * Creates a hbase walDir in the user's home directory.
+   * Normally you won't make use of this method. Root hbaseWALDir
+   * is created for you as part of mini cluster startup. You'd only use this
+   * method if you were doing manual operation.
+   *
+   * @return Fully qualified path to hbase root dir
+   * @throws IOException
+  */
+  public Path createWALRootDir() throws IOException {
+    FileSystem fs = FileSystem.get(this.conf);
+    Path walDir = getNewDataTestDirOnTestFS();
+    FSUtils.setWALRootDir(this.conf, walDir);
+    fs.mkdirs(walDir);
+    return walDir;
+  }
 
   private void setHBaseFsTmpDir() throws IOException {
     String hbaseFsTmpDirInString = this.conf.get("hbase.fs.tmp.dir");
@@ -1320,7 +1243,7 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
    * Create a table.
    * @param tableName
    * @param family
-   * @return An HTable instance for the created table.
+   * @return A Table instance for the created table.
    * @throws IOException
    */
   public Table createTable(TableName tableName, String family)
@@ -1332,7 +1255,7 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
    * Create a table.
    * @param tableName
    * @param families
-   * @return An HTable instance for the created table.
+   * @return A Table instance for the created table.
    * @throws IOException
    */
   public Table createTable(TableName tableName, String[] families)
@@ -1348,7 +1271,7 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
    * Create a table.
    * @param tableName
    * @param family
-   * @return An HTable instance for the created table.
+   * @return A Table instance for the created table.
    * @throws IOException
    */
   public Table createTable(TableName tableName, byte[] family)
@@ -1361,7 +1284,7 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
    * @param tableName
    * @param family
    * @param numRegions
-   * @return An HTable instance for the created table.
+   * @return A Table instance for the created table.
    * @throws IOException
    */
   public Table createMultiRegionTable(TableName tableName, byte[] family, int numRegions)
@@ -1378,7 +1301,7 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
    * Create a table.
    * @param tableName
    * @param families
-   * @return An HTable instance for the created table.
+   * @return A Table instance for the created table.
    * @throws IOException
    */
   public Table createTable(TableName tableName, byte[][] families)
@@ -1390,7 +1313,7 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
    * Create a table with multiple regions.
    * @param tableName
    * @param families
-   * @return An HTable instance for the created table.
+   * @return A Table instance for the created table.
    * @throws IOException
    */
   public Table createMultiRegionTable(TableName tableName, byte[][] families) throws IOException {
@@ -1402,7 +1325,7 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
    * @param tableName
    * @param families
    * @param splitKeys
-   * @return An HTable instance for the created table.
+   * @return A Table instance for the created table.
    * @throws IOException
    */
   public Table createTable(TableName tableName, byte[][] families, byte[][] splitKeys)
@@ -1427,10 +1350,10 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
    * @param htd
    * @param families
    * @param c Configuration to use
-   * @return An HTable instance for the created table.
+   * @return A Table instance for the created table.
    * @throws IOException
    */
-  public Table createTable(HTableDescriptor htd, byte[][] families, Configuration c)
+  public Table createTable(TableDescriptor htd, byte[][] families, Configuration c)
   throws IOException {
     return createTable(htd, families, null, c);
   }
@@ -1441,34 +1364,36 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
    * @param families
    * @param splitKeys
    * @param c Configuration to use
-   * @return An HTable instance for the created table.
+   * @return A Table instance for the created table.
    * @throws IOException
    */
-  public Table createTable(HTableDescriptor htd, byte[][] families, byte[][] splitKeys,
+  public Table createTable(TableDescriptor htd, byte[][] families, byte[][] splitKeys,
       Configuration c) throws IOException {
+    TableDescriptorBuilder builder = TableDescriptorBuilder.newBuilder(htd);
     for (byte[] family : families) {
-      HColumnDescriptor hcd = new HColumnDescriptor(family);
       // Disable blooms (they are on by default as of 0.95) but we disable them here because
       // tests have hard coded counts of what to expect in block cache, etc., and blooms being
       // on is interfering.
-      hcd.setBloomFilterType(BloomType.NONE);
-      htd.addFamily(hcd);
+      builder.addColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(family)
+                              .setBloomFilterType(BloomType.NONE)
+                              .build());
     }
-    getAdmin().createTable(htd, splitKeys);
+    TableDescriptor td = builder.build();
+    getAdmin().createTable(td, splitKeys);
     // HBaseAdmin only waits for regions to appear in hbase:meta
     // we should wait until they are assigned
-    waitUntilAllRegionsAssigned(htd.getTableName());
-    return getConnection().getTable(htd.getTableName());
+    waitUntilAllRegionsAssigned(td.getTableName());
+    return getConnection().getTable(td.getTableName());
   }
 
   /**
    * Create a table.
    * @param htd
    * @param splitRows
-   * @return An HTable instance for the created table.
+   * @return A Table instance for the created table.
    * @throws IOException
    */
-  public Table createTable(HTableDescriptor htd, byte[][] splitRows)
+  public Table createTable(TableDescriptor htd, byte[][] splitRows)
       throws IOException {
     getAdmin().createTable(htd, splitRows);
     // HBaseAdmin only waits for regions to appear in hbase:meta
@@ -1483,7 +1408,7 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
    * @param families
    * @param splitKeys
    * @param c Configuration to use
-   * @return An HTable instance for the created table.
+   * @return A Table instance for the created table.
    * @throws IOException
    */
   public Table createTable(TableName tableName, byte[][] families, byte[][] splitKeys,
@@ -1496,7 +1421,7 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
    * @param tableName
    * @param family
    * @param numVersions
-   * @return An HTable instance for the created table.
+   * @return A Table instance for the created table.
    * @throws IOException
    */
   public Table createTable(TableName tableName, byte[] family, int numVersions)
@@ -1509,7 +1434,7 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
    * @param tableName
    * @param families
    * @param numVersions
-   * @return An HTable instance for the created table.
+   * @return A Table instance for the created table.
    * @throws IOException
    */
   public Table createTable(TableName tableName, byte[][] families, int numVersions)
@@ -1523,7 +1448,7 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
    * @param families
    * @param numVersions
    * @param splitKeys
-   * @return An HTable instance for the created table.
+   * @return A Table instance for the created table.
    * @throws IOException
    */
   public Table createTable(TableName tableName, byte[][] families, int numVersions,
@@ -1545,7 +1470,7 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
    * @param tableName
    * @param families
    * @param numVersions
-   * @return An HTable instance for the created table.
+   * @return A Table instance for the created table.
    * @throws IOException
    */
   public Table createMultiRegionTable(TableName tableName, byte[][] families, int numVersions)
@@ -1559,7 +1484,7 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
    * @param families
    * @param numVersions
    * @param blockSize
-   * @return An HTable instance for the created table.
+   * @return A Table instance for the created table.
    * @throws IOException
    */
   public Table createTable(TableName tableName, byte[][] families,
@@ -1602,7 +1527,7 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
    * @param tableName
    * @param families
    * @param numVersions
-   * @return An HTable instance for the created table.
+   * @return A Table instance for the created table.
    * @throws IOException
    */
   public Table createTable(TableName tableName, byte[][] families,
@@ -1628,7 +1553,7 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
    * @param tableName
    * @param family
    * @param splitRows
-   * @return An HTable instance for the created table.
+   * @return A Table instance for the created table.
    * @throws IOException
    */
   public Table createTable(TableName tableName, byte[] family, byte[][] splitRows)
@@ -1647,7 +1572,7 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
    * Create a table with multiple regions.
    * @param tableName
    * @param family
-   * @return An HTable instance for the created table.
+   * @return A Table instance for the created table.
    * @throws IOException
    */
   public Table createMultiRegionTable(TableName tableName, byte[] family) throws IOException {
@@ -1658,9 +1583,9 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
    * Modify a table, synchronous. Waiting logic similar to that of {@code admin.rb#alter_status}.
    */
   @SuppressWarnings("serial")
-  public static void modifyTableSync(Admin admin, HTableDescriptor desc)
+  public static void modifyTableSync(Admin admin, TableDescriptor desc)
       throws IOException, InterruptedException {
-    admin.modifyTable(desc.getTableName(), desc);
+    admin.modifyTable(desc);
     Pair<Integer, Integer> status = new Pair<Integer, Integer>() {{
       setFirst(0);
       setSecond(0);
@@ -1688,7 +1613,7 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
   public static void setReplicas(Admin admin, TableName table, int replicaCount)
       throws IOException, InterruptedException {
     admin.disableTable(table);
-    HTableDescriptor desc = admin.getTableDescriptor(table);
+    HTableDescriptor desc = new HTableDescriptor(admin.getTableDescriptor(table));
     desc.setRegionReplication(replicaCount);
     admin.modifyTable(desc.getTableName(), desc);
     admin.enableTable(table);
@@ -1801,7 +1726,7 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
    * @return
    * @throws IOException
    */
-  public HRegion createLocalHRegion(HTableDescriptor desc, byte [] startKey,
+  public HRegion createLocalHRegion(TableDescriptor desc, byte [] startKey,
       byte [] endKey)
   throws IOException {
     HRegionInfo hri = new HRegionInfo(desc.getTableName(), startKey, endKey);
@@ -1812,7 +1737,7 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
    * Create an HRegion that writes to the local tmp dirs. Creates the WAL for you. Be sure to call
    * {@link HBaseTestingUtility#closeRegionAndWAL(HRegion)} when you're finished with it.
    */
-  public HRegion createLocalHRegion(HRegionInfo info, HTableDescriptor desc) throws IOException {
+  public HRegion createLocalHRegion(RegionInfo info, TableDescriptor desc) throws IOException {
     return createRegionAndWAL(info, getDataTestDir(), getConfiguration(), desc);
   }
 
@@ -1824,7 +1749,7 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
    * @return created hregion
    * @throws IOException
    */
-  public HRegion createLocalHRegion(HRegionInfo info, HTableDescriptor desc, WAL wal)
+  public HRegion createLocalHRegion(RegionInfo info, TableDescriptor desc, WAL wal)
       throws IOException {
     return HRegion.createHRegion(info, getDataTestDir(), getConfiguration(), desc, wal);
   }
@@ -1856,8 +1781,6 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
    * @param tableName
    * @param startKey
    * @param stopKey
-   * @param callingMethod
-   * @param conf
    * @param isReadOnly
    * @param families
    * @return A region on which you must call
@@ -1881,9 +1804,9 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
     for (byte[] family : families) {
       HColumnDescriptor hcd = new HColumnDescriptor(family);
       if(compactedMemStore != null && i < compactedMemStore.length) {
-        hcd.setInMemoryCompaction(true);
+        hcd.setInMemoryCompaction(MemoryCompactionPolicy.BASIC);
       } else {
-        hcd.setInMemoryCompaction(false);
+        hcd.setInMemoryCompaction(MemoryCompactionPolicy.NONE);
 
       }
       i++;
@@ -2019,7 +1942,7 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
   }
 
   /** A tracker for tracking and validating table rows
-   * generated with {@link HBaseTestingUtility#loadTable(HTable, byte[])}
+   * generated with {@link HBaseTestingUtility#loadTable(Table, byte[])}
    */
   public static class SeenRowTracker {
     int dim = 'z' - 'a' + 1;
@@ -2133,6 +2056,18 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
     }
   }
 
+  public void loadRandomRows(final Table t, final byte[] f, int rowSize, int totalRows)
+      throws IOException {
+    Random r = new Random();
+    byte[] row = new byte[rowSize];
+    for (int i = 0; i < totalRows; i++) {
+      r.nextBytes(row);
+      Put put = new Put(row);
+      put.addColumn(f, new byte[]{0}, new byte[]{0});
+      t.put(put);
+    }
+  }
+
   public void verifyNumericRows(Table table, final byte[] f, int startRow, int endRow,
       int replicaId)
       throws IOException {
@@ -2205,13 +2140,13 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
   }
 
   public int countRows(final Table table, final Scan scan) throws IOException {
-    ResultScanner results = table.getScanner(scan);
-    int count = 0;
-    for (@SuppressWarnings("unused") Result res : results) {
-      count++;
+    try (ResultScanner results = table.getScanner(scan)) {
+      int count = 0;
+      while (results.next() != null) {
+        count++;
+      }
+      return count;
     }
-    results.close();
-    return count;
   }
 
   public int countRows(final Table table, final byte[]... families) throws IOException {
@@ -2248,9 +2183,8 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
   }
 
   public int countRows(final InternalScanner scanner) throws IOException {
-    // Do not retrieve the mob data when scanning
     int scannedCount = 0;
-    List<Cell> results = new ArrayList<Cell>();
+    List<Cell> results = new ArrayList<>();
     boolean hasMore = true;
     while (hasMore) {
       hasMore = scanner.next(results);
@@ -2275,7 +2209,7 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
     return digest.toString();
   }
 
-  /** All the row values for the data loaded by {@link #loadTable(HTable, byte[])} */
+  /** All the row values for the data loaded by {@link #loadTable(Table, byte[])} */
   public static final byte[][] ROWS = new byte[(int) Math.pow('z' - 'a' + 1, 3)][3]; // ~52KB
   static {
     int i = 0;
@@ -2324,21 +2258,41 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
    * @param startKeys
    * @return list of region info for regions added to meta
    * @throws IOException
+   * @deprecated since 2.0 version and will be removed in 3.0 version.
+   *             use {@link #createMultiRegionsInMeta(Configuration, TableDescriptor, byte[][])}
    */
+  @Deprecated
   public List<HRegionInfo> createMultiRegionsInMeta(final Configuration conf,
-      final HTableDescriptor htd, byte [][] startKeys)
+      final HTableDescriptor htd, byte [][] startKeys) throws IOException {
+    return createMultiRegionsInMeta(conf, (TableDescriptor) htd, startKeys)
+        .stream().map(ImmutableHRegionInfo::new).collect(Collectors.toList());
+  }
+  /**
+   * Create rows in hbase:meta for regions of the specified table with the specified
+   * start keys.  The first startKey should be a 0 length byte array if you
+   * want to form a proper range of regions.
+   * @param conf
+   * @param htd
+   * @param startKeys
+   * @return list of region info for regions added to meta
+   * @throws IOException
+   */
+  public List<RegionInfo> createMultiRegionsInMeta(final Configuration conf,
+      final TableDescriptor htd, byte [][] startKeys)
   throws IOException {
     Table meta = getConnection().getTable(TableName.META_TABLE_NAME);
     Arrays.sort(startKeys, Bytes.BYTES_COMPARATOR);
-    List<HRegionInfo> newRegions = new ArrayList<HRegionInfo>(startKeys.length);
+    List<RegionInfo> newRegions = new ArrayList<>(startKeys.length);
     MetaTableAccessor
         .updateTableState(getConnection(), htd.getTableName(), TableState.State.ENABLED);
     // add custom ones
     for (int i = 0; i < startKeys.length; i++) {
       int j = (i + 1) % startKeys.length;
-      HRegionInfo hri = new HRegionInfo(htd.getTableName(), startKeys[i],
-          startKeys[j]);
-      MetaTableAccessor.addRegionToMeta(meta, hri);
+      RegionInfo hri = RegionInfoBuilder.newBuilder(htd.getTableName())
+          .setStartKey(startKeys[i])
+          .setEndKey(startKeys[j])
+          .build();
+      MetaTableAccessor.addRegionToMeta(getConnection(), hri);
       newRegions.add(hri);
     }
 
@@ -2349,7 +2303,7 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
   /**
    * Create an unmanaged WAL. Be sure to close it when you're through.
    */
-  public static WAL createWal(final Configuration conf, final Path rootDir, final HRegionInfo hri)
+  public static WAL createWal(final Configuration conf, final Path rootDir, final RegionInfo hri)
       throws IOException {
     // The WAL subsystem will use the default rootDir rather than the passed in rootDir
     // unless I pass along via the conf.
@@ -2365,8 +2319,8 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
    * Create a region with it's own WAL. Be sure to call
    * {@link HBaseTestingUtility#closeRegionAndWAL(HRegion)} to clean up all resources.
    */
-  public static HRegion createRegionAndWAL(final HRegionInfo info, final Path rootDir,
-      final Configuration conf, final HTableDescriptor htd) throws IOException {
+  public static HRegion createRegionAndWAL(final RegionInfo info, final Path rootDir,
+      final Configuration conf, final TableDescriptor htd) throws IOException {
     return createRegionAndWAL(info, rootDir, conf, htd, true);
   }
 
@@ -2374,9 +2328,10 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
    * Create a region with it's own WAL. Be sure to call
    * {@link HBaseTestingUtility#closeRegionAndWAL(HRegion)} to clean up all resources.
    */
-  public static HRegion createRegionAndWAL(final HRegionInfo info, final Path rootDir,
-      final Configuration conf, final HTableDescriptor htd, boolean initialize)
+  public static HRegion createRegionAndWAL(final RegionInfo info, final Path rootDir,
+      final Configuration conf, final TableDescriptor htd, boolean initialize)
       throws IOException {
+    ChunkCreator.initialize(MemStoreLABImpl.CHUNK_SIZE_DEFAULT, false, 0, 0, 0, null);
     WAL wal = createWal(conf, rootDir, info);
     return HRegion.createHRegion(info, rootDir, conf, htd, wal, initialize);
   }
@@ -2389,7 +2344,7 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
   public List<byte[]> getMetaTableRows() throws IOException {
     // TODO: Redo using MetaTableAccessor class
     Table t = getConnection().getTable(TableName.META_TABLE_NAME);
-    List<byte[]> rows = new ArrayList<byte[]>();
+    List<byte[]> rows = new ArrayList<>();
     ResultScanner s = t.getScanner(new Scan());
     for (Result result : s) {
       LOG.info("getMetaTableRows: row -> " +
@@ -2409,10 +2364,10 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
   public List<byte[]> getMetaTableRows(TableName tableName) throws IOException {
     // TODO: Redo using MetaTableAccessor.
     Table t = getConnection().getTable(TableName.META_TABLE_NAME);
-    List<byte[]> rows = new ArrayList<byte[]>();
+    List<byte[]> rows = new ArrayList<>();
     ResultScanner s = t.getScanner(new Scan());
     for (Result result : s) {
-      HRegionInfo info = MetaTableAccessor.getHRegionInfo(result);
+      RegionInfo info = MetaTableAccessor.getRegionInfo(result);
       if (info == null) {
         LOG.error("No region info for row " + Bytes.toString(result.getRow()));
         // TODO figure out what to do for this new hosed case.
@@ -2428,6 +2383,21 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
     s.close();
     t.close();
     return rows;
+  }
+
+  /*
+   * Find any other region server which is different from the one identified by parameter
+   * @param rs
+   * @return another region server
+   */
+  public HRegionServer getOtherRegionServer(HRegionServer rs) {
+    for (JVMClusterUtil.RegionServerThread rst :
+      getMiniHBaseCluster().getRegionServerThreads()) {
+      if (!(rst.getRegionServer() == rs)) {
+        return rst.getRegionServer();
+      }
+    }
+    return null;
   }
 
   /**
@@ -2474,6 +2444,10 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
    * @throws IOException When starting the cluster fails.
    */
   public MiniMRCluster startMiniMapReduceCluster() throws IOException {
+    // Set a very high max-disk-utilization percentage to avoid the NodeManagers from failing.
+    conf.setIfUnset(
+        "yarn.nodemanager.disk-health-checker.max-disk-utilization-per-disk-percentage",
+        "99.0");
     startMiniMapReduceCluster(2);
     return mrCluster;
   }
@@ -2626,9 +2600,11 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
    * @param clazz  The class for which to switch to debug logging.
    */
   public void enableDebug(Class<?> clazz) {
-    Log l = LogFactory.getLog(clazz);
+    Logger l = LoggerFactory.getLogger(clazz);
     if (l instanceof Log4JLogger) {
       ((Log4JLogger) l).getLogger().setLevel(org.apache.log4j.Level.DEBUG);
+    } else if (l instanceof Log4jLoggerAdapter) {
+      LogManager.getLogger(clazz).setLevel(org.apache.log4j.Level.DEBUG);
     } else if (l instanceof Jdk14Logger) {
       ((Jdk14Logger) l).getLogger().setLevel(java.util.logging.Level.ALL);
     }
@@ -2674,7 +2650,7 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
     }
   }
 
-  public void expireSession(ZooKeeperWatcher nodeZK) throws Exception {
+  public void expireSession(ZKWatcher nodeZK) throws Exception {
    expireSession(nodeZK, false);
   }
 
@@ -2686,10 +2662,10 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
    * [2] https://issues.apache.org/jira/browse/ZOOKEEPER-1105
    *
    * @param nodeZK - the ZK watcher to expire
-   * @param checkStatus - true to check if we can create an HTable with the
+   * @param checkStatus - true to check if we can create a Table with the
    *                    current configuration.
    */
-  public void expireSession(ZooKeeperWatcher nodeZK, boolean checkStatus)
+  public void expireSession(ZKWatcher nodeZK, boolean checkStatus)
     throws Exception {
     Configuration c = new Configuration(this.conf);
     String quorumServers = ZKConfig.getZKQuorumServersString(c);
@@ -2803,50 +2779,34 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
 
   private HBaseAdmin hbaseAdmin = null;
 
-  /**
-   * Returns a ZooKeeperWatcher instance.
-   * This instance is shared between HBaseTestingUtility instance users.
-   * Don't close it, it will be closed automatically when the
-   * cluster shutdowns
-   *
-   * @return The ZooKeeperWatcher instance.
-   * @throws IOException
-   */
-  public synchronized ZooKeeperWatcher getZooKeeperWatcher()
-    throws IOException {
-    if (zooKeeperWatcher == null) {
-      zooKeeperWatcher = new ZooKeeperWatcher(conf, "testing utility",
-        new Abortable() {
-        @Override public void abort(String why, Throwable e) {
-          throw new RuntimeException("Unexpected abort in HBaseTestingUtility:"+why, e);
-        }
-        @Override public boolean isAborted() {return false;}
-      });
-    }
-    return zooKeeperWatcher;
-  }
-  private ZooKeeperWatcher zooKeeperWatcher;
-
 
 
   /**
-   * Closes the named region.
+   * Unassign the named region.
    *
-   * @param regionName  The region to close.
-   * @throws IOException
+   * @param regionName  The region to unassign.
    */
-  public void closeRegion(String regionName) throws IOException {
-    closeRegion(Bytes.toBytes(regionName));
+  public void unassignRegion(String regionName) throws IOException {
+    unassignRegion(Bytes.toBytes(regionName));
   }
 
   /**
-   * Closes the named region.
+   * Unassign the named region.
    *
-   * @param regionName  The region to close.
-   * @throws IOException
+   * @param regionName  The region to unassign.
    */
-  public void closeRegion(byte[] regionName) throws IOException {
-    getAdmin().closeRegion(regionName, null);
+  public void unassignRegion(byte[] regionName) throws IOException {
+    getAdmin().unassign(regionName, true);
+  }
+
+  /**
+   * Closes the region containing the given row.
+   *
+   * @param row  The row to find the containing region.
+   * @param table  The table to find the region.
+   */
+  public void unassignRegionByRow(String row, RegionLocator table) throws IOException {
+    unassignRegionByRow(Bytes.toBytes(row), table);
   }
 
   /**
@@ -2856,20 +2816,9 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
    * @param table  The table to find the region.
    * @throws IOException
    */
-  public void closeRegionByRow(String row, RegionLocator table) throws IOException {
-    closeRegionByRow(Bytes.toBytes(row), table);
-  }
-
-  /**
-   * Closes the region containing the given row.
-   *
-   * @param row  The row to find the containing region.
-   * @param table  The table to find the region.
-   * @throws IOException
-   */
-  public void closeRegionByRow(byte[] row, RegionLocator table) throws IOException {
+  public void unassignRegionByRow(byte[] row, RegionLocator table) throws IOException {
     HRegionLocation hrl = table.getRegionLocation(row);
-    closeRegion(hrl.getRegionInfo().getRegionName());
+    unassignRegion(hrl.getRegionInfo().getRegionName());
   }
 
   /*
@@ -2910,16 +2859,6 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
       attempts++;
     } while (maxAttempts == -1 || attempts < maxAttempts);
     return null;
-  }
-
-  public MiniZooKeeperCluster getZkCluster() {
-    return zkCluster;
-  }
-
-  public void setZkCluster(MiniZooKeeperCluster zkCluster) {
-    this.passedZkCluster = true;
-    this.zkCluster = zkCluster;
-    conf.setInt(HConstants.ZOOKEEPER_CLIENT_PORT, zkCluster.getClientPort());
   }
 
   public MiniDFSCluster getDFSCluster() {
@@ -2983,13 +2922,13 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
   public String explainTableAvailability(TableName tableName) throws IOException {
     String msg = explainTableState(tableName, TableState.State.ENABLED) + ", ";
     if (getHBaseCluster().getMaster().isAlive()) {
-      Map<HRegionInfo, ServerName> assignments =
+      Map<RegionInfo, ServerName> assignments =
           getHBaseCluster().getMaster().getAssignmentManager().getRegionStates()
               .getRegionAssignments();
-      final List<Pair<HRegionInfo, ServerName>> metaLocations =
+      final List<Pair<RegionInfo, ServerName>> metaLocations =
           MetaTableAccessor.getTableRegionsAndLocations(connection, tableName);
-      for (Pair<HRegionInfo, ServerName> metaLocation : metaLocations) {
-        HRegionInfo hri = metaLocation.getFirst();
+      for (Pair<RegionInfo, ServerName> metaLocation : metaLocations) {
+        RegionInfo hri = metaLocation.getFirst();
         ServerName sn = metaLocation.getSecond();
         if (!assignments.containsKey(hri)) {
           msg += ", region " + hri
@@ -3059,7 +2998,7 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
   /**
    * Waits for a table to be 'enabled'.  Enabled means that table is set as 'enabled' and the
    * regions have been all assigned.
-   * @see #waitTableEnabled(Admin, byte[], long)
+   * @see #waitTableEnabled(TableName, long)
    * @param table Table to wait on.
    * @param timeoutMillis Time to wait on it being marked enabled.
    * @throws InterruptedException
@@ -3182,10 +3121,10 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
 
   public static NavigableSet<String> getAllOnlineRegions(MiniHBaseCluster cluster)
       throws IOException {
-    NavigableSet<String> online = new TreeSet<String>();
+    NavigableSet<String> online = new TreeSet<>();
     for (RegionServerThread rst : cluster.getLiveRegionServerThreads()) {
       try {
-        for (HRegionInfo region :
+        for (RegionInfo region :
             ProtobufUtil.getOnlineRegions(rst.getRegionServer().getRSRpcServices())) {
           online.add(region.getRegionNameAsString());
         }
@@ -3195,7 +3134,7 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
     }
     for (MasterThread mt : cluster.getLiveMasterThreads()) {
       try {
-        for (HRegionInfo region :
+        for (RegionInfo region :
             ProtobufUtil.getOnlineRegions(mt.getMaster().getRSRpcServices())) {
           online.add(region.getRegionNameAsString());
         }
@@ -3248,16 +3187,40 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
   /**
    * Uses directly the assignment manager to assign the region.
    * and waits until the specified region has completed assignment.
-   * @param tableName the table name
    * @throws IOException
    * @throw InterruptedException
    * @return true if the region is assigned false otherwise.
    */
-  public boolean assignRegion(final HRegionInfo regionInfo)
+  public boolean assignRegion(final RegionInfo regionInfo)
       throws IOException, InterruptedException {
     final AssignmentManager am = getHBaseCluster().getMaster().getAssignmentManager();
     am.assign(regionInfo);
     return am.waitForAssignment(regionInfo);
+  }
+
+  /**
+   * Move region to destination server and wait till region is completely moved and online
+   *
+   * @param destRegion region to move
+   * @param destServer destination server of the region
+   * @throws InterruptedException
+   * @throws IOException
+   */
+  public void moveRegionAndWait(RegionInfo destRegion, ServerName destServer)
+      throws InterruptedException, IOException {
+    HMaster master = getMiniHBaseCluster().getMaster();
+    // TODO: Here we start the move. The move can take a while.
+    getAdmin().move(destRegion.getEncodedNameAsBytes(),
+        Bytes.toBytes(destServer.getServerName()));
+    while (true) {
+      ServerName serverName = master.getAssignmentManager().getRegionStates()
+          .getRegionServerOfRegion(destRegion);
+      if (serverName != null && serverName.equals(destServer)) {
+        assertRegionOnServer(destRegion, serverName, 2000);
+        break;
+      }
+      Thread.sleep(10);
+    }
   }
 
   /**
@@ -3270,9 +3233,17 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
    * @throws IOException
    */
   public void waitUntilAllRegionsAssigned(final TableName tableName) throws IOException {
-    waitUntilAllRegionsAssigned(
-      tableName,
+    waitUntilAllRegionsAssigned(tableName,
       this.conf.getLong("hbase.client.sync.wait.timeout.msec", 60000));
+  }
+
+  /**
+   * Waith until all system table's regions get assigned
+   * @throws IOException
+   */
+  public void waitUntilAllSystemRegionsAssigned() throws IOException {
+    waitUntilAllRegionsAssigned(TableName.META_TABLE_NAME);
+    waitUntilAllRegionsAssigned(TableName.NAMESPACE_TABLE_NAME);
   }
 
   /**
@@ -3286,44 +3257,65 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
    */
   public void waitUntilAllRegionsAssigned(final TableName tableName, final long timeout)
       throws IOException {
-    final Table meta = getConnection().getTable(TableName.META_TABLE_NAME);
-    try {
-      long l = waitFor(timeout, 200, true, new ExplainingPredicate<IOException>() {
-        @Override
-        public String explainFailure() throws IOException {
-          return explainTableAvailability(tableName);
-        }
+    if (!TableName.isMetaTableName(tableName)) {
+      try (final Table meta = getConnection().getTable(TableName.META_TABLE_NAME)) {
+        LOG.debug("Waiting until all regions of table " + tableName + " get assigned. Timeout = " +
+            timeout + "ms");
+        waitFor(timeout, 200, true, new ExplainingPredicate<IOException>() {
+          @Override
+          public String explainFailure() throws IOException {
+            return explainTableAvailability(tableName);
+          }
 
-        @Override
-        public boolean evaluate() throws IOException {
-          boolean allRegionsAssigned = true;
-          Scan scan = new Scan();
-          scan.addFamily(HConstants.CATALOG_FAMILY);
-          ResultScanner s = meta.getScanner(scan);
-          try {
-            Result r;
-            while ((r = s.next()) != null) {
-              byte[] b = r.getValue(HConstants.CATALOG_FAMILY, HConstants.REGIONINFO_QUALIFIER);
-              HRegionInfo info = HRegionInfo.parseFromOrNull(b);
-              if (info != null && info.getTable().equals(tableName)) {
-                b = r.getValue(HConstants.CATALOG_FAMILY, HConstants.SERVER_QUALIFIER);
-                allRegionsAssigned &= (b != null);
+          @Override
+          public boolean evaluate() throws IOException {
+            Scan scan = new Scan();
+            scan.addFamily(HConstants.CATALOG_FAMILY);
+            boolean tableFound = false;
+            try (ResultScanner s = meta.getScanner(scan)) {
+              for (Result r; (r = s.next()) != null;) {
+                byte[] b = r.getValue(HConstants.CATALOG_FAMILY, HConstants.REGIONINFO_QUALIFIER);
+                HRegionInfo info = HRegionInfo.parseFromOrNull(b);
+                if (info != null && info.getTable().equals(tableName)) {
+                  // Get server hosting this region from catalog family. Return false if no server
+                  // hosting this region, or if the server hosting this region was recently killed
+                  // (for fault tolerance testing).
+                  tableFound = true;
+                  byte[] server =
+                      r.getValue(HConstants.CATALOG_FAMILY, HConstants.SERVER_QUALIFIER);
+                  if (server == null) {
+                    return false;
+                  } else {
+                    byte[] startCode =
+                        r.getValue(HConstants.CATALOG_FAMILY, HConstants.STARTCODE_QUALIFIER);
+                    ServerName serverName =
+                        ServerName.valueOf(Bytes.toString(server).replaceFirst(":", ",") + "," +
+                            Bytes.toLong(startCode));
+                    if (!getHBaseClusterInterface().isDistributedCluster() &&
+                        getHBaseCluster().isKilledRS(serverName)) {
+                      return false;
+                    }
+                  }
+                  if (RegionStateStore.getRegionState(r,
+                    info.getReplicaId()) != RegionState.State.OPEN) {
+                    return false;
+                  }
+                }
               }
             }
-          } finally {
-            s.close();
+            if (!tableFound) {
+              LOG.warn("Didn't find the entries for table " + tableName + " in meta, already deleted?");
+            }
+            return tableFound;
           }
-          return allRegionsAssigned;
-        }
-      });
-    } finally {
-      meta.close();
+        });
+      }
     }
-
+    LOG.info("All regions for table " + tableName + " assigned to meta. Checking AM states.");
     // check from the master state if we are using a mini cluster
     if (!getHBaseClusterInterface().isDistributedCluster()) {
       // So, all regions are in the meta table but make sure master knows of the assignments before
-      // returing -- sometimes this can lag.
+      // returning -- sometimes this can lag.
       HMaster master = getHBaseCluster().getMaster();
       final RegionStates states = master.getAssignmentManager().getRegionStates();
       waitFor(timeout, 200, new ExplainingPredicate<IOException>() {
@@ -3334,11 +3326,12 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
 
         @Override
         public boolean evaluate() throws IOException {
-          List<HRegionInfo> hris = states.getRegionsOfTable(tableName);
+          List<RegionInfo> hris = states.getRegionsOfTable(tableName);
           return hris != null && !hris.isEmpty();
         }
       });
     }
+    LOG.info("All regions for table " + tableName + " assigned.");
   }
 
   /**
@@ -3349,17 +3342,17 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
                                                 Get get) throws IOException {
     Scan scan = new Scan(get);
     InternalScanner scanner = (InternalScanner) store.getScanner(scan,
-        scan.getFamilyMap().get(store.getFamily().getName()),
+        scan.getFamilyMap().get(store.getColumnFamilyDescriptor().getName()),
         // originally MultiVersionConcurrencyControl.resetThreadReadPoint() was called to set
         // readpoint 0.
         0);
 
-    List<Cell> result = new ArrayList<Cell>();
+    List<Cell> result = new ArrayList<>();
     scanner.next(result);
     if (!result.isEmpty()) {
       // verify that we are on the row we want:
       Cell kv = result.get(0);
-      if (!CellUtil.matchingRow(kv, get.getRow())) {
+      if (!CellUtil.matchingRows(kv, get.getRow())) {
         result.clear();
       }
     }
@@ -3394,34 +3387,9 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
                                                 ) throws IOException {
     Get get = new Get(row);
     Map<byte[], NavigableSet<byte[]>> s = get.getFamilyMap();
-    s.put(store.getFamily().getName(), columns);
+    s.put(store.getColumnFamilyDescriptor().getName(), columns);
 
     return getFromStoreFile(store,get);
-  }
-
-  /**
-   * Gets a ZooKeeperWatcher.
-   * @param TEST_UTIL
-   */
-  public static ZooKeeperWatcher getZooKeeperWatcher(
-      HBaseTestingUtility TEST_UTIL) throws ZooKeeperConnectionException,
-      IOException {
-    ZooKeeperWatcher zkw = new ZooKeeperWatcher(TEST_UTIL.getConfiguration(),
-        "unittest", new Abortable() {
-          boolean aborted = false;
-
-          @Override
-          public void abort(String why, Throwable e) {
-            aborted = true;
-            throw new RuntimeException("Fatal ZK error, why=" + why, e);
-          }
-
-          @Override
-          public boolean isAborted() {
-            return aborted;
-          }
-        });
-    return zkw;
   }
 
   public static void assertKVListsEqual(String additionalMsg,
@@ -3433,7 +3401,7 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
 
     int i;
     for (i = 0; i < minLen
-        && CellComparator.COMPARATOR.compare(expected.get(i), actual.get(i)) == 0;
+        && CellComparator.getInstance().compare(expected.get(i), actual.get(i)) == 0;
         ++i) {}
 
     if (additionalMsg == null) {
@@ -3564,7 +3532,7 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
     private static final int MAX_RANDOM_PORT = 0xfffe;
 
     /** A set of ports that have been claimed using {@link #randomFreePort()}. */
-    private final Set<Integer> takenRandomPorts = new HashSet<Integer>();
+    private final Set<Integer> takenRandomPorts = new HashSet<>();
 
     private final Random random;
     private final AvailablePortChecker portChecker;
@@ -3625,12 +3593,9 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
     }
   }
 
-
   public static String randomMultiCastAddress() {
     return "226.1.1." + random.nextInt(254);
   }
-
-
 
   public static void waitForHostPort(String host, int port)
       throws IOException {
@@ -3718,7 +3683,7 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
    * @return the number of regions the table was split into
    */
   public static int createPreSplitLoadTestTable(Configuration conf,
-      HTableDescriptor desc, HColumnDescriptor hcd) throws IOException {
+      TableDescriptor desc, ColumnFamilyDescriptor hcd) throws IOException {
     return createPreSplitLoadTestTable(conf, desc, hcd, DEFAULT_REGIONS_PER_SERVER);
   }
 
@@ -3728,8 +3693,8 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
    * @return the number of regions the table was split into
    */
   public static int createPreSplitLoadTestTable(Configuration conf,
-      HTableDescriptor desc, HColumnDescriptor hcd, int numRegionsPerServer) throws IOException {
-    return createPreSplitLoadTestTable(conf, desc, new HColumnDescriptor[] {hcd},
+      TableDescriptor desc, ColumnFamilyDescriptor hcd, int numRegionsPerServer) throws IOException {
+    return createPreSplitLoadTestTable(conf, desc, new ColumnFamilyDescriptor[] {hcd},
         numRegionsPerServer);
   }
 
@@ -3739,13 +3704,27 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
    * @return the number of regions the table was split into
    */
   public static int createPreSplitLoadTestTable(Configuration conf,
-      HTableDescriptor desc, HColumnDescriptor[] hcds, int numRegionsPerServer) throws IOException {
-    for (HColumnDescriptor hcd : hcds) {
-      if (!desc.hasFamily(hcd.getName())) {
-        desc.addFamily(hcd);
+      TableDescriptor desc, ColumnFamilyDescriptor[] hcds,
+      int numRegionsPerServer) throws IOException {
+    return createPreSplitLoadTestTable(conf, desc, hcds,
+      new RegionSplitter.HexStringSplit(), numRegionsPerServer);
+  }
+
+  /**
+   * Creates a pre-split table for load testing. If the table already exists,
+   * logs a warning and continues.
+   * @return the number of regions the table was split into
+   */
+  public static int createPreSplitLoadTestTable(Configuration conf,
+      TableDescriptor td, ColumnFamilyDescriptor[] cds,
+      SplitAlgorithm splitter, int numRegionsPerServer) throws IOException {
+    TableDescriptorBuilder builder = TableDescriptorBuilder.newBuilder(td);
+    for (ColumnFamilyDescriptor cd : cds) {
+      if (!td.hasColumnFamily(cd.getName())) {
+        builder.addColumnFamily(cd);
       }
     }
-
+    td = builder.build();
     int totalNumberOfRegions = 0;
     Connection unmanagedConnection = ConnectionFactory.createConnection(conf);
     Admin admin = unmanagedConnection.getAdmin();
@@ -3754,7 +3733,9 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
       // create a table a pre-splits regions.
       // The number of splits is set as:
       //    region servers * regions per region server).
-      int numberOfServers = admin.getClusterStatus().getServers().size();
+      int numberOfServers =
+          admin.getClusterMetrics(EnumSet.of(Option.LIVE_SERVERS)).getLiveServerMetrics()
+              .size();
       if (numberOfServers == 0) {
         throw new IllegalStateException("No live regionservers");
       }
@@ -3764,15 +3745,15 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
           "pre-splitting table into " + totalNumberOfRegions + " regions " +
           "(regions per server: " + numRegionsPerServer + ")");
 
-      byte[][] splits = new RegionSplitter.HexStringSplit().split(
+      byte[][] splits = splitter.split(
           totalNumberOfRegions);
 
-      admin.createTable(desc, splits);
+      admin.createTable(td, splits);
     } catch (MasterNotRunningException e) {
       LOG.error("Master not running", e);
       throw new IOException(e);
     } catch (TableExistsException e) {
-      LOG.warn("Table " + desc.getTableName() +
+      LOG.warn("Table " + td.getTableName() +
           " already exists, continuing");
     } finally {
       admin.close();
@@ -3794,12 +3775,12 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
    *  is recorded in master.
    */
   public void assertRegionOnServer(
-      final HRegionInfo hri, final ServerName server,
+      final RegionInfo hri, final ServerName server,
       final long timeout) throws IOException, InterruptedException {
     long timeoutTime = System.currentTimeMillis() + timeout;
     while (true) {
-      List<HRegionInfo> regions = getAdmin().getOnlineRegions(server);
-      if (regions.contains(hri)) return;
+      List<RegionInfo> regions = getAdmin().getRegions(server);
+      if (regions.stream().anyMatch(r -> RegionInfo.COMPARATOR.compare(r, hri) == 0)) return;
       long now = System.currentTimeMillis();
       if (now > timeoutTime) break;
       Thread.sleep(10);
@@ -3813,12 +3794,12 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
    * region server, but not on any other one.
    */
   public void assertRegionOnlyOnServer(
-      final HRegionInfo hri, final ServerName server,
+      final RegionInfo hri, final ServerName server,
       final long timeout) throws IOException, InterruptedException {
     long timeoutTime = System.currentTimeMillis() + timeout;
     while (true) {
-      List<HRegionInfo> regions = getAdmin().getOnlineRegions(server);
-      if (regions.contains(hri)) {
+      List<RegionInfo> regions = getAdmin().getRegions(server);
+      if (regions.stream().anyMatch(r -> RegionInfo.COMPARATOR.compare(r, hri) == 0)) {
         List<JVMClusterUtil.RegionServerThread> rsThreads =
           getHBaseCluster().getLiveRegionServerThreads();
         for (JVMClusterUtil.RegionServerThread rsThread: rsThreads) {
@@ -3826,8 +3807,8 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
           if (server.equals(rs.getServerName())) {
             continue;
           }
-          Collection<Region> hrs = rs.getOnlineRegionsLocalContext();
-          for (Region r: hrs) {
+          Collection<HRegion> hrs = rs.getOnlineRegionsLocalContext();
+          for (HRegion r: hrs) {
             assertTrue("Region should not be double assigned",
               r.getRegionInfo().getRegionId() != hri.getRegionId());
           }
@@ -3842,41 +3823,19 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
       + " on server " + server);
   }
 
-  public HRegion createTestRegion(String tableName, HColumnDescriptor hcd)
+  public HRegion createTestRegion(String tableName, ColumnFamilyDescriptor cd)
       throws IOException {
-    HTableDescriptor htd = new HTableDescriptor(TableName.valueOf(tableName));
-    htd.addFamily(hcd);
+    TableDescriptor td
+        = TableDescriptorBuilder.newBuilder(TableName.valueOf(tableName))
+            .addColumnFamily(cd)
+            .build();
     HRegionInfo info =
         new HRegionInfo(TableName.valueOf(tableName), null, null, false);
-    return createRegionAndWAL(info, getDataTestDir(), getConfiguration(), htd);
+    return createRegionAndWAL(info, getDataTestDir(), getConfiguration(), td);
   }
 
   public void setFileSystemURI(String fsURI) {
     FS_URI = fsURI;
-  }
-
-  /**
-   * Wrapper method for {@link Waiter#waitFor(Configuration, long, Predicate)}.
-   */
-  public <E extends Exception> long waitFor(long timeout, Predicate<E> predicate)
-      throws E {
-    return Waiter.waitFor(this.conf, timeout, predicate);
-  }
-
-  /**
-   * Wrapper method for {@link Waiter#waitFor(Configuration, long, long, Predicate)}.
-   */
-  public <E extends Exception> long waitFor(long timeout, long interval, Predicate<E> predicate)
-      throws E {
-    return Waiter.waitFor(this.conf, timeout, interval, predicate);
-  }
-
-  /**
-   * Wrapper method for {@link Waiter#waitFor(Configuration, long, long, boolean, Predicate)}.
-   */
-  public <E extends Exception> long waitFor(long timeout, long interval,
-      boolean failIfTimeout, Predicate<E> predicate) throws E {
-    return Waiter.waitFor(this.conf, timeout, interval, failIfTimeout, predicate);
   }
 
   /**
@@ -3897,8 +3856,7 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
         if (master == null) return false;
         AssignmentManager am = master.getAssignmentManager();
         if (am == null) return false;
-        final RegionStates regionStates = am.getRegionStates();
-        return !regionStates.isRegionsInTransition();
+        return !am.hasRegionsInTransition();
       }
     };
   }
@@ -3951,10 +3909,20 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
       public boolean evaluate() throws IOException {
         boolean tableAvailable = getAdmin().isTableAvailable(tableName);
         if (tableAvailable) {
-          try {
-            Canary.sniff(getAdmin(), tableName);
-          } catch (Exception e) {
-            throw new IOException("Canary sniff failed for table " + tableName, e);
+          try (Table table = getConnection().getTable(tableName)) {
+            TableDescriptor htd = table.getDescriptor();
+            for (HRegionLocation loc : getConnection().getRegionLocator(tableName)
+                .getAllRegionLocations()) {
+              Scan scan = new Scan().withStartRow(loc.getRegionInfo().getStartKey())
+                  .withStopRow(loc.getRegionInfo().getEndKey()).setOneRowLimit()
+                  .setMaxResultsPerColumnFamily(1).setCacheBlocks(false);
+              for (byte[] family : htd.getColumnFamilyNames()) {
+                scan.addFamily(family);
+              }
+              try (ResultScanner scanner = table.getScanner(scan)) {
+                scanner.next();
+              }
+            }
           }
         }
         return tableAvailable;
@@ -4120,5 +4088,23 @@ public class HBaseTestingUtility extends HBaseCommonTestingUtility {
     } while (bindException);
     HBaseKerberosUtils.setKeytabFileForTesting(keytabFile.getAbsolutePath());
     return kdc;
+  }
+
+  public int getNumHFiles(final TableName tableName, final byte[] family) {
+    int numHFiles = 0;
+    for (RegionServerThread regionServerThread : getMiniHBaseCluster().getRegionServerThreads()) {
+      numHFiles+= getNumHFilesForRS(regionServerThread.getRegionServer(), tableName,
+                                    family);
+    }
+    return numHFiles;
+  }
+
+  public int getNumHFilesForRS(final HRegionServer rs, final TableName tableName,
+                               final byte[] family) {
+    int numHFiles = 0;
+    for (Region region : rs.getRegions(tableName)) {
+      numHFiles += region.getStore(family).getStorefilesCount();
+    }
+    return numHFiles;
   }
 }

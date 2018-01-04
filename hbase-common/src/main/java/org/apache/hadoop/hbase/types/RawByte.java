@@ -17,11 +17,10 @@
  */
 package org.apache.hadoop.hbase.types;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.Order;
 import org.apache.hadoop.hbase.util.PositionedByteRange;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * An {@code DataType} for interacting with values encoded using
@@ -30,26 +29,37 @@ import org.apache.hadoop.hbase.util.PositionedByteRange;
  * @see Bytes#putByte(byte[], int, byte)
  */
 @InterfaceAudience.Public
-@InterfaceStability.Evolving
 public class RawByte implements DataType<Byte> {
 
   @Override
-  public boolean isOrderPreserving() { return false; }
+  public boolean isOrderPreserving() {
+    return false;
+  }
 
   @Override
-  public Order getOrder() { return null; }
+  public Order getOrder() {
+    return null;
+  }
 
   @Override
-  public boolean isNullable() { return false; }
+  public boolean isNullable() {
+    return false;
+  }
 
   @Override
-  public boolean isSkippable() { return true; }
+  public boolean isSkippable() {
+    return true;
+  }
 
   @Override
-  public int encodedLength(Byte val) { return Bytes.SIZEOF_BYTE; }
+  public int encodedLength(Byte val) {
+    return Bytes.SIZEOF_BYTE;
+  }
 
   @Override
-  public Class<Byte> encodedClass() { return Byte.class; }
+  public Class<Byte> encodedClass() {
+    return Byte.class;
+  }
 
   @Override
   public int skip(PositionedByteRange src) {

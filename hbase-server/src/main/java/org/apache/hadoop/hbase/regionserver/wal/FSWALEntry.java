@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -17,24 +17,28 @@
  */
 package org.apache.hadoop.hbase.regionserver.wal;
 
-
-import com.google.common.collect.Sets;
+import static java.util.stream.Collectors.toCollection;
 
 import java.io.IOException;
-import java.util.ArrayList;
 import java.util.Collections;
+import java.util.List;
 import java.util.Set;
+import java.util.TreeSet;
 
 import org.apache.hadoop.hbase.Cell;
+import org.apache.hadoop.hbase.CellComparator;
 import org.apache.hadoop.hbase.CellUtil;
-import org.apache.hadoop.hbase.HRegionInfo;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.hadoop.hbase.PrivateCellUtil;
+import org.apache.hadoop.hbase.client.RegionInfo;
 import org.apache.hadoop.hbase.regionserver.MultiVersionConcurrencyControl;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.CollectionUtils;
 import org.apache.hadoop.hbase.wal.WAL.Entry;
-import org.apache.hadoop.hbase.wal.WALKey;
-import org.apache.htrace.Span;
+import org.apache.hadoop.hbase.wal.WALEdit;
+import org.apache.hadoop.hbase.wal.WALKeyImpl;
+import org.apache.yetus.audience.InterfaceAudience;
+
+import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
 
 /**
  * A WAL Entry for {@link AbstractFSWAL} implementation.  Immutable.
@@ -50,38 +54,34 @@ class FSWALEntry extends Entry {
   // they are only in memory and held here while passing over the ring buffer.
   private final transient long txid;
   private final transient boolean inMemstore;
-  private final transient HRegionInfo hri;
+  private final transient RegionInfo regionInfo;
   private final transient Set<byte[]> familyNames;
-  // In the new WAL logic, we will rewrite failed WAL entries to new WAL file, so we need to avoid
-  // calling stampRegionSequenceId again.
-  private transient boolean stamped = false;
 
-  // The tracing span for this entry when writing WAL.
-  private transient Span span;
-
-  FSWALEntry(final long txid, final WALKey key, final WALEdit edit,
-      final HRegionInfo hri, final boolean inMemstore) {
+  FSWALEntry(final long txid, final WALKeyImpl key, final WALEdit edit,
+      final RegionInfo regionInfo, final boolean inMemstore) {
     super(key, edit);
     this.inMemstore = inMemstore;
-    this.hri = hri;
+    this.regionInfo = regionInfo;
     this.txid = txid;
     if (inMemstore) {
       // construct familyNames here to reduce the work of log sinker.
-      ArrayList<Cell> cells = this.getEdit().getCells();
-      if (CollectionUtils.isEmpty(cells)) {
-        this.familyNames = Collections.<byte[]> emptySet();
-      } else {
-        Set<byte[]> familySet = Sets.newTreeSet(Bytes.BYTES_COMPARATOR);
-        for (Cell cell : cells) {
-          if (!CellUtil.matchingFamily(cell, WALEdit.METAFAMILY)) {
-            // TODO: Avoid this clone?
-            familySet.add(CellUtil.cloneFamily(cell));
-          }
-        }
-        this.familyNames = Collections.unmodifiableSet(familySet);
-      }
+      this.familyNames = collectFamilies(edit.getCells());
     } else {
       this.familyNames = Collections.<byte[]> emptySet();
+    }
+  }
+
+  @VisibleForTesting
+  static Set<byte[]> collectFamilies(List<Cell> cells) {
+    if (CollectionUtils.isEmpty(cells)) {
+      return Collections.emptySet();
+    } else {
+      return cells.stream()
+           .filter(v -> !CellUtil.matchingFamily(v, WALEdit.METAFAMILY))
+           .collect(toCollection(() -> new TreeSet<>(CellComparator.getInstance()::compareFamilies)))
+           .stream()
+           .map(CellUtil::cloneFamily)
+           .collect(toCollection(() -> new TreeSet<>(Bytes.BYTES_COMPARATOR)));
     }
   }
 
@@ -89,12 +89,12 @@ class FSWALEntry extends Entry {
     return "sequence=" + this.txid + ", " + super.toString();
   };
 
-  boolean isInMemstore() {
+  boolean isInMemStore() {
     return this.inMemstore;
   }
 
-  HRegionInfo getHRegionInfo() {
-    return this.hri;
+  RegionInfo getRegionInfo() {
+    return this.regionInfo;
   }
 
   /**
@@ -105,38 +105,18 @@ class FSWALEntry extends Entry {
   }
 
   /**
-   * Here is where a WAL edit gets its sequenceid.
-   * SIDE-EFFECT is our stamping the sequenceid into every Cell AND setting the sequenceid into the
-   * MVCC WriteEntry!!!!
+   * Here is where a WAL edit gets its sequenceid. SIDE-EFFECT is our stamping the sequenceid into
+   * every Cell AND setting the sequenceid into the MVCC WriteEntry!!!!
    * @return The sequenceid we stamped on this edit.
    */
-  long stampRegionSequenceId() throws IOException {
-    if (stamped) {
-      return getKey().getSequenceId();
-    }
-    stamped = true;
-    long regionSequenceId = WALKey.NO_SEQUENCE_ID;
-    WALKey key = getKey();
-    MultiVersionConcurrencyControl.WriteEntry we = key.getPreAssignedWriteEntry();
-    boolean preAssigned = (we != null);
-    if (!preAssigned) {
-      MultiVersionConcurrencyControl mvcc = key.getMvcc();
-      if (mvcc != null) {
-        we = mvcc.begin();
-      }
-    }
-    if (we != null) {
-      regionSequenceId = we.getWriteNumber();
-    }
-
+  long stampRegionSequenceId(MultiVersionConcurrencyControl.WriteEntry we) throws IOException {
+    long regionSequenceId = we.getWriteNumber();
     if (!this.getEdit().isReplay() && inMemstore) {
-      for (Cell c:getEdit().getCells()) {
-        CellUtil.setSequenceId(c, regionSequenceId);
+      for (Cell c : getEdit().getCells()) {
+        PrivateCellUtil.setSequenceId(c, regionSequenceId);
       }
     }
-    if (!preAssigned) {
-      key.setWriteEntry(we);
-    }
+    getKey().setWriteEntry(we);
     return regionSequenceId;
   }
 
@@ -145,15 +125,5 @@ class FSWALEntry extends Entry {
    */
   Set<byte[]> getFamilyNames() {
     return familyNames;
-  }
-
-  void attachSpan(Span span) {
-    this.span = span;
-  }
-
-  Span detachSpan() {
-    Span span = this.span;
-    this.span = null;
-    return span;
   }
 }

@@ -18,6 +18,7 @@
 package org.apache.hadoop.hbase.thrift2;
 
 import static java.nio.ByteBuffer.wrap;
+
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
@@ -31,8 +32,6 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HColumnDescriptor;
@@ -71,12 +70,14 @@ import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Category({ClientTests.class, MediumTests.class})
 public class TestThriftHBaseServiceHandlerWithLabels {
 
-  private static final Log LOG = LogFactory
-    .getLog(TestThriftHBaseServiceHandlerWithLabels.class);
+  private static final Logger LOG = LoggerFactory
+    .getLogger(TestThriftHBaseServiceHandlerWithLabels.class);
 private static final HBaseTestingUtility UTIL = new HBaseTestingUtility();
 
 // Static names for tables, columns, rows, and values
@@ -139,7 +140,7 @@ public static void beforeClass() throws Exception {
   // Wait for the labels table to become available
   UTIL.waitTableEnabled(VisibilityConstants.LABELS_TABLE_NAME.getName(), 50000);
   createLabels();
-  Admin admin = UTIL.getHBaseAdmin();
+  Admin admin = UTIL.getAdmin();
   HTableDescriptor tableDescriptor = new HTableDescriptor(
       TableName.valueOf(tableAname));
   for (HColumnDescriptor family : families) {
@@ -197,7 +198,7 @@ public void testScanWithVisibilityLabels() throws Exception {
   // insert data
   TColumnValue columnValue = new TColumnValue(wrap(familyAname),
       wrap(qualifierAname), wrap(valueAname));
-  List<TColumnValue> columnValues = new ArrayList<TColumnValue>();
+  List<TColumnValue> columnValues = new ArrayList<>(1);
   columnValues.add(columnValue);
   for (int i = 0; i < 10; i++) {
     TPut put = new TPut(wrap(("testScan" + i).getBytes()), columnValues);
@@ -212,7 +213,7 @@ public void testScanWithVisibilityLabels() throws Exception {
 
   // create scan instance
   TScan scan = new TScan();
-  List<TColumn> columns = new ArrayList<TColumn>();
+  List<TColumn> columns = new ArrayList<>(1);
   TColumn column = new TColumn();
   column.setFamily(familyAname);
   column.setQualifier(qualifierAname);
@@ -222,7 +223,7 @@ public void testScanWithVisibilityLabels() throws Exception {
   scan.setStopRow("testScan\uffff".getBytes());
 
   TAuthorization tauth = new TAuthorization();
-  List<String> labels = new ArrayList<String>();
+  List<String> labels = new ArrayList<>(2);
   labels.add(SECRET);
   labels.add(PRIVATE);
   tauth.setLabels(labels);
@@ -265,7 +266,7 @@ public void testGetScannerResultsWithAuthorizations() throws Exception {
   // insert data
   TColumnValue columnValue = new TColumnValue(wrap(familyAname),
       wrap(qualifierAname), wrap(valueAname));
-  List<TColumnValue> columnValues = new ArrayList<TColumnValue>();
+  List<TColumnValue> columnValues = new ArrayList<>(1);
   columnValues.add(columnValue);
   for (int i = 0; i < 20; i++) {
     TPut put = new TPut(
@@ -282,7 +283,7 @@ public void testGetScannerResultsWithAuthorizations() throws Exception {
 
   // create scan instance
   TScan scan = new TScan();
-  List<TColumn> columns = new ArrayList<TColumn>();
+  List<TColumn> columns = new ArrayList<>(1);
   TColumn column = new TColumn();
   column.setFamily(familyAname);
   column.setQualifier(qualifierAname);
@@ -293,7 +294,7 @@ public void testGetScannerResultsWithAuthorizations() throws Exception {
   // get 5 rows and check the returned results
   scan.setStopRow("testGetScannerResults05".getBytes());
   TAuthorization tauth = new TAuthorization();
-  List<String> labels = new ArrayList<String>();
+  List<String> labels = new ArrayList<>(2);
   labels.add(SECRET);
   labels.add(PRIVATE);
   tauth.setLabels(labels);
@@ -321,7 +322,7 @@ public void testGetsWithLabels() throws Exception {
   byte[] rowName = "testPutGet".getBytes();
   ByteBuffer table = wrap(tableAname);
 
-  List<TColumnValue> columnValues = new ArrayList<TColumnValue>();
+  List<TColumnValue> columnValues = new ArrayList<>(2);
   columnValues.add(new TColumnValue(wrap(familyAname), wrap(qualifierAname),
       wrap(valueAname)));
   columnValues.add(new TColumnValue(wrap(familyBname), wrap(qualifierBname),
@@ -334,7 +335,7 @@ public void testGetsWithLabels() throws Exception {
   handler.put(table, put);
   TGet get = new TGet(wrap(rowName));
   TAuthorization tauth = new TAuthorization();
-  List<String> labels = new ArrayList<String>();
+  List<String> labels = new ArrayList<>(2);
   labels.add(SECRET);
   labels.add(PRIVATE);
   tauth.setLabels(labels);
@@ -351,7 +352,7 @@ public void testIncrementWithTags() throws Exception {
   byte[] rowName = "testIncrementWithTags".getBytes();
   ByteBuffer table = wrap(tableAname);
 
-  List<TColumnValue> columnValues = new ArrayList<TColumnValue>();
+  List<TColumnValue> columnValues = new ArrayList<>(1);
   columnValues.add(new TColumnValue(wrap(familyAname), wrap(qualifierAname),
       wrap(Bytes.toBytes(1L))));
   TPut put = new TPut(wrap(rowName), columnValues);
@@ -359,7 +360,7 @@ public void testIncrementWithTags() throws Exception {
   put.setCellVisibility(new TCellVisibility().setExpression(PRIVATE));
   handler.put(table, put);
 
-  List<TColumnIncrement> incrementColumns = new ArrayList<TColumnIncrement>();
+  List<TColumnIncrement> incrementColumns = new ArrayList<>(1);
   incrementColumns.add(new TColumnIncrement(wrap(familyAname),
       wrap(qualifierAname)));
   TIncrement increment = new TIncrement(wrap(rowName), incrementColumns);
@@ -368,7 +369,7 @@ public void testIncrementWithTags() throws Exception {
 
   TGet get = new TGet(wrap(rowName));
   TAuthorization tauth = new TAuthorization();
-  List<String> labels = new ArrayList<String>();
+  List<String> labels = new ArrayList<>(1);
   labels.add(SECRET);
   tauth.setLabels(labels);
   get.setAuthorizations(tauth);
@@ -386,7 +387,7 @@ public void testIncrementWithTagsWithNotMatchLabels() throws Exception {
   byte[] rowName = "testIncrementWithTagsWithNotMatchLabels".getBytes();
   ByteBuffer table = wrap(tableAname);
 
-  List<TColumnValue> columnValues = new ArrayList<TColumnValue>();
+  List<TColumnValue> columnValues = new ArrayList<>(1);
   columnValues.add(new TColumnValue(wrap(familyAname), wrap(qualifierAname),
       wrap(Bytes.toBytes(1L))));
   TPut put = new TPut(wrap(rowName), columnValues);
@@ -394,7 +395,7 @@ public void testIncrementWithTagsWithNotMatchLabels() throws Exception {
   put.setCellVisibility(new TCellVisibility().setExpression(PRIVATE));
   handler.put(table, put);
 
-  List<TColumnIncrement> incrementColumns = new ArrayList<TColumnIncrement>();
+  List<TColumnIncrement> incrementColumns = new ArrayList<>(1);
   incrementColumns.add(new TColumnIncrement(wrap(familyAname),
       wrap(qualifierAname)));
   TIncrement increment = new TIncrement(wrap(rowName), incrementColumns);
@@ -403,7 +404,7 @@ public void testIncrementWithTagsWithNotMatchLabels() throws Exception {
 
   TGet get = new TGet(wrap(rowName));
   TAuthorization tauth = new TAuthorization();
-  List<String> labels = new ArrayList<String>();
+  List<String> labels = new ArrayList<>(1);
   labels.add(PUBLIC);
   tauth.setLabels(labels);
   get.setAuthorizations(tauth);
@@ -418,7 +419,7 @@ public void testAppend() throws Exception {
   ByteBuffer table = wrap(tableAname);
   byte[] v1 = Bytes.toBytes(1L);
   byte[] v2 = Bytes.toBytes(5L);
-  List<TColumnValue> columnValues = new ArrayList<TColumnValue>();
+  List<TColumnValue> columnValues = new ArrayList<>(1);
   columnValues.add(new TColumnValue(wrap(familyAname), wrap(qualifierAname),
       wrap(Bytes.toBytes(1L))));
   TPut put = new TPut(wrap(rowName), columnValues);
@@ -426,7 +427,7 @@ public void testAppend() throws Exception {
   put.setCellVisibility(new TCellVisibility().setExpression(PRIVATE));
   handler.put(table, put);
 
-  List<TColumnValue> appendColumns = new ArrayList<TColumnValue>();
+  List<TColumnValue> appendColumns = new ArrayList<>(1);
   appendColumns.add(new TColumnValue(wrap(familyAname), wrap(qualifierAname),
       wrap(v2)));
   TAppend append = new TAppend(wrap(rowName), appendColumns);
@@ -435,7 +436,7 @@ public void testAppend() throws Exception {
 
   TGet get = new TGet(wrap(rowName));
   TAuthorization tauth = new TAuthorization();
-  List<String> labels = new ArrayList<String>();
+  List<String> labels = new ArrayList<>(1);
   labels.add(SECRET);
   tauth.setLabels(labels);
   get.setAuthorizations(tauth);

@@ -17,7 +17,7 @@
  */
 package org.apache.hadoop.hbase.client.backoff;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.hbase.client.RegionLoadStats;
 import org.apache.hadoop.hbase.util.Bytes;
 
@@ -30,8 +30,7 @@ import java.util.TreeMap;
 @InterfaceAudience.Private
 public class ServerStatistics {
 
-  private Map<byte[], RegionStatistics>
-      stats = new TreeMap<byte[], RegionStatistics>(Bytes.BYTES_COMPARATOR);
+  private Map<byte[], RegionStatistics> stats = new TreeMap<>(Bytes.BYTES_COMPARATOR);
 
   /**
    * Good enough attempt. Last writer wins. It doesn't really matter which one gets to update,
@@ -60,12 +59,12 @@ public class ServerStatistics {
     private int compactionPressure = 0;
 
     public void update(RegionLoadStats currentStats) {
-      this.memstoreLoad = currentStats.getMemstoreLoad();
+      this.memstoreLoad = currentStats.getMemStoreLoad();
       this.heapOccupancy = currentStats.getHeapOccupancy();
       this.compactionPressure = currentStats.getCompactionPressure();
     }
 
-    public int getMemstoreLoadPercent(){
+    public int getMemStoreLoadPercent(){
       return this.memstoreLoad;
     }
 

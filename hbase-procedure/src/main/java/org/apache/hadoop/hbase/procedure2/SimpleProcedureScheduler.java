@@ -18,10 +18,12 @@
 
 package org.apache.hadoop.hbase.procedure2;
 
-import java.util.ArrayDeque;
+import java.util.Collections;
+import java.util.List;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceStability;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
 
 /**
  * Simple scheduler for procedures
@@ -29,7 +31,7 @@ import org.apache.hadoop.hbase.classification.InterfaceStability;
 @InterfaceAudience.Private
 @InterfaceStability.Evolving
 public class SimpleProcedureScheduler extends AbstractProcedureScheduler {
-  private final ArrayDeque<Procedure> runnables = new ArrayDeque<Procedure>();
+  private final ProcedureDeque runnables = new ProcedureDeque();
 
   @Override
   protected void enqueue(final Procedure procedure, final boolean addFront) {
@@ -45,9 +47,15 @@ public class SimpleProcedureScheduler extends AbstractProcedureScheduler {
     return runnables.poll();
   }
 
+  @VisibleForTesting
   @Override
-  protected void clearQueue() {
-    runnables.clear();
+  public void clear() {
+    schedLock();
+    try {
+      runnables.clear();
+    } finally {
+      schedUnlock();
+    }
   }
 
   @Override
@@ -67,5 +75,16 @@ public class SimpleProcedureScheduler extends AbstractProcedureScheduler {
 
   @Override
   public void completionCleanup(Procedure proc) {
+  }
+
+  @Override
+  public List<LockedResource> getLocks() {
+    return Collections.emptyList();
+  }
+
+  @Override
+  public LockedResource getLockResource(LockedResourceType resourceType,
+      String resourceName) {
+    return null;
   }
 }

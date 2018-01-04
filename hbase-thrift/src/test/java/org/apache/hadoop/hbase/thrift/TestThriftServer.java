@@ -22,21 +22,26 @@ import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.CompatibilityFactory;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
+import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HRegionInfo;
+import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.client.Put;
+import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.filter.ParseFilter;
 import org.apache.hadoop.hbase.security.UserProvider;
 import org.apache.hadoop.hbase.test.MetricsAssertHelper;
@@ -58,8 +63,12 @@ import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.Threads;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.junit.rules.TestName;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Unit testing for ThriftServerRunner.HBaseHandler, a part of the
@@ -68,7 +77,7 @@ import org.junit.experimental.categories.Category;
 @Category({ClientTests.class, LargeTests.class})
 public class TestThriftServer {
   private static final HBaseTestingUtility UTIL = new HBaseTestingUtility();
-  private static final Log LOG = LogFactory.getLog(TestThriftServer.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestThriftServer.class);
   private static final MetricsAssertHelper metricsHelper = CompatibilityFactory
       .getInstance(MetricsAssertHelper.class);
   protected static final int MAXVERSIONS = 3;
@@ -94,10 +103,14 @@ public class TestThriftServer {
   private static ByteBuffer valueDname = asByteBuffer("valueD");
   private static ByteBuffer valueEname = asByteBuffer(100l);
 
+  @Rule
+  public TestName name = new TestName();
+
   @BeforeClass
   public static void beforeClass() throws Exception {
     UTIL.getConfiguration().setBoolean(ThriftServerRunner.COALESCE_INC_KEY, true);
     UTIL.getConfiguration().setBoolean("hbase.table.sanity.checks", false);
+    UTIL.getConfiguration().setInt("hbase.client.retries.number", 3);
     UTIL.startMiniCluster();
   }
 
@@ -197,7 +210,7 @@ public class TestThriftServer {
     int currentCountDeleteTable = getCurrentCount("deleteTable_num_ops", 2, metrics);
     int currentCountDisableTable = getCurrentCount("disableTable_num_ops", 2, metrics);
     createTestTables(handler);
-    dropTestTables(handler);;
+    dropTestTables(handler);
     metricsHelper.assertCounter("createTable_num_ops", currentCountCreateTable + 2,
       metrics.getSource());
     metricsHelper.assertCounter("deleteTable_num_ops", currentCountDeleteTable + 2,
@@ -267,13 +280,13 @@ public class TestThriftServer {
   }
 
   public static void doTestIncrements(HBaseHandler handler) throws Exception {
-    List<Mutation> mutations = new ArrayList<Mutation>(1);
+    List<Mutation> mutations = new ArrayList<>(1);
     mutations.add(new Mutation(false, columnAAname, valueEname, true));
     mutations.add(new Mutation(false, columnAname, valueEname, true));
     handler.mutateRow(tableAname, rowAname, mutations, null);
     handler.mutateRow(tableAname, rowBname, mutations, null);
 
-    List<TIncrement> increments = new ArrayList<TIncrement>();
+    List<TIncrement> increments = new ArrayList<>(3);
     increments.add(new TIncrement(tableAname, rowBname, columnAAname, 7));
     increments.add(new TIncrement(tableAname, rowBname, columnAAname, 7));
     increments.add(new TIncrement(tableAname, rowBname, columnAAname, 7));
@@ -364,7 +377,7 @@ public class TestThriftServer {
     assertEquals(0, size);
 
     // Try null mutation
-    List<Mutation> mutations = new ArrayList<Mutation>();
+    List<Mutation> mutations = new ArrayList<>(1);
     mutations.add(new Mutation(false, columnAname, null, true));
     handler.mutateRow(tableAname, rowAname, mutations, null);
     TRowResult rowResult3 = handler.getRow(tableAname, rowAname, null).get(0);
@@ -423,7 +436,7 @@ public class TestThriftServer {
     // ColumnAname has been deleted, and will never be visible even with a getRowTs()
     assertFalse(rowResult2.columns.containsKey(columnAname));
 
-    List<ByteBuffer> columns = new ArrayList<ByteBuffer>();
+    List<ByteBuffer> columns = new ArrayList<>(1);
     columns.add(columnBname);
 
     rowResult1 = handler.getRowWithColumns(tableAname, rowAname, columns, null).get(0);
@@ -542,7 +555,7 @@ public class TestThriftServer {
     assertEquals(rowResult6.sortedColumns.size(), 1);
     assertEquals(rowResult6.sortedColumns.get(0).getCell().value, valueCname);
 
-    List<Mutation> rowBmutations = new ArrayList<Mutation>();
+    List<Mutation> rowBmutations = new ArrayList<>(20);
     for (int i = 0; i < 20; i++) {
       rowBmutations.add(new Mutation(false, asByteBuffer("columnA:" + i), valueCname, true));
     }
@@ -655,13 +668,13 @@ public class TestThriftServer {
         UserProvider.instantiate(UTIL.getConfiguration()));
     handler.createTable(tableAname, getColumnDescriptors());
     try {
-      List<Mutation> mutations = new ArrayList<Mutation>(1);
+      List<Mutation> mutations = new ArrayList<>(1);
       mutations.add(new Mutation(false, columnAname, valueAname, true));
       handler.mutateRow(tableAname, rowAname, mutations, null);
 
-      List<ByteBuffer> columnList = new ArrayList<ByteBuffer>();
+      List<ByteBuffer> columnList = new ArrayList<>(1);
       columnList.add(columnAname);
-      List<ByteBuffer> valueList = new ArrayList<ByteBuffer>();
+      List<ByteBuffer> valueList = new ArrayList<>(1);
       valueList.add(valueBname);
 
       TAppend append = new TAppend(tableAname, rowAname, columnList, valueList);
@@ -689,7 +702,7 @@ public class TestThriftServer {
         UserProvider.instantiate(UTIL.getConfiguration()));
     handler.createTable(tableAname, getColumnDescriptors());
     try {
-      List<Mutation> mutations = new ArrayList<Mutation>(1);
+      List<Mutation> mutations = new ArrayList<>(1);
       mutations.add(new Mutation(false, columnAname, valueAname, true));
       Mutation putB = (new Mutation(false, columnBname, valueBname, true));
 
@@ -708,13 +721,82 @@ public class TestThriftServer {
     }
   }
 
+  @Test
+  public void testMetricsWithException() throws Exception {
+    String rowkey = "row1";
+    String family = "f";
+    String col = "c";
+    // create a table which will throw exceptions for requests
+    final TableName tableName = TableName.valueOf(name.getMethodName());
+    HTableDescriptor tableDesc = new HTableDescriptor(tableName);
+    tableDesc.addCoprocessor(ErrorThrowingGetObserver.class.getName());
+    tableDesc.addFamily(new HColumnDescriptor(family));
+
+    Table table = UTIL.createTable(tableDesc, null);
+    long now = System.currentTimeMillis();
+    table.put(new Put(Bytes.toBytes(rowkey))
+        .addColumn(Bytes.toBytes(family), Bytes.toBytes(col), now, Bytes.toBytes("val1")));
+
+    Configuration conf = UTIL.getConfiguration();
+    ThriftMetrics metrics = getMetrics(conf);
+    ThriftServerRunner.HBaseHandler hbaseHandler =
+        new ThriftServerRunner.HBaseHandler(UTIL.getConfiguration(),
+            UserProvider.instantiate(UTIL.getConfiguration()));
+    Hbase.Iface handler = HbaseHandlerMetricsProxy.newInstance(hbaseHandler, metrics, conf);
+
+    ByteBuffer tTableName = asByteBuffer(tableName.getNameAsString());
+
+    // check metrics increment with a successful get
+    long preGetCounter = metricsHelper.checkCounterExists("getRow_num_ops", metrics.getSource()) ?
+        metricsHelper.getCounter("getRow_num_ops", metrics.getSource()) :
+        0;
+    List<TRowResult> tRowResult = handler.getRow(tTableName, asByteBuffer(rowkey), null);
+    assertEquals(1, tRowResult.size());
+    TRowResult tResult = tRowResult.get(0);
+
+    TCell expectedColumnValue = new TCell(asByteBuffer("val1"), now);
+
+    assertArrayEquals(Bytes.toBytes(rowkey), tResult.getRow());
+    Collection<TCell> returnedColumnValues = tResult.getColumns().values();
+    assertEquals(1, returnedColumnValues.size());
+    assertEquals(expectedColumnValue, returnedColumnValues.iterator().next());
+
+    metricsHelper.assertCounter("getRow_num_ops", preGetCounter + 1, metrics.getSource());
+
+    // check metrics increment when the get throws each exception type
+    for (ErrorThrowingGetObserver.ErrorType type : ErrorThrowingGetObserver.ErrorType.values()) {
+      testExceptionType(handler, metrics, tTableName, rowkey, type);
+    }
+  }
+
+  private void testExceptionType(Hbase.Iface handler, ThriftMetrics metrics,
+                                 ByteBuffer tTableName, String rowkey,
+                                 ErrorThrowingGetObserver.ErrorType errorType) throws Exception {
+    long preGetCounter = metricsHelper.getCounter("getRow_num_ops", metrics.getSource());
+    String exceptionKey = errorType.getMetricName();
+    long preExceptionCounter = metricsHelper.checkCounterExists(exceptionKey, metrics.getSource()) ?
+        metricsHelper.getCounter(exceptionKey, metrics.getSource()) :
+        0;
+    Map<ByteBuffer, ByteBuffer> attributes = new HashMap<>();
+    attributes.put(asByteBuffer(ErrorThrowingGetObserver.SHOULD_ERROR_ATTRIBUTE),
+        asByteBuffer(errorType.name()));
+    try {
+      List<TRowResult> tRowResult = handler.getRow(tTableName, asByteBuffer(rowkey), attributes);
+      fail("Get with error attribute should have thrown an exception");
+    } catch (IOError e) {
+      LOG.info("Received exception: ", e);
+      metricsHelper.assertCounter("getRow_num_ops", preGetCounter + 1, metrics.getSource());
+      metricsHelper.assertCounter(exceptionKey, preExceptionCounter + 1, metrics.getSource());
+    }
+  }
+
   /**
    *
    * @return a List of ColumnDescriptors for use in creating a table.  Has one
    * default ColumnDescriptor and one ColumnDescriptor with fewer versions
    */
   private static List<ColumnDescriptor> getColumnDescriptors() {
-    ArrayList<ColumnDescriptor> cDescriptors = new ArrayList<ColumnDescriptor>();
+    ArrayList<ColumnDescriptor> cDescriptors = new ArrayList<>(2);
 
     // A default ColumnDescriptor
     ColumnDescriptor cDescA = new ColumnDescriptor();
@@ -736,7 +818,7 @@ public class TestThriftServer {
    * @return a List of column names for use in retrieving a scanner
    */
   private List<ByteBuffer> getColumnList(boolean includeA, boolean includeB) {
-    List<ByteBuffer> columnList = new ArrayList<ByteBuffer>();
+    List<ByteBuffer> columnList = new ArrayList<>();
     if (includeA) columnList.add(columnAname);
     if (includeB) columnList.add(columnBname);
     return columnList;
@@ -748,7 +830,7 @@ public class TestThriftServer {
    * and columnB having valueB
    */
   private static List<Mutation> getMutations() {
-    List<Mutation> mutations = new ArrayList<Mutation>();
+    List<Mutation> mutations = new ArrayList<>(2);
     mutations.add(new Mutation(false, columnAname, valueAname, true));
     mutations.add(new Mutation(false, columnBname, valueBname, true));
     return mutations;
@@ -763,19 +845,19 @@ public class TestThriftServer {
    * (rowB, columnB): place valueD
    */
   private static List<BatchMutation> getBatchMutations() {
-    List<BatchMutation> batchMutations = new ArrayList<BatchMutation>();
+    List<BatchMutation> batchMutations = new ArrayList<>(3);
 
     // Mutations to rowA.  You can't mix delete and put anymore.
-    List<Mutation> rowAmutations = new ArrayList<Mutation>();
+    List<Mutation> rowAmutations = new ArrayList<>(1);
     rowAmutations.add(new Mutation(true, columnAname, null, true));
     batchMutations.add(new BatchMutation(rowAname, rowAmutations));
 
-    rowAmutations = new ArrayList<Mutation>();
+    rowAmutations = new ArrayList<>(1);
     rowAmutations.add(new Mutation(false, columnBname, valueCname, true));
     batchMutations.add(new BatchMutation(rowAname, rowAmutations));
 
     // Mutations to rowB
-    List<Mutation> rowBmutations = new ArrayList<Mutation>();
+    List<Mutation> rowBmutations = new ArrayList<>(2);
     rowBmutations.add(new Mutation(false, columnAname, valueCname, true));
     rowBmutations.add(new Mutation(false, columnBname, valueDname, true));
     batchMutations.add(new BatchMutation(rowBname, rowBmutations));

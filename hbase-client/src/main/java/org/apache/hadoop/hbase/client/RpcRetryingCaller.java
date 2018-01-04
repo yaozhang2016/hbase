@@ -17,13 +17,11 @@
  */
 package org.apache.hadoop.hbase.client;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
 
 import java.io.IOException;
 
 @InterfaceAudience.Public
-@InterfaceStability.Evolving
 public interface RpcRetryingCaller<T> {
   void cancel();
 

@@ -32,8 +32,6 @@ import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
@@ -43,28 +41,36 @@ import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.exceptions.PreemptiveFastFailException;
+import org.apache.hadoop.hbase.ipc.RpcExecutor;
 import org.apache.hadoop.hbase.ipc.SimpleRpcScheduler;
 import org.apache.hadoop.hbase.testclassification.ClientTests;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.hbase.util.Bytes;
-import org.apache.hadoop.hbase.util.test.LoadTestKVGenerator;
+import org.apache.hadoop.hbase.util.LoadTestKVGenerator;
 import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.Before;
 import org.junit.BeforeClass;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.Ignore;
 import org.junit.experimental.categories.Category;
+import org.junit.rules.TestName;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Category({MediumTests.class, ClientTests.class})
 public class TestFastFail {
-  private static final Log LOG = LogFactory.getLog(TestFastFail.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestFastFail.class);
   private final static HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
   private static byte[] FAMILY = Bytes.toBytes("testFamily");
   private static final Random random = new Random();
   private static int SLAVES = 1;
   private static byte[] QUALIFIER = Bytes.toBytes("testQualifier");
   private static final int SLEEPTIME = 5000;
+
+  @Rule
+  public TestName name = new TestName();
 
   /**
    * @throws java.lang.Exception
@@ -73,7 +79,7 @@ public class TestFastFail {
   public static void setUpBeforeClass() throws Exception {
     // Just to prevent fastpath FIFO from picking calls up bypassing the queue.
     TEST_UTIL.getConfiguration().set(
-      SimpleRpcScheduler.CALL_QUEUE_TYPE_CONF_KEY, "deadline");
+      RpcExecutor.CALL_QUEUE_TYPE_CONF_KEY, "deadline");
     TEST_UTIL.startMiniCluster(SLAVES);
   }
 
@@ -104,9 +110,9 @@ public class TestFastFail {
 
   @Ignore ("Can go zombie -- see HBASE-14421; FIX") @Test
   public void testFastFail() throws IOException, InterruptedException {
-    Admin admin = TEST_UTIL.getHBaseAdmin();
+    Admin admin = TEST_UTIL.getAdmin();
 
-    final String tableName = "testClientRelearningExperiment";
+    final String tableName = name.getMethodName();
     HTableDescriptor desc = new HTableDescriptor(TableName.valueOf(Bytes
         .toBytes(tableName)));
     desc.addFamily(new HColumnDescriptor(FAMILY));
@@ -157,7 +163,7 @@ public class TestFastFail {
     final AtomicInteger numBlockedWorkers = new AtomicInteger(0);
     final AtomicInteger numPreemptiveFastFailExceptions = new AtomicInteger(0);
 
-    List<Future<Boolean>> futures = new ArrayList<Future<Boolean>>();
+    List<Future<Boolean>> futures = new ArrayList<>();
     for (int i = 0; i < nThreads; i++) {
       futures.add(service.submit(new Callable<Boolean>() {
         /**
@@ -294,9 +300,9 @@ public class TestFastFail {
 
   @Test
   public void testCallQueueTooBigExceptionDoesntTriggerPffe() throws Exception {
-    Admin admin = TEST_UTIL.getHBaseAdmin();
+    Admin admin = TEST_UTIL.getAdmin();
 
-    final String tableName = "testCallQueueTooBigException";
+    final String tableName = name.getMethodName();
     HTableDescriptor desc = new HTableDescriptor(TableName.valueOf(Bytes
       .toBytes(tableName)));
     desc.addFamily(new HColumnDescriptor(FAMILY));

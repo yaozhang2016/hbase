@@ -26,18 +26,23 @@ import org.apache.hadoop.hbase.io.compress.Compression;
 import org.apache.hadoop.hbase.io.compress.Compression.Algorithm;
 import org.apache.hadoop.hbase.io.encoding.DataBlockEncoding;
 import org.apache.hadoop.hbase.regionserver.BloomType;
-import org.apache.hadoop.hbase.util.Bytes;
-import org.apache.hadoop.hbase.util.PrettyPrinter;
 import org.apache.hadoop.hbase.testclassification.MiscTests;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.apache.hadoop.hbase.util.BuilderStyleTest;
+import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.hadoop.hbase.util.PrettyPrinter;
 import org.junit.Assert;
+import org.junit.Rule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.junit.rules.ExpectedException;
 
 /** Tests the HColumnDescriptor with appropriate arguments */
 @Category({MiscTests.class, SmallTests.class})
+@Deprecated
 public class TestHColumnDescriptor {
+  @Rule
+  public ExpectedException expectedEx = ExpectedException.none();
   @Test
   public void testPb() throws DeserializationException {
     HColumnDescriptor hcd = new HColumnDescriptor(
@@ -71,6 +76,7 @@ public class TestHColumnDescriptor {
     assertTrue(hcd.equals(deserializedHcd));
     assertEquals(v, hcd.getBlocksize());
     assertEquals(v, hcd.getTimeToLive());
+    assertEquals(v, hcd.getScope());
     assertEquals(hcd.getValue("a"), deserializedHcd.getValue("a"));
     assertEquals(hcd.getMaxVersions(), deserializedHcd.getMaxVersions());
     assertEquals(hcd.getMinVersions(), deserializedHcd.getMinVersions());
@@ -85,15 +91,14 @@ public class TestHColumnDescriptor {
     assertEquals(v, deserializedHcd.getDFSReplication());
   }
 
+  /**
+   * Tests HColumnDescriptor with empty familyName
+   */
   @Test
-  /** Tests HColumnDescriptor with empty familyName*/
-  public void testHColumnDescriptorShouldThrowIAEWhenFamiliyNameEmpty()
-      throws Exception {
-    try {
-      new HColumnDescriptor("".getBytes());
-    } catch (IllegalArgumentException e) {
-      assertEquals("Family name can not be empty", e.getLocalizedMessage());
-    }
+  public void testHColumnDescriptorShouldThrowIAEWhenFamilyNameEmpty() throws Exception {
+    expectedEx.expect(IllegalArgumentException.class);
+    expectedEx.expectMessage("Column Family name can not be empty");
+    new HColumnDescriptor(Bytes.toBytes(""));
   }
 
   /**
@@ -114,12 +119,18 @@ public class TestHColumnDescriptor {
   public void testMobValuesInHColumnDescriptorShouldReadable() {
     boolean isMob = true;
     long threshold = 1000;
-    String isMobString = PrettyPrinter.format(Bytes.toStringBinary(Bytes.toBytes(isMob)),
+    String policy = "weekly";
+    // We unify the format of all values saved in the descriptor.
+    // Each value is stored as bytes of string.
+    String isMobString = PrettyPrinter.format(String.valueOf(isMob),
             HColumnDescriptor.getUnit(HColumnDescriptor.IS_MOB));
-    String thresholdString = PrettyPrinter.format(Bytes.toStringBinary(Bytes.toBytes(threshold)),
+    String thresholdString = PrettyPrinter.format(String.valueOf(threshold),
             HColumnDescriptor.getUnit(HColumnDescriptor.MOB_THRESHOLD));
+    String policyString = PrettyPrinter.format(Bytes.toStringBinary(Bytes.toBytes(policy)),
+        HColumnDescriptor.getUnit(HColumnDescriptor.MOB_COMPACT_PARTITION_POLICY));
     assertEquals(String.valueOf(isMob), isMobString);
     assertEquals(String.valueOf(threshold), thresholdString);
+    assertEquals(String.valueOf(policy), policyString);
   }
 
   @Test

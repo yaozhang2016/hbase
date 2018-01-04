@@ -22,8 +22,8 @@ import java.util.Arrays;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.util.FastLongHistogram;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.apache.hadoop.hbase.metrics.impl.FastLongHistogram;
 
 
 /**

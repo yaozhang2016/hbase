@@ -32,8 +32,6 @@ import org.apache.commons.cli.Option;
 import org.apache.commons.cli.OptionBuilder;
 import org.apache.commons.cli.Options;
 import org.apache.commons.cli.ParseException;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FSDataOutputStream;
@@ -42,7 +40,7 @@ import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.RawLocalFileSystem;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.KeyValue;
-import org.apache.hadoop.hbase.CellComparator;
+import org.apache.hadoop.hbase.CellComparatorImpl;
 import org.apache.hadoop.hbase.KeyValueUtil;
 import org.apache.hadoop.hbase.io.hfile.HFile.Reader;
 import org.apache.hadoop.hbase.io.hfile.HFile.Writer;
@@ -50,6 +48,8 @@ import org.apache.hadoop.hbase.testclassification.IOTests;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
 import org.apache.hadoop.io.BytesWritable;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * test the performance for seek.
@@ -73,7 +73,7 @@ public class TestHFileSeek extends TestCase {
   private RandomDistribution.DiscreteRNG keyLenGen;
   private KVGenerator kvGen;
 
-  private static final Log LOG = LogFactory.getLog(TestHFileSeek.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestHFileSeek.class);
 
   @Override
   public void setUp() throws IOException {
@@ -137,7 +137,7 @@ public class TestHFileSeek extends TestCase {
       Writer writer = HFile.getWriterFactoryNoCache(conf)
           .withOutputStream(fout)
           .withFileContext(context)
-          .withComparator(CellComparator.COMPARATOR)
+          .withComparator(CellComparatorImpl.COMPARATOR)
           .create();
       try {
         BytesWritable key = new BytesWritable();
@@ -186,8 +186,8 @@ public class TestHFileSeek extends TestCase {
     Reader reader = HFile.createReaderFromStream(path, fsdis,
         fs.getFileStatus(path).getLen(), new CacheConfig(conf), conf);
     reader.loadFileInfo();
-    KeySampler kSampler = new KeySampler(rng, ((KeyValue) reader.getFirstKey()).getKey(),
-        ((KeyValue) reader.getLastKey()).getKey(), keyLenGen);
+    KeySampler kSampler = new KeySampler(rng, ((KeyValue) reader.getFirstKey().get()).getKey(),
+        ((KeyValue) reader.getLastKey().get()).getKey(), keyLenGen);
     HFileScanner scanner = reader.getScanner(false, USE_PREAD);
     BytesWritable key = new BytesWritable();
     timer.reset();

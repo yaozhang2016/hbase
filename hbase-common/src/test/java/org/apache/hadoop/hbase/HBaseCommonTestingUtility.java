@@ -20,25 +20,45 @@ package org.apache.hadoop.hbase;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.Arrays;
+import java.util.List;
 import java.util.UUID;
 
 import org.apache.commons.io.FileUtils;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.hadoop.hbase.Waiter.Predicate;
+import org.apache.hadoop.hbase.io.compress.Compression;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Common helpers for testing HBase that do not depend on specific server/etc. things.
- * @see {@link HBaseTestingUtility}
- *
+ * {@see org.apache.hadoop.hbase.HBaseTestingUtility}
  */
 @InterfaceAudience.Public
-@InterfaceStability.Unstable
 public class HBaseCommonTestingUtility {
-  protected static final Log LOG = LogFactory.getLog(HBaseCommonTestingUtility.class);
+  protected static final Logger LOG = LoggerFactory.getLogger(HBaseCommonTestingUtility.class);
+
+  /** Compression algorithms to use in parameterized JUnit 4 tests */
+  public static final List<Object[]> COMPRESSION_ALGORITHMS_PARAMETERIZED =
+    Arrays.asList(new Object[][] {
+      { Compression.Algorithm.NONE },
+      { Compression.Algorithm.GZ }
+    });
+
+  /** This is for unit tests parameterized with a two booleans. */
+  public static final List<Object[]> BOOLEAN_PARAMETERIZED =
+      Arrays.asList(new Object[][] {
+          {false},
+          {true}
+      });
+
+  /** Compression algorithms to use in testing */
+  public static final Compression.Algorithm[] COMPRESSION_ALGORITHMS = {
+      Compression.Algorithm.NONE, Compression.Algorithm.GZ
+  };
 
   protected Configuration conf;
 
@@ -202,6 +222,31 @@ public class HBaseCommonTestingUtility {
         LOG.warn("Failed to delete " + dir.getAbsolutePath(), ex);
       }
     } while (ntries < 30);
-    return ntries < 30;
+
+    return false;
+  }
+
+  /**
+   * Wrapper method for {@link Waiter#waitFor(Configuration, long, Predicate)}.
+   */
+  public <E extends Exception> long waitFor(long timeout, Predicate<E> predicate)
+      throws E {
+    return Waiter.waitFor(this.conf, timeout, predicate);
+  }
+
+  /**
+   * Wrapper method for {@link Waiter#waitFor(Configuration, long, long, Predicate)}.
+   */
+  public <E extends Exception> long waitFor(long timeout, long interval, Predicate<E> predicate)
+      throws E {
+    return Waiter.waitFor(this.conf, timeout, interval, predicate);
+  }
+
+  /**
+   * Wrapper method for {@link Waiter#waitFor(Configuration, long, long, boolean, Predicate)}.
+   */
+  public <E extends Exception> long waitFor(long timeout, long interval,
+      boolean failIfTimeout, Predicate<E> predicate) throws E {
+    return Waiter.waitFor(this.conf, timeout, interval, failIfTimeout, predicate);
   }
 }

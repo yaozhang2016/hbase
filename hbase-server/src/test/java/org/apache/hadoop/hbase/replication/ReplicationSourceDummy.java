@@ -21,15 +21,19 @@ package org.apache.hadoop.hbase.replication;
 import java.io.IOException;
 import java.util.List;
 import java.util.UUID;
-
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.hbase.Stoppable;
+import org.apache.hadoop.hbase.Server;
+import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.replication.regionserver.MetricsSource;
 import org.apache.hadoop.hbase.replication.regionserver.ReplicationSourceInterface;
 import org.apache.hadoop.hbase.replication.regionserver.ReplicationSourceManager;
+import org.apache.hadoop.hbase.replication.regionserver.WALFileLengthProvider;
+import org.apache.hadoop.hbase.util.Pair;
+import org.apache.hadoop.hbase.wal.WAL.Entry;
 
 /**
  * Source that does nothing at all, helpful to test ReplicationSourceManager
@@ -39,20 +43,24 @@ public class ReplicationSourceDummy implements ReplicationSourceInterface {
   ReplicationSourceManager manager;
   String peerClusterId;
   Path currentPath;
-
+  MetricsSource metrics;
+  WALFileLengthProvider walFileLengthProvider;
+  AtomicBoolean startup = new AtomicBoolean(false);
   @Override
   public void init(Configuration conf, FileSystem fs, ReplicationSourceManager manager,
-      ReplicationQueues rq, ReplicationPeers rp, Stoppable stopper, String peerClusterId,
-      UUID clusterId, ReplicationEndpoint replicationEndpoint, MetricsSource metrics)
-          throws IOException {
-
+      ReplicationQueues rq, ReplicationPeers rp, Server server, String peerClusterId,
+      UUID clusterId, ReplicationEndpoint replicationEndpoint,
+      WALFileLengthProvider walFileLengthProvider, MetricsSource metrics) throws IOException {
     this.manager = manager;
     this.peerClusterId = peerClusterId;
+    this.metrics = metrics;
+    this.walFileLengthProvider = walFileLengthProvider;
   }
 
   @Override
   public void enqueueLog(Path log) {
     this.currentPath = log;
+    metrics.incrSizeOfLogQueue();
   }
 
   @Override
@@ -62,7 +70,11 @@ public class ReplicationSourceDummy implements ReplicationSourceInterface {
 
   @Override
   public void startup() {
+    startup.set(true);
+  }
 
+  public boolean isStartup() {
+    return startup.get();
   }
 
   @Override
@@ -81,7 +93,7 @@ public class ReplicationSourceDummy implements ReplicationSourceInterface {
   }
 
   @Override
-  public String getPeerClusterId() {
+  public String getPeerId() {
     String[] parts = peerClusterId.split("-", 2);
     return parts.length != 1 ?
         parts[0] : peerClusterId;
@@ -93,8 +105,51 @@ public class ReplicationSourceDummy implements ReplicationSourceInterface {
   }
 
   @Override
-  public void addHFileRefs(TableName tableName, byte[] family, List<String> files)
+  public void addHFileRefs(TableName tableName, byte[] family, List<Pair<Path, Path>> files)
       throws ReplicationException {
     return;
+  }
+
+  @Override
+  public boolean isPeerEnabled() {
+    return true;
+  }
+
+  @Override
+  public boolean isSourceActive() {
+    return true;
+  }
+
+  @Override
+  public MetricsSource getSourceMetrics() {
+    return metrics;
+  }
+
+  @Override
+  public ReplicationEndpoint getReplicationEndpoint() {
+    return null;
+  }
+
+  @Override
+  public ReplicationSourceManager getSourceManager() {
+    return manager;
+  }
+
+  @Override
+  public void tryThrottle(int batchSize) throws InterruptedException {
+  }
+
+  @Override
+  public void postShipEdits(List<Entry> entries, int batchSize) {
+  }
+
+  @Override
+  public WALFileLengthProvider getWALFileLengthProvider() {
+    return walFileLengthProvider;
+  }
+
+  @Override
+  public ServerName getServerWALsBelongTo() {
+    return null;
   }
 }

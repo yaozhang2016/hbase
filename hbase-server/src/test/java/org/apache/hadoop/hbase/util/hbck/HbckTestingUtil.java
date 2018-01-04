@@ -25,7 +25,7 @@ import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 
-import com.google.common.collect.Lists;
+import org.apache.hbase.thirdparty.com.google.common.collect.Lists;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.util.HBaseFsck;
@@ -40,12 +40,12 @@ public class HbckTestingUtil {
 
   public static HBaseFsck doFsck(
       Configuration conf, boolean fix, TableName table) throws Exception {
-    return doFsck(conf, fix, fix, fix, fix, fix, fix, fix, fix, fix, fix, fix, table);
+    return doFsck(conf, fix, fix, fix, fix, fix, fix, fix, fix, fix, fix, fix, fix, table);
   }
 
   public static HBaseFsck doFsck(Configuration conf, boolean fixAssignments, boolean fixMeta,
       boolean fixHdfsHoles, boolean fixHdfsOverlaps, boolean fixHdfsOrphans,
-      boolean fixTableOrphans, boolean fixVersionFile, boolean fixReferenceFiles,
+      boolean fixTableOrphans, boolean fixVersionFile, boolean fixReferenceFiles, boolean fixHFileLinks,
       boolean fixEmptyMetaRegionInfo, boolean fixTableLocks, Boolean fixReplication,
       TableName table) throws Exception {
     HBaseFsck fsck = new HBaseFsck(conf, exec);
@@ -60,8 +60,8 @@ public class HbckTestingUtil {
       fsck.setFixTableOrphans(fixTableOrphans);
       fsck.setFixVersionFile(fixVersionFile);
       fsck.setFixReferenceFiles(fixReferenceFiles);
+      fsck.setFixHFileLinks(fixHFileLinks);
       fsck.setFixEmptyMetaCells(fixEmptyMetaRegionInfo);
-      fsck.setFixTableLocks(fixTableLocks);
       fsck.setFixReplication(fixReplication);
       if (table != null) {
         fsck.includeTable(table);

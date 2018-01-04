@@ -1,4 +1,4 @@
-/**
+/*
  * Licensed to the Apache Software Foundation (ASF) under one
  * or more contributor license agreements.  See the NOTICE file
  * distributed with this work for additional information
@@ -18,6 +18,11 @@
 
 package org.apache.hadoop.hbase.quotas;
 
+import static org.apache.hadoop.hbase.util.CollectionUtils.computeIfAbsent;
+
+import org.apache.hadoop.hbase.regionserver.HRegionServer;
+import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
+
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
@@ -25,20 +30,18 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.ScheduledChore;
 import org.apache.hadoop.hbase.Stoppable;
 import org.apache.hadoop.hbase.TableName;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceStability;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.hbase.client.Get;
 import org.apache.hadoop.hbase.regionserver.RegionServerServices;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.hadoop.security.UserGroupInformation;
-
-import com.google.common.annotations.VisibleForTesting;
 
 /**
  * Cache that keeps track of the quota settings for the users and tables that
@@ -54,7 +57,7 @@ import com.google.common.annotations.VisibleForTesting;
 @InterfaceAudience.Private
 @InterfaceStability.Evolving
 public class QuotaCache implements Stoppable {
-  private static final Log LOG = LogFactory.getLog(QuotaCache.class);
+  private static final Logger LOG = LoggerFactory.getLogger(QuotaCache.class);
 
   public static final String REFRESH_CONF_KEY = "hbase.quota.refresh.period";
   private static final int REFRESH_DEFAULT_PERIOD = 5 * 60000; // 5min
@@ -63,12 +66,9 @@ public class QuotaCache implements Stoppable {
   // for testing purpose only, enforce the cache to be always refreshed
   static boolean TEST_FORCE_REFRESH = false;
 
-  private final ConcurrentHashMap<String, QuotaState> namespaceQuotaCache =
-      new ConcurrentHashMap<String, QuotaState>();
-  private final ConcurrentHashMap<TableName, QuotaState> tableQuotaCache =
-      new ConcurrentHashMap<TableName, QuotaState>();
-  private final ConcurrentHashMap<String, UserQuotaState> userQuotaCache =
-      new ConcurrentHashMap<String, UserQuotaState>();
+  private final ConcurrentHashMap<String, QuotaState> namespaceQuotaCache = new ConcurrentHashMap<>();
+  private final ConcurrentHashMap<TableName, QuotaState> tableQuotaCache = new ConcurrentHashMap<>();
+  private final ConcurrentHashMap<String, UserQuotaState> userQuotaCache = new ConcurrentHashMap<>();
   private final RegionServerServices rsServices;
 
   private QuotaRefresherChore refreshChore;
@@ -114,20 +114,12 @@ public class QuotaCache implements Stoppable {
 
   /**
    * Returns the QuotaState associated to the specified user.
-   *
    * @param ugi the user
    * @return the quota info associated to specified user
    */
   public UserQuotaState getUserQuotaState(final UserGroupInformation ugi) {
-    String key = ugi.getShortUserName();
-    UserQuotaState quotaInfo = userQuotaCache.get(key);
-    if (quotaInfo == null) {
-      quotaInfo = new UserQuotaState();
-      if (userQuotaCache.putIfAbsent(key, quotaInfo) == null) {
-        triggerCacheRefresh();
-      }
-    }
-    return quotaInfo;
+    return computeIfAbsent(userQuotaCache, ugi.getShortUserName(), UserQuotaState::new,
+      this::triggerCacheRefresh);
   }
 
   /**
@@ -151,24 +143,12 @@ public class QuotaCache implements Stoppable {
   }
 
   /**
-   * Returns the QuotaState requested.
-   * If the quota info is not in cache an empty one will be returned
-   * and the quota request will be enqueued for the next cache refresh.
+   * Returns the QuotaState requested. If the quota info is not in cache an empty one will be
+   * returned and the quota request will be enqueued for the next cache refresh.
    */
   private <K> QuotaState getQuotaState(final ConcurrentHashMap<K, QuotaState> quotasMap,
       final K key) {
-    QuotaState quotaInfo = quotasMap.get(key);
-    if (quotaInfo == null) {
-      quotaInfo = new QuotaState();
-      if (quotasMap.putIfAbsent(key, quotaInfo) == null) {
-        triggerCacheRefresh();
-      }
-    }
-    return quotaInfo;
-  }
-
-  private Configuration getConfiguration() {
-    return rsServices.getConfiguration();
+    return computeIfAbsent(quotasMap, key, QuotaState::new, this::triggerCacheRefresh);
   }
 
   @VisibleForTesting
@@ -209,13 +189,13 @@ public class QuotaCache implements Stoppable {
       justification="I do not understand why the complaints, it looks good to me -- FIX")
     protected void chore() {
       // Prefetch online tables/namespaces
-      for (TableName table: QuotaCache.this.rsServices.getOnlineTables()) {
+      for (TableName table: ((HRegionServer)QuotaCache.this.rsServices).getOnlineTables()) {
         if (table.isSystemTable()) continue;
-        if (!QuotaCache.this.tableQuotaCache.contains(table)) {
+        if (!QuotaCache.this.tableQuotaCache.containsKey(table)) {
           QuotaCache.this.tableQuotaCache.putIfAbsent(table, new QuotaState());
         }
         String ns = table.getNamespaceAsString();
-        if (!QuotaCache.this.namespaceQuotaCache.contains(ns)) {
+        if (!QuotaCache.this.namespaceQuotaCache.containsKey(ns)) {
           QuotaCache.this.namespaceQuotaCache.putIfAbsent(ns, new QuotaState());
         }
       }
@@ -280,8 +260,8 @@ public class QuotaCache implements Stoppable {
       long evictPeriod = refreshPeriod * EVICT_PERIOD_FACTOR;
 
       // Find the quota entries to update
-      List<Get> gets = new ArrayList<Get>();
-      List<K> toRemove = new ArrayList<K>();
+      List<Get> gets = new ArrayList<>();
+      List<K> toRemove = new ArrayList<>();
       for (Map.Entry<K, V> entry: quotasMap.entrySet()) {
         long lastUpdate = entry.getValue().getLastUpdate();
         long lastQuery = entry.getValue().getLastQuery();

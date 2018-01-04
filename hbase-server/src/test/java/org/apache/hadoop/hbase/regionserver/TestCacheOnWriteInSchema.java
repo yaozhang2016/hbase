@@ -27,8 +27,6 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Random;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
@@ -63,6 +61,8 @@ import org.junit.rules.TestName;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 import org.junit.runners.Parameterized.Parameters;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Tests {@link HFile} cache-on-write functionality for data blocks, non-root
@@ -72,7 +72,7 @@ import org.junit.runners.Parameterized.Parameters;
 @Category({RegionServerTests.class, MediumTests.class})
 public class TestCacheOnWriteInSchema {
 
-  private static final Log LOG = LogFactory.getLog(TestCacheOnWriteInSchema.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestCacheOnWriteInSchema.class);
   @Rule public TestName name = new TestName();
 
   private static final HBaseTestingUtility TEST_UTIL = HBaseTestingUtility.createLocalHTU();
@@ -137,7 +137,7 @@ public class TestCacheOnWriteInSchema {
 
   @Parameters
   public static Collection<Object[]> getParameters() {
-    List<Object[]> cowTypes = new ArrayList<Object[]>();
+    List<Object[]> cowTypes = new ArrayList<>();
     for (CacheOnWriteType cowType : CacheOnWriteType.values()) {
       cowTypes.add(new Object[] { cowType });
     }
@@ -208,7 +208,7 @@ public class TestCacheOnWriteInSchema {
   public void testCacheOnWriteInSchema() throws IOException {
     // Write some random data into the store
     StoreFileWriter writer = store.createWriterInTmp(Integer.MAX_VALUE,
-        HFile.DEFAULT_COMPRESSION_ALGORITHM, false, true, false);
+        HFile.DEFAULT_COMPRESSION_ALGORITHM, false, true, false, false);
     writeStoreFile(writer);
     writer.close();
     // Verify the block types of interest were cached on write
@@ -218,9 +218,9 @@ public class TestCacheOnWriteInSchema {
   private void readStoreFile(Path path) throws IOException {
     CacheConfig cacheConf = store.getCacheConfig();
     BlockCache cache = cacheConf.getBlockCache();
-    StoreFile sf = new StoreFile(fs, path, conf, cacheConf,
-      BloomType.ROWCOL);
-    HFile.Reader reader = sf.createReader().getHFileReader();
+    HStoreFile sf = new HStoreFile(fs, path, conf, cacheConf, BloomType.ROWCOL, true);
+    sf.initReader();
+    HFile.Reader reader = sf.getReader().getHFileReader();
     try {
       // Open a scanner with (on read) caching disabled
       HFileScanner scanner = reader.getScanner(false, false);

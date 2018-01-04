@@ -18,6 +18,10 @@
  */
 package org.apache.hadoop.hbase.client;
 
+import static org.apache.hadoop.hbase.client.ConnectionUtils.createCloseRowBefore;
+import static org.apache.hadoop.hbase.client.ConnectionUtils.incRPCRetriesMetrics;
+import static org.apache.hadoop.hbase.client.ConnectionUtils.isEmptyStartRow;
+
 import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.util.ArrayList;
@@ -28,7 +32,7 @@ import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HRegionLocation;
 import org.apache.hadoop.hbase.RegionLocations;
 import org.apache.hadoop.hbase.TableName;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.hbase.client.metrics.ScanMetrics;
 import org.apache.hadoop.hbase.ipc.RpcControllerFactory;
 import org.apache.hadoop.hbase.util.Bytes;
@@ -39,26 +43,18 @@ import org.apache.hadoop.hbase.util.Bytes;
  */
 @InterfaceAudience.Private
 public class ReversedScannerCallable extends ScannerCallable {
-  /**
-   * The start row for locating regions. In reversed scanner, may locate the
-   * regions for a range of keys when doing
-   * {@link ReversedClientScanner#nextScanner(int, boolean)}
-   */
-  protected final byte[] locateStartRow;
 
   /**
    * @param connection
    * @param tableName
    * @param scan
    * @param scanMetrics
-   * @param locateStartRow The start row for locating regions
-   * @param rpcFactory to create an {@link com.google.protobuf.RpcController} 
-   * to talk to the regionserver
+   * @param rpcFactory to create an {@link com.google.protobuf.RpcController} to talk to the
+   *          regionserver
    */
   public ReversedScannerCallable(ClusterConnection connection, TableName tableName, Scan scan,
-      ScanMetrics scanMetrics, byte[] locateStartRow, RpcControllerFactory rpcFactory) {
+      ScanMetrics scanMetrics, RpcControllerFactory rpcFactory) {
     super(connection, tableName, scan, scanMetrics, rpcFactory);
-    this.locateStartRow = locateStartRow;
   }
 
   /**
@@ -66,28 +62,13 @@ public class ReversedScannerCallable extends ScannerCallable {
    * @param tableName
    * @param scan
    * @param scanMetrics
-   * @param locateStartRow The start row for locating regions
-   * @param rpcFactory to create an {@link com.google.protobuf.RpcController} 
-   *        to talk to the regionserver
+   * @param rpcFactory to create an {@link com.google.protobuf.RpcController} to talk to the
+   *          regionserver
    * @param replicaId the replica id
    */
   public ReversedScannerCallable(ClusterConnection connection, TableName tableName, Scan scan,
-      ScanMetrics scanMetrics, byte[] locateStartRow, RpcControllerFactory rpcFactory,
-      int replicaId) {
+      ScanMetrics scanMetrics, RpcControllerFactory rpcFactory, int replicaId) {
     super(connection, tableName, scan, scanMetrics, rpcFactory, replicaId);
-    this.locateStartRow = locateStartRow;
-  }
-
-  /**
-   * @deprecated use
-   *  {@link #ReversedScannerCallable(ClusterConnection, TableName, Scan, 
-   *     ScanMetrics, byte[], RpcControllerFactory )}
-   */
-  @Deprecated
-  public ReversedScannerCallable(ClusterConnection connection, TableName tableName,
-      Scan scan, ScanMetrics scanMetrics, byte[] locateStartRow) {
-    this(connection, tableName, scan, scanMetrics, locateStartRow, RpcControllerFactory
-        .instantiate(connection.getConfiguration()));
   }
 
   /**
@@ -100,12 +81,15 @@ public class ReversedScannerCallable extends ScannerCallable {
       throw new InterruptedIOException();
     }
     if (!instantiated || reload) {
-      if (locateStartRow == null) {
+      // we should use range locate if
+      // 1. we do not want the start row
+      // 2. the start row is empty which means we need to locate to the last region.
+      if (scan.includeStartRow() && !isEmptyStartRow(getRow())) {
         // Just locate the region with the row
-        RegionLocations rl = RpcRetryingCallerWithReadReplicas.getRegionLocations(reload, id,
+        RegionLocations rl = RpcRetryingCallerWithReadReplicas.getRegionLocations(!reload, id,
             getConnection(), getTableName(), getRow());
         this.location = id < rl.size() ? rl.getRegionLocation(id) : null;
-        if (this.location == null) {
+        if (location == null || location.getServerName() == null) {
           throw new IOException("Failed to find location, tableName="
               + getTableName() + ", row=" + Bytes.toStringBinary(getRow()) + ", reload="
               + reload);
@@ -113,6 +97,7 @@ public class ReversedScannerCallable extends ScannerCallable {
       } else {
         // Need to locate the regions with the range, and the target location is
         // the last one which is the previous region of last region scanner
+        byte[] locateStartRow = createCloseRowBefore(getRow());
         List<HRegionLocation> locatedRegions = locateRegionsInRange(
             locateStartRow, getRow(), reload);
         if (locatedRegions.isEmpty()) {
@@ -129,11 +114,8 @@ public class ReversedScannerCallable extends ScannerCallable {
     }
 
     // check how often we retry.
-    if (reload && this.scanMetrics != null) {
-      this.scanMetrics.countOfRPCRetries.incrementAndGet();
-      if (isRegionServerRemote) {
-        this.scanMetrics.countOfRemoteRPCRetries.incrementAndGet();
-      }
+    if (reload) {
+      incRPCRetriesMetrics(scanMetrics, isRegionServerRemote);
     }
   }
 
@@ -155,10 +137,10 @@ public class ReversedScannerCallable extends ScannerCallable {
           + Bytes.toStringBinary(startKey) + " > "
           + Bytes.toStringBinary(endKey));
     }
-    List<HRegionLocation> regionList = new ArrayList<HRegionLocation>();
+    List<HRegionLocation> regionList = new ArrayList<>();
     byte[] currentKey = startKey;
     do {
-      RegionLocations rl = RpcRetryingCallerWithReadReplicas.getRegionLocations(reload, id,
+      RegionLocations rl = RpcRetryingCallerWithReadReplicas.getRegionLocations(!reload, id,
           getConnection(), getTableName(), currentKey);
       HRegionLocation regionLocation = id < rl.size() ? rl.getRegionLocation(id) : null;
       if (regionLocation != null && regionLocation.getRegionInfo().containsRow(currentKey)) {
@@ -177,7 +159,7 @@ public class ReversedScannerCallable extends ScannerCallable {
   @Override
   public ScannerCallable getScannerCallableForReplica(int id) {
     ReversedScannerCallable r = new ReversedScannerCallable(getConnection(), getTableName(),
-        this.getScan(), this.scanMetrics, this.locateStartRow, rpcControllerFactory, id);
+        this.getScan(), this.scanMetrics, rpcControllerFactory, id);
     r.setCaching(this.getCaching());
     return r;
   }

@@ -35,8 +35,8 @@ import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.HBaseInterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceStability;
 import org.apache.hadoop.hbase.procedure2.Procedure;
 import org.apache.hadoop.hbase.procedure2.ProcedureUtil;
 import org.apache.hadoop.hbase.shaded.protobuf.generated.ProcedureProtos.ProcedureWALEntry;
@@ -155,7 +155,7 @@ public class ProcedureWALPrettyPrinter extends Configured implements Tool {
     options.addOption("h", "help", false, "Output help message");
     options.addOption("f", "file", true, "File to print");
 
-    final List<Path> files = new ArrayList<Path>();
+    final List<Path> files = new ArrayList<>();
     try {
       CommandLine cmd = new PosixParser().parse(options, args);
 
@@ -163,7 +163,7 @@ public class ProcedureWALPrettyPrinter extends Configured implements Tool {
         files.add(new Path(cmd.getOptionValue("f")));
       }
 
-      if (files.size() == 0 || cmd.hasOption("h")) {
+      if (files.isEmpty() || cmd.hasOption("h")) {
         HelpFormatter formatter = new HelpFormatter();
         formatter.printHelp("ProcedureWALPrettyPrinter ", options, true);
         return(-1);

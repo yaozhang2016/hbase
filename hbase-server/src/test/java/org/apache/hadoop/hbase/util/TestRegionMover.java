@@ -24,8 +24,6 @@ import static org.junit.Assert.assertEquals;
 import java.io.File;
 import java.io.FileWriter;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.MiniHBaseCluster;
@@ -41,6 +39,8 @@ import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Tests for Region Mover Load/Unload functionality with and without ack mode and also to test
@@ -49,7 +49,7 @@ import org.junit.experimental.categories.Category;
 @Category(MediumTests.class)
 public class TestRegionMover {
 
-  final Log LOG = LogFactory.getLog(getClass());
+  final Logger LOG = LoggerFactory.getLogger(getClass());
   protected final static HBaseTestingUtility TEST_UTIL = new HBaseTestingUtility();
 
   @BeforeClass
@@ -66,7 +66,7 @@ public class TestRegionMover {
   public void setUp() throws Exception {
     // Create a pre-split table just to populate some regions
     TableName tableName = TableName.valueOf("testRegionMover");
-    Admin admin = TEST_UTIL.getHBaseAdmin();
+    Admin admin = TEST_UTIL.getAdmin();
     if (admin.tableExists(tableName)) {
       TEST_UTIL.deleteTable(tableName);
     }
@@ -107,7 +107,6 @@ public class TestRegionMover {
 
   /** Test to unload a regionserver first and then load it using no Ack mode
    * we check if some regions are loaded on the region server(since no ack is best effort)
-   * @throws Exception
    */
   @Test
   public void testLoadWithoutAck() throws Exception {
@@ -172,9 +171,30 @@ public class TestRegionMover {
   }
 
   /**
+   * Test that loading the same region set doesn't cause timeout loop during meta load.
+   */
+  @Test(timeout = 30000)
+  public void testRepeatedLoad() throws Exception {
+    MiniHBaseCluster cluster = TEST_UTIL.getHBaseCluster();
+    HRegionServer regionServer = cluster.getRegionServer(0);
+    String rsName = regionServer.getServerName().getHostname();
+    int port = regionServer.getServerName().getPort();
+    String rs = rsName + ":" + Integer.toString(port);
+    RegionMoverBuilder rmBuilder = new RegionMoverBuilder(rs).ack(true);
+    RegionMover rm = rmBuilder.build();
+    rm.setConf(TEST_UTIL.getConfiguration());
+    rm.unload();
+    assertEquals(0, regionServer.getNumberOfOnlineRegions());
+    rmBuilder = new RegionMoverBuilder(rs).ack(true);
+    rm = rmBuilder.build();
+    rm.setConf(TEST_UTIL.getConfiguration());
+    rm.load();
+    rm.load(); //Repeat the same load. It should be very fast because all regions are already moved.
+  }
+
+  /**
    * To test that we successfully exclude a server from the unloading process We test for the number
    * of regions on Excluded server and also test that regions are unloaded successfully
-   * @throws Exception
    */
   @Test
   public void testExclude() throws Exception {

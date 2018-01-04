@@ -21,12 +21,8 @@ package org.apache.hadoop.hbase;
 import java.io.IOException;
 import java.util.Locale;
 import java.util.Set;
-
 import org.apache.commons.cli.CommandLine;
-import org.apache.commons.lang.StringUtils;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.regionserver.DisabledRegionSplitPolicy;
 import org.apache.hadoop.hbase.regionserver.HStore;
@@ -35,13 +31,16 @@ import org.apache.hadoop.hbase.regionserver.StripeStoreConfig;
 import org.apache.hadoop.hbase.regionserver.StripeStoreEngine;
 import org.apache.hadoop.hbase.util.AbstractHBaseTool;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.hadoop.hbase.util.LoadTestKVGenerator;
 import org.apache.hadoop.hbase.util.MultiThreadedAction;
 import org.apache.hadoop.hbase.util.MultiThreadedReader;
 import org.apache.hadoop.hbase.util.MultiThreadedWriter;
 import org.apache.hadoop.hbase.util.RegionSplitter;
 import org.apache.hadoop.hbase.util.test.LoadTestDataGenerator;
-import org.apache.hadoop.hbase.util.test.LoadTestKVGenerator;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.junit.Assert;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 
 /**
@@ -49,7 +48,9 @@ import org.junit.Assert;
  */
 @InterfaceAudience.Private
 public class StripeCompactionsPerformanceEvaluation extends AbstractHBaseTool {
-  private static final Log LOG = LogFactory.getLog(StripeCompactionsPerformanceEvaluation.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(StripeCompactionsPerformanceEvaluation.class);
+
   private static final TableName TABLE_NAME =
     TableName.valueOf(StripeCompactionsPerformanceEvaluation.class.getSimpleName());
   private static final byte[] COLUMN_FAMILY = Bytes.toBytes("CF");
@@ -172,12 +173,12 @@ public class StripeCompactionsPerformanceEvaluation extends AbstractHBaseTool {
   }
 
   protected void deleteTable() throws Exception {
-    if (util.getHBaseAdmin().tableExists(TABLE_NAME)) {
+    if (util.getAdmin().tableExists(TABLE_NAME)) {
       LOG.info("Deleting table");
-      if (!util.getHBaseAdmin().isTableDisabled(TABLE_NAME)) {
-        util.getHBaseAdmin().disableTable(TABLE_NAME);
+      if (!util.getAdmin().isTableDisabled(TABLE_NAME)) {
+        util.getAdmin().disableTable(TABLE_NAME);
       }
-      util.getHBaseAdmin().deleteTable(TABLE_NAME);
+      util.getAdmin().deleteTable(TABLE_NAME);
       LOG.info("Deleted table");
     }
   }
@@ -194,9 +195,10 @@ public class StripeCompactionsPerformanceEvaluation extends AbstractHBaseTool {
   }
 
   private void runOneTest(String description, Configuration conf) throws Exception {
-    int numServers = util.getHBaseClusterInterface().getClusterStatus().getServersSize();
-    long startKey = (long)preloadKeys * numServers;
-    long endKey = startKey + (long)writeKeys * numServers;
+    int numServers = util.getHBaseClusterInterface()
+      .getClusterMetrics().getLiveServerMetrics().size();
+    long startKey = preloadKeys * numServers;
+    long endKey = startKey + writeKeys * numServers;
     status(String.format("%s test starting on %d servers; preloading 0 to %d and writing to %d",
         description, numServers, startKey, endKey));
 
@@ -296,8 +298,8 @@ public class StripeCompactionsPerformanceEvaluation extends AbstractHBaseTool {
       htd.setConfiguration(HConstants.HREGION_MEMSTORE_FLUSH_SIZE, "1048576");
     }
     byte[][] splits = new RegionSplitter.HexStringSplit().split(
-        util.getHBaseClusterInterface().getClusterStatus().getServersSize());
-    util.getHBaseAdmin().createTable(htd, splits);
+        util.getHBaseClusterInterface().getClusterMetrics().getLiveServerMetrics().size());
+    util.getAdmin().createTable(htd, splits);
   }
 
   public static class SeqShardedDataGenerator extends LoadTestDataGenerator {
@@ -346,5 +348,5 @@ public class StripeCompactionsPerformanceEvaluation extends AbstractHBaseTool {
     public boolean verify(byte[] rowKey, byte[] cf, Set<byte[]> columnSet) {
       return true;
     }
-  };
+  }
 }

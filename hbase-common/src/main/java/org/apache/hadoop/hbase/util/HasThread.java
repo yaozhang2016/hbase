@@ -19,7 +19,7 @@ package org.apache.hadoop.hbase.util;
 
 import java.lang.Thread.UncaughtExceptionHandler;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * Abstract class which contains a Thread and delegates the common Thread
@@ -44,7 +44,8 @@ public abstract class HasThread implements Runnable {
   public Thread getThread() {
     return thread;
   }
-  
+
+  @Override
   public abstract void run();
   
   //// Begin delegation to Thread

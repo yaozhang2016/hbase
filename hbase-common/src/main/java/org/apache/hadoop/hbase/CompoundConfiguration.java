@@ -28,10 +28,10 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
-import org.apache.commons.collections.iterators.UnmodifiableIterator;
+import org.apache.commons.collections4.iterators.UnmodifiableIterator;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * Do a shallow merge of multiple KV configuration pools. This is a very useful
@@ -72,8 +72,7 @@ public class CompoundConfiguration extends Configuration {
     int size();
   }
 
-  private final List<ImmutableConfigMap> configs
-    = new ArrayList<ImmutableConfigMap>();
+  private final List<ImmutableConfigMap> configs = new ArrayList<>();
 
   static class ImmutableConfWrapper implements  ImmutableConfigMap {
    private final Configuration c;
@@ -167,7 +166,7 @@ public class CompoundConfiguration extends Configuration {
 
       @Override
       public Iterator<Map.Entry<String,String>> iterator() {
-        Map<String, String> ret = new HashMap<String, String>();
+        Map<String, String> ret = new HashMap<>();
         for (Map.Entry<Bytes, Bytes> entry : map.entrySet()) {
           String key = Bytes.toString(entry.getKey().get());
           String val = entry.getValue() == null ? null : Bytes.toString(entry.getValue().get());
@@ -262,10 +261,10 @@ public class CompoundConfiguration extends Configuration {
 
   @Override
   public String toString() {
-    StringBuffer sb = new StringBuffer();
+    StringBuilder sb = new StringBuilder();
     sb.append("CompoundConfiguration: " + this.configs.size() + " configs");
     for (ImmutableConfigMap m : this.configs) {
-      sb.append(this.configs);
+      sb.append(m);
     }
     return sb.toString();
   }
@@ -366,7 +365,7 @@ public class CompoundConfiguration extends Configuration {
 
   @Override
   public Iterator<Map.Entry<String, String>> iterator() {
-    Map<String, String> ret = new HashMap<String, String>();
+    Map<String, String> ret = new HashMap<>();
 
     // add in reverse order so that oldest get overridden.
     if (!configs.isEmpty()) {
@@ -389,7 +388,7 @@ public class CompoundConfiguration extends Configuration {
       }
     }
 
-    return UnmodifiableIterator.decorate(ret.entrySet().iterator());
+    return UnmodifiableIterator.unmodifiableIterator(ret.entrySet().iterator());
   }
 
   @Override
@@ -420,4 +419,4 @@ public class CompoundConfiguration extends Configuration {
   public void writeXml(OutputStream out) throws IOException {
     throw new UnsupportedOperationException("Immutable Configuration");
   }
-};
+}

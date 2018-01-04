@@ -19,26 +19,18 @@
 package org.apache.hadoop.hbase.master.procedure;
 
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.CategoryBasedTimeout;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
-import org.apache.hadoop.hbase.HRegionInfo;
-import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.client.RegionInfo;
+import org.apache.hadoop.hbase.client.TableDescriptor;
+import org.apache.hadoop.hbase.procedure2.Procedure;
 import org.apache.hadoop.hbase.procedure2.ProcedureExecutor;
 import org.apache.hadoop.hbase.procedure2.ProcedureTestingUtility;
 import org.apache.hadoop.hbase.procedure2.store.wal.WALProcedureStore;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProcedureProtos.CreateTableState;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProcedureProtos.DeleteTableState;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProcedureProtos.DisableTableState;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProcedureProtos.EnableTableState;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProcedureProtos.TruncateTableState;
 import org.apache.hadoop.hbase.testclassification.LargeTests;
 import org.apache.hadoop.hbase.testclassification.MasterTests;
 import org.apache.hadoop.hbase.util.Bytes;
@@ -50,10 +42,18 @@ import org.junit.ClassRule;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 import org.junit.rules.TestRule;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProcedureProtos.CreateTableState;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProcedureProtos.DeleteTableState;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProcedureProtos.DisableTableState;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProcedureProtos.EnableTableState;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.MasterProcedureProtos.TruncateTableState;
 
 @Category({MasterTests.class, LargeTests.class})
 public class TestMasterFailoverWithProcedures {
-  private static final Log LOG = LogFactory.getLog(TestMasterFailoverWithProcedures.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestMasterFailoverWithProcedures.class);
+
 
   @ClassRule
   public static final TestRule timeout =
@@ -112,11 +112,11 @@ public class TestMasterFailoverWithProcedures {
 
     // Start the Create procedure && kill the executor
     byte[][] splitKeys = null;
-    HTableDescriptor htd = MasterProcedureTestingUtility.createHTD(tableName, "f1", "f2");
-    HRegionInfo[] regions = ModifyRegionUtils.createHRegionInfos(htd, splitKeys);
+    TableDescriptor htd = MasterProcedureTestingUtility.createHTD(tableName, "f1", "f2");
+    RegionInfo[] regions = ModifyRegionUtils.createRegionInfos(htd, splitKeys);
     long procId = procExec.submitProcedure(
         new CreateTableProcedure(procExec.getEnvironment(), htd, regions));
-    testRecoveryAndDoubleExecution(UTIL, procId, step, CreateTableState.values());
+    testRecoveryAndDoubleExecution(UTIL, procId, step);
 
     MasterProcedureTestingUtility.validateTableCreation(
         UTIL.getHBaseCluster().getMaster(), tableName, regions, "f1", "f2");
@@ -140,12 +140,12 @@ public class TestMasterFailoverWithProcedures {
 
     // create the table
     byte[][] splitKeys = null;
-    HRegionInfo[] regions = MasterProcedureTestingUtility.createTable(
+    RegionInfo[] regions = MasterProcedureTestingUtility.createTable(
         getMasterProcedureExecutor(), tableName, splitKeys, "f1", "f2");
     Path tableDir = FSUtils.getTableDir(getRootDir(), tableName);
     MasterProcedureTestingUtility.validateTableCreation(
         UTIL.getHBaseCluster().getMaster(), tableName, regions, "f1", "f2");
-    UTIL.getHBaseAdmin().disableTable(tableName);
+    UTIL.getAdmin().disableTable(tableName);
 
     ProcedureExecutor<MasterProcedureEnv> procExec = getMasterProcedureExecutor();
     ProcedureTestingUtility.setKillBeforeStoreUpdate(procExec, true);
@@ -154,7 +154,7 @@ public class TestMasterFailoverWithProcedures {
     // Start the Delete procedure && kill the executor
     long procId = procExec.submitProcedure(
         new DeleteTableProcedure(procExec.getEnvironment(), tableName));
-    testRecoveryAndDoubleExecution(UTIL, procId, step, DeleteTableState.values());
+    testRecoveryAndDoubleExecution(UTIL, procId, step);
 
     MasterProcedureTestingUtility.validateTableDeletion(
         UTIL.getHBaseCluster().getMaster(), tableName);
@@ -182,14 +182,14 @@ public class TestMasterFailoverWithProcedures {
     final byte[][] splitKeys = new byte[][] {
         Bytes.toBytes("a"), Bytes.toBytes("b"), Bytes.toBytes("c")
     };
-    HRegionInfo[] regions = MasterProcedureTestingUtility.createTable(
+    RegionInfo[] regions = MasterProcedureTestingUtility.createTable(
         getMasterProcedureExecutor(), tableName, splitKeys, families);
     // load and verify that there are rows in the table
     MasterProcedureTestingUtility.loadData(
         UTIL.getConnection(), tableName, 100, splitKeys, families);
     assertEquals(100, UTIL.countRows(tableName));
     // disable the table
-    UTIL.getHBaseAdmin().disableTable(tableName);
+    UTIL.getAdmin().disableTable(tableName);
 
     ProcedureExecutor<MasterProcedureEnv> procExec = getMasterProcedureExecutor();
     ProcedureTestingUtility.setKillAndToggleBeforeStoreUpdate(procExec, true);
@@ -197,13 +197,13 @@ public class TestMasterFailoverWithProcedures {
     // Start the Truncate procedure && kill the executor
     long procId = procExec.submitProcedure(
         new TruncateTableProcedure(procExec.getEnvironment(), tableName, preserveSplits));
-    testRecoveryAndDoubleExecution(UTIL, procId, step, TruncateTableState.values());
+    testRecoveryAndDoubleExecution(UTIL, procId, step);
 
     ProcedureTestingUtility.setKillAndToggleBeforeStoreUpdate(procExec, false);
     UTIL.waitUntilAllRegionsAssigned(tableName);
 
     // validate the table regions and layout
-    regions = UTIL.getHBaseAdmin().getTableRegions(tableName).toArray(new HRegionInfo[0]);
+    regions = UTIL.getAdmin().getTableRegions(tableName).toArray(new RegionInfo[0]);
     if (preserveSplits) {
       assertEquals(1 + splitKeys.length, regions.length);
     } else {
@@ -251,7 +251,7 @@ public class TestMasterFailoverWithProcedures {
     // Start the Delete procedure && kill the executor
     long procId = procExec.submitProcedure(
         new DisableTableProcedure(procExec.getEnvironment(), tableName, false));
-    testRecoveryAndDoubleExecution(UTIL, procId, step, DisableTableState.values());
+    testRecoveryAndDoubleExecution(UTIL, procId, step);
 
     MasterProcedureTestingUtility.validateTableIsDisabled(
         UTIL.getHBaseCluster().getMaster(), tableName);
@@ -280,7 +280,7 @@ public class TestMasterFailoverWithProcedures {
     };
     MasterProcedureTestingUtility.createTable(
         getMasterProcedureExecutor(), tableName, splitKeys, "f1", "f2");
-    UTIL.getHBaseAdmin().disableTable(tableName);
+    UTIL.getAdmin().disableTable(tableName);
 
     ProcedureExecutor<MasterProcedureEnv> procExec = getMasterProcedureExecutor();
     ProcedureTestingUtility.setKillAndToggleBeforeStoreUpdate(procExec, true);
@@ -288,7 +288,7 @@ public class TestMasterFailoverWithProcedures {
     // Start the Delete procedure && kill the executor
     long procId = procExec.submitProcedure(
         new EnableTableProcedure(procExec.getEnvironment(), tableName, false));
-    testRecoveryAndDoubleExecution(UTIL, procId, step, EnableTableState.values());
+    testRecoveryAndDoubleExecution(UTIL, procId, step);
 
     MasterProcedureTestingUtility.validateTableIsEnabled(
         UTIL.getHBaseCluster().getMaster(), tableName);
@@ -297,16 +297,17 @@ public class TestMasterFailoverWithProcedures {
   // ==========================================================================
   //  Test Helpers
   // ==========================================================================
-  public static <TState> void testRecoveryAndDoubleExecution(final HBaseTestingUtility testUtil,
-      final long procId, final int lastStepBeforeFailover, TState[] states) throws Exception {
+  public static void testRecoveryAndDoubleExecution(final HBaseTestingUtility testUtil,
+      final long procId, final int lastStepBeforeFailover) throws Exception {
     ProcedureExecutor<MasterProcedureEnv> procExec =
         testUtil.getHBaseCluster().getMaster().getMasterProcedureExecutor();
     ProcedureTestingUtility.waitProcedure(procExec, procId);
 
+    final Procedure proc = procExec.getProcedure(procId);
     for (int i = 0; i < lastStepBeforeFailover; ++i) {
-      LOG.info("Restart "+ i +" exec state: " + states[i]);
+      LOG.info("Restart "+ i +" exec state: " + proc);
       ProcedureTestingUtility.assertProcNotYetCompleted(procExec, procId);
-      ProcedureTestingUtility.restart(procExec);
+      MasterProcedureTestingUtility.restartMasterProcedureExecutor(procExec);
       ProcedureTestingUtility.waitProcedure(procExec, procId);
     }
     ProcedureTestingUtility.assertProcNotYetCompleted(procExec, procId);

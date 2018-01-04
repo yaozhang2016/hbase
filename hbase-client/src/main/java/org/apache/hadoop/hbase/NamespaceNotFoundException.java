@@ -18,14 +18,12 @@
 
 package org.apache.hadoop.hbase;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * Thrown when a namespace can not be located
  */
 @InterfaceAudience.Public
-@InterfaceStability.Stable
 public class NamespaceNotFoundException extends DoNotRetryIOException {
 
   private static final long serialVersionUID = -6673607347330260324L;

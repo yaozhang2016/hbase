@@ -27,16 +27,15 @@ import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.locks.Lock;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 // imports for classes still in regionserver.wal
 import org.apache.hadoop.hbase.regionserver.wal.WALActionsListener;
 import org.apache.hadoop.hbase.util.Bytes;
-import org.apache.hadoop.hbase.util.IdReadWriteLock;
+import org.apache.hadoop.hbase.util.IdLock;
 
 /**
  * A WAL Provider that returns a WAL per group of regions.
@@ -56,7 +55,7 @@ import org.apache.hadoop.hbase.util.IdReadWriteLock;
  */
 @InterfaceAudience.Private
 public class RegionGroupingProvider implements WALProvider {
-  private static final Log LOG = LogFactory.getLog(RegionGroupingProvider.class);
+  private static final Logger LOG = LoggerFactory.getLogger(RegionGroupingProvider.class);
 
   /**
    * Map identifiers to a group number.
@@ -132,7 +131,7 @@ public class RegionGroupingProvider implements WALProvider {
   /** A group-provider mapping, make sure one-one rather than many-one mapping */
   private final ConcurrentMap<String, WALProvider> cached = new ConcurrentHashMap<>();
 
-  private final IdReadWriteLock createLock = new IdReadWriteLock();
+  private final IdLock createLock = new IdLock();
 
   private RegionGroupingStrategy strategy = null;
   private WALFactory factory = null;
@@ -170,8 +169,8 @@ public class RegionGroupingProvider implements WALProvider {
   }
 
   @Override
-  public List<WAL> getWALs() throws IOException {
-    List<WAL> wals = new ArrayList<WAL>();
+  public List<WAL> getWALs() {
+    List<WAL> wals = new ArrayList<>();
     for (WALProvider provider : cached.values()) {
       wals.addAll(provider.getWALs());
     }
@@ -181,16 +180,18 @@ public class RegionGroupingProvider implements WALProvider {
   private WAL getWAL(final String group) throws IOException {
     WALProvider provider = cached.get(group);
     if (provider == null) {
-      Lock lock = createLock.getLock(group.hashCode()).writeLock();
-      lock.lock();
+      IdLock.Entry lockEntry = null;
       try {
+        lockEntry = createLock.getLockEntry(group.hashCode());
         provider = cached.get(group);
         if (provider == null) {
           provider = createProvider(group);
           cached.put(group, provider);
         }
       } finally {
-        lock.unlock();
+        if (lockEntry != null) {
+          createLock.releaseLockEntry(lockEntry);
+        }
       }
     }
     return provider.getWAL(null, null);

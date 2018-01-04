@@ -34,7 +34,8 @@ org.apache.hadoop.hbase.protobuf.generated.AdminProtos.ServerInfo;
 org.apache.hadoop.hbase.protobuf.generated.ClusterStatusProtos.RegionLoad;
 org.apache.hadoop.hbase.util.DirectMemoryUtils;
 org.apache.hadoop.util.StringUtils.TraditionalBinaryPrefix;
-java.lang.management.ManagementFactory;
+java.lang.management.MemoryUsage;
+org.apache.hadoop.hbase.io.util.MemorySizeUtil;
 </%import>
 <div class="tabbable">
     <ul class="nav nav-pills">
@@ -94,6 +95,15 @@ java.lang.management.ManagementFactory;
 <%args>
 MetricsRegionServerWrapper mWrap;
 </%args>
+<%java
+  long usedHeap = -1L;
+  long maxHeap = -1L;
+  final MemoryUsage usage = MemorySizeUtil.safeGetHeapMemoryUsage();
+  if (usage != null) {
+    maxHeap = usage.getMax();
+    usedHeap = usage.getUsed();
+  }
+%>
 <table class="table table-striped">
 <tr>
     <tr>
@@ -102,16 +112,15 @@ MetricsRegionServerWrapper mWrap;
         <th>Direct Memory Used</th>
         <th>Direct Memory Configured</th>
         <th>Memstore Size</th>
+        <th>Memstore Limit</th>
     </tr>
 </tr>
 <tr>
     <td>
-        <% TraditionalBinaryPrefix.long2String(
-            ManagementFactory.getMemoryMXBean().getHeapMemoryUsage().getUsed(), "B", 1) %>
+        <% TraditionalBinaryPrefix.long2String(usedHeap, "B", 1) %>
     </td>
     <td>
-        <% TraditionalBinaryPrefix.long2String(
-            ManagementFactory.getMemoryMXBean().getHeapMemoryUsage().getMax(), "B", 1) %>
+        <% TraditionalBinaryPrefix.long2String(maxHeap, "B", 1) %>
     </td>
     <td>
         <% TraditionalBinaryPrefix.long2String(DirectMemoryUtils.getDirectMemoryUsage(), "B", 1) %>
@@ -119,7 +128,12 @@ MetricsRegionServerWrapper mWrap;
     <td>
         <% TraditionalBinaryPrefix.long2String(DirectMemoryUtils.getDirectMemorySize(), "B", 1) %>
     </td>
-    <td><% TraditionalBinaryPrefix.long2String(mWrap.getMemstoreSize(), "B", 1) %></td>
+    <td>
+        <% TraditionalBinaryPrefix.long2String(mWrap.getMemStoreSize(), "B", 1) %>
+    </td>
+    <td>
+        <% TraditionalBinaryPrefix.long2String(mWrap.getMemStoreLimit(), "B", 1) %>
+    </td>
 </tr>
 </table>
 </%def>
@@ -132,7 +146,7 @@ MetricsRegionServerWrapper mWrap;
 <tr>
     <tr>
         <th>Num. WAL Files</th>
-        <th>Size. WAL Files (bytes)</th>
+        <th>Size. WAL Files</th>
     </tr>
 </tr>
 <tr>
@@ -151,9 +165,9 @@ MetricsRegionServerWrapper mWrap;
 
     <th>Num. Stores</th>
     <th>Num. Storefiles</th>
-    <th>Root Index Size (bytes)</th>
-    <th>Index Size (bytes)</th>
-    <th>Bloom Size (bytes)</th>
+    <th>Root Index Size</th>
+    <th>Index Size</th>
+    <th>Bloom Size</th>
 </tr>
 <tr>
     <td><% mWrap.getNumStores() %></td>
@@ -198,7 +212,7 @@ MetricsHBaseServerWrapper mServerWrap;
     <th>Priority Call Queue Length</th>
     <th>General Call Queue Length</th>
     <th>Replication Call Queue Length</th>
-    <th>Total Call Queue Size (bytes)</th>
+    <th>Total Call Queue Size</th>
 
 </tr>
 <tr>

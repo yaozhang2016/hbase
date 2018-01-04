@@ -22,9 +22,9 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.security.User;
 
@@ -41,7 +41,7 @@ import org.apache.hadoop.hbase.security.User;
 @InterfaceAudience.Private
 public class FeedUserAuthScanLabelGenerator implements ScanLabelGenerator {
 
-  private static final Log LOG = LogFactory.getLog(FeedUserAuthScanLabelGenerator.class);
+  private static final Logger LOG = LoggerFactory.getLogger(FeedUserAuthScanLabelGenerator.class);
 
   private Configuration conf;
   private VisibilityLabelsCache labelsCache;
@@ -65,10 +65,10 @@ public class FeedUserAuthScanLabelGenerator implements ScanLabelGenerator {
     if (authorizations == null || authorizations.getLabels() == null
         || authorizations.getLabels().isEmpty()) {
       String userName = user.getShortName();
-      Set<String> auths = new HashSet<String>();
+      Set<String> auths = new HashSet<>();
       auths.addAll(this.labelsCache.getUserAuths(userName));
       auths.addAll(this.labelsCache.getGroupAuths(user.getGroupNames()));
-      return new ArrayList<String>(auths);
+      return new ArrayList<>(auths);
     }
     return authorizations.getLabels();
   }

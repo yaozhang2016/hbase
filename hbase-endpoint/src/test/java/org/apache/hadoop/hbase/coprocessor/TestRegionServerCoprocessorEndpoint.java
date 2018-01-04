@@ -21,11 +21,9 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
 import java.io.FileNotFoundException;
-import java.io.IOException;
+import java.util.Collections;
 
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.hbase.Coprocessor;
-import org.apache.hadoop.hbase.CoprocessorEnvironment;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.coprocessor.protobuf.generated.DummyRegionServerEndpointProtos;
@@ -73,11 +71,10 @@ public class TestRegionServerCoprocessorEndpoint {
     final ServerName serverName = TEST_UTIL.getHBaseCluster().getRegionServer(0).getServerName();
     final ServerRpcController controller = new ServerRpcController();
     final CoprocessorRpcUtils.BlockingRpcCallback<DummyRegionServerEndpointProtos.DummyResponse>
-        rpcCallback =
-      new CoprocessorRpcUtils.BlockingRpcCallback<DummyRegionServerEndpointProtos.DummyResponse>();
+        rpcCallback = new CoprocessorRpcUtils.BlockingRpcCallback<>();
     DummyRegionServerEndpointProtos.DummyService service =
         ProtobufUtil.newServiceStub(DummyRegionServerEndpointProtos.DummyService.class,
-          TEST_UTIL.getHBaseAdmin().coprocessorService(serverName));
+          TEST_UTIL.getAdmin().coprocessorService(serverName));
     service.dummyCall(controller,
         DummyRegionServerEndpointProtos.DummyRequest.getDefaultInstance(), rpcCallback);
     assertEquals(DUMMY_VALUE, rpcCallback.get().getValue());
@@ -91,11 +88,10 @@ public class TestRegionServerCoprocessorEndpoint {
     final ServerName serverName = TEST_UTIL.getHBaseCluster().getRegionServer(0).getServerName();
     final ServerRpcController controller = new ServerRpcController();
     final CoprocessorRpcUtils.BlockingRpcCallback<DummyRegionServerEndpointProtos.DummyResponse>
-        rpcCallback =
-      new CoprocessorRpcUtils.BlockingRpcCallback<DummyRegionServerEndpointProtos.DummyResponse>();
+        rpcCallback = new CoprocessorRpcUtils.BlockingRpcCallback<>();
     DummyRegionServerEndpointProtos.DummyService service =
         ProtobufUtil.newServiceStub(DummyRegionServerEndpointProtos.DummyService.class,
-            TEST_UTIL.getHBaseAdmin().coprocessorService(serverName));
+            TEST_UTIL.getAdmin().coprocessorService(serverName));
     service.dummyThrow(controller,
         DummyRegionServerEndpointProtos.DummyRequest.getDefaultInstance(), rpcCallback);
     assertEquals(null, rpcCallback.get());
@@ -104,21 +100,12 @@ public class TestRegionServerCoprocessorEndpoint {
         ((RemoteWithExtrasException) controller.getFailedOn().getCause()).getClassName().trim());
   }
 
-  static class DummyRegionServerEndpoint extends DummyService implements Coprocessor, SingletonCoprocessorService {
+  public static class DummyRegionServerEndpoint extends DummyService
+      implements RegionServerCoprocessor {
 
     @Override
-    public Service getService() {
-      return this;
-    }
-
-    @Override
-    public void start(CoprocessorEnvironment env) throws IOException {
-      // TODO Auto-generated method stub
-    }
-
-    @Override
-    public void stop(CoprocessorEnvironment env) throws IOException {
-      // TODO Auto-generated method stub
+    public Iterable<Service> getServices() {
+      return Collections.singleton(this);
     }
 
     @Override

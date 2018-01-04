@@ -30,8 +30,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HTableDescriptor;
@@ -51,11 +49,13 @@ import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Category({MediumTests.class})
 public class TestNamespaceReplication extends TestReplicationBase {
 
-  private static final Log LOG = LogFactory.getLog(TestNamespaceReplication.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestNamespaceReplication.class);
 
   private static String ns1 = "ns1";
   private static String ns2 = "ns2";
@@ -140,9 +140,12 @@ public class TestNamespaceReplication extends TestReplicationBase {
     Table htab1B = connection1.getTable(tabBName);
     Table htab2B = connection2.getTable(tabBName);
 
-    admin.peerAdded("2");
-    // add ns1 to peer config which replicate to cluster2
     ReplicationPeerConfig rpc = admin.getPeerConfig("2");
+    rpc.setReplicateAllUserTables(false);
+    admin.updatePeerConfig("2", rpc);
+
+    // add ns1 to peer config which replicate to cluster2
+    rpc = admin.getPeerConfig("2");
     Set<String> namespaces = new HashSet<>();
     namespaces.add(ns1);
     rpc.setNamespaces(namespaces);
@@ -165,7 +168,7 @@ public class TestNamespaceReplication extends TestReplicationBase {
     namespaces.add(ns2);
     rpc.setNamespaces(namespaces);
     Map<TableName, List<String>> tableCfs = new HashMap<>();
-    tableCfs.put(tabAName, new ArrayList<String>());
+    tableCfs.put(tabAName, new ArrayList<>());
     tableCfs.get(tabAName).add("f1");
     rpc.setTableCFsMap(tableCfs);
     admin.updatePeerConfig("2", rpc);
@@ -214,7 +217,7 @@ public class TestNamespaceReplication extends TestReplicationBase {
           fail("Waited too much time for put replication");
         }
         Result res = target.get(get);
-        if (res.size() == 0) {
+        if (res.isEmpty()) {
           LOG.info("Row not available");
         } else {
           assertEquals(res.size(), 1);

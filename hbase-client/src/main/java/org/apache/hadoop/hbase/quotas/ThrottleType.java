@@ -17,14 +17,12 @@
  */
 package org.apache.hadoop.hbase.quotas;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
 
 /**
  * Describe the Throttle Type.
  */
 @InterfaceAudience.Public
-@InterfaceStability.Evolving
 public enum ThrottleType {
   /** Throttling based on the number of requests per time-unit */
   REQUEST_NUMBER,

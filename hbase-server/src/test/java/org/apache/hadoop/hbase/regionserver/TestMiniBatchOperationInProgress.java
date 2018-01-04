@@ -25,7 +25,7 @@ import org.apache.hadoop.hbase.testclassification.RegionServerTests;
 import org.apache.hadoop.hbase.testclassification.SmallTests;
 import org.apache.hadoop.hbase.client.Mutation;
 import org.apache.hadoop.hbase.client.Put;
-import org.apache.hadoop.hbase.regionserver.wal.WALEdit;
+import org.apache.hadoop.hbase.wal.WALEdit;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.Pair;
 import org.junit.Test;
@@ -40,11 +40,11 @@ public class TestMiniBatchOperationInProgress {
     OperationStatus[] retCodeDetails = new OperationStatus[10];
     WALEdit[] walEditsFromCoprocessors = new WALEdit[10];
     for (int i = 0; i < 10; i++) {
-      operations[i] = new Pair<Mutation, Integer>(new Put(Bytes.toBytes(i)), null);
+      operations[i] = new Pair<>(new Put(Bytes.toBytes(i)), null);
     }
     MiniBatchOperationInProgress<Pair<Mutation, Integer>> miniBatch = 
-      new MiniBatchOperationInProgress<Pair<Mutation, Integer>>(operations, retCodeDetails, 
-      walEditsFromCoprocessors, 0, 5);
+      new MiniBatchOperationInProgress<>(operations, retCodeDetails,
+      walEditsFromCoprocessors, 0, 5, 5);
 
     assertEquals(5, miniBatch.size());
     assertTrue(Bytes.equals(Bytes.toBytes(0), miniBatch.getOperation(0).getFirst().getRow()));
@@ -68,8 +68,8 @@ public class TestMiniBatchOperationInProgress {
     } catch (ArrayIndexOutOfBoundsException e) {
     }
 
-    miniBatch = new MiniBatchOperationInProgress<Pair<Mutation, Integer>>(operations,
-        retCodeDetails, walEditsFromCoprocessors, 7, 10);
+    miniBatch = new MiniBatchOperationInProgress<>(operations,
+        retCodeDetails, walEditsFromCoprocessors, 7, 10, 3);
     try {
       miniBatch.setWalEdit(-1, new WALEdit());
       fail("Should throw Exception while accessing out of range");

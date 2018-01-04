@@ -28,21 +28,22 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorCompletionService;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.hbase.HRegionInfo;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.hadoop.hbase.client.RegionInfo;
 import org.apache.hadoop.hbase.regionserver.HRegionFileSystem;
 import org.apache.hadoop.hbase.regionserver.StoreFileInfo;
-import org.apache.hadoop.hbase.shaded.com.google.protobuf.UnsafeByteOperations;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.HBaseProtos.SnapshotDescription;
-import org.apache.hadoop.hbase.shaded.protobuf.generated.SnapshotProtos.SnapshotRegionManifest;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.FSUtils;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.apache.hbase.thirdparty.com.google.protobuf.UnsafeByteOperations;
+import org.apache.hadoop.hbase.shaded.protobuf.ProtobufUtil;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.SnapshotProtos.SnapshotDescription;
+import org.apache.hadoop.hbase.shaded.protobuf.generated.SnapshotProtos.SnapshotRegionManifest;
 
 /**
  * DO NOT USE DIRECTLY. USE {@link SnapshotManifest}.
@@ -55,7 +56,7 @@ import org.apache.hadoop.hbase.util.FSUtils;
  */
 @InterfaceAudience.Private
 public final class SnapshotManifestV1 {
-  private static final Log LOG = LogFactory.getLog(SnapshotManifestV1.class);
+  private static final Logger LOG = LoggerFactory.getLogger(SnapshotManifestV1.class);
 
   public static final int DESCRIPTOR_VERSION = 0;
 
@@ -74,7 +75,7 @@ public final class SnapshotManifestV1 {
       this.fs = fs;
     }
 
-    public HRegionFileSystem regionOpen(final HRegionInfo regionInfo) throws IOException {
+    public HRegionFileSystem regionOpen(final RegionInfo regionInfo) throws IOException {
       HRegionFileSystem snapshotRegionFs = HRegionFileSystem.createRegionOnFileSystem(conf,
         fs, snapshotDir, regionInfo);
       return snapshotRegionFs;
@@ -121,19 +122,18 @@ public final class SnapshotManifestV1 {
     }
 
     final ExecutorCompletionService<SnapshotRegionManifest> completionService =
-      new ExecutorCompletionService<SnapshotRegionManifest>(executor);
+      new ExecutorCompletionService<>(executor);
     for (final FileStatus region: regions) {
       completionService.submit(new Callable<SnapshotRegionManifest>() {
         @Override
         public SnapshotRegionManifest call() throws IOException {
-          HRegionInfo hri = HRegionFileSystem.loadRegionInfoFileContent(fs, region.getPath());
+          RegionInfo hri = HRegionFileSystem.loadRegionInfoFileContent(fs, region.getPath());
           return buildManifestFromDisk(conf, fs, snapshotDir, hri);
         }
       });
     }
 
-    ArrayList<SnapshotRegionManifest> regionsManifest =
-        new ArrayList<SnapshotRegionManifest>(regions.length);
+    ArrayList<SnapshotRegionManifest> regionsManifest = new ArrayList<>(regions.length);
     try {
       for (int i = 0; i < regions.length; ++i) {
         regionsManifest.add(completionService.take().get());
@@ -155,14 +155,14 @@ public final class SnapshotManifestV1 {
   }
 
   static SnapshotRegionManifest buildManifestFromDisk(final Configuration conf,
-      final FileSystem fs, final Path tableDir, final HRegionInfo regionInfo) throws IOException {
+      final FileSystem fs, final Path tableDir, final RegionInfo regionInfo) throws IOException {
     HRegionFileSystem regionFs = HRegionFileSystem.openRegionFromFileSystem(conf, fs,
           tableDir, regionInfo, true);
     SnapshotRegionManifest.Builder manifest = SnapshotRegionManifest.newBuilder();
 
     // 1. dump region meta info into the snapshot directory
     LOG.debug("Storing region-info for snapshot.");
-    manifest.setRegionInfo(HRegionInfo.convert(regionInfo));
+    manifest.setRegionInfo(ProtobufUtil.toRegionInfo(regionInfo));
 
     // 2. iterate through all the stores in the region
     LOG.debug("Creating references for hfiles");

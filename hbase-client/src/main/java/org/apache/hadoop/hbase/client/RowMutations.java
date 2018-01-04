@@ -23,8 +23,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.hbase.util.Bytes;
 
 /**
@@ -33,12 +32,11 @@ import org.apache.hadoop.hbase.util.Bytes;
  *
  * The mutations are performed in the order in which they
  * were added.
- * 
+ *
  * <p>We compare and equate mutations based off their row so be careful putting RowMutations
  * into Sets or using them as keys in Maps.
  */
 @InterfaceAudience.Public
-@InterfaceStability.Evolving
 public class RowMutations implements Row {
   private final List<Mutation> mutations;
   private final byte [] row;
@@ -89,11 +87,21 @@ public class RowMutations implements Row {
     mutations.add(m);
   }
 
+  /**
+   * @deprecated As of release 2.0.0, this will be removed in HBase 3.0.0.
+   *             Use {@link Row#COMPARATOR} instead
+   */
+  @Deprecated
   @Override
   public int compareTo(Row i) {
     return Bytes.compareTo(this.getRow(), i.getRow());
   }
 
+  /**
+   * @deprecated As of release 2.0.0, this will be removed in HBase 3.0.0.
+   *             No replacement
+   */
+  @Deprecated
   @Override
   public boolean equals(Object obj) {
     if (obj == this) return true;
@@ -104,6 +112,11 @@ public class RowMutations implements Row {
     return false;
   }
 
+  /**
+   * @deprecated As of release 2.0.0, this will be removed in HBase 3.0.0.
+   *             No replacement
+   */
+  @Deprecated
   @Override
   public int hashCode(){
     return Arrays.hashCode(row);
@@ -119,5 +132,13 @@ public class RowMutations implements Row {
    */
   public List<Mutation> getMutations() {
     return Collections.unmodifiableList(mutations);
+  }
+
+  public int getMaxPriority() {
+    int maxPriority = Integer.MIN_VALUE;
+    for (Mutation mutation : mutations) {
+      maxPriority = Math.max(maxPriority, mutation.getPriority());
+    }
+    return maxPriority;
   }
 }

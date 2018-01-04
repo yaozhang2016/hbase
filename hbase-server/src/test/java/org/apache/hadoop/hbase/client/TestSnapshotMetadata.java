@@ -25,8 +25,6 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
@@ -49,13 +47,15 @@ import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Test class to verify that metadata is consistent before and after a snapshot attempt.
  */
 @Category({MediumTests.class, ClientTests.class})
 public class TestSnapshotMetadata {
-  private static final Log LOG = LogFactory.getLog(TestSnapshotMetadata.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestSnapshotMetadata.class);
 
   private static final HBaseTestingUtility UTIL = new HBaseTestingUtility();
   private static final int NUM_RS = 2;
@@ -133,7 +133,7 @@ public class TestSnapshotMetadata {
 
   @Before
   public void setup() throws Exception {
-    admin = UTIL.getHBaseAdmin();
+    admin = UTIL.getAdmin();
     createTableWithNonDefaultProperties();
   }
 
@@ -193,7 +193,7 @@ public class TestSnapshotMetadata {
     final byte[] snapshotName = Bytes.toBytes(snapshotNameAsString);
 
     // restore the snapshot into a cloned table and examine the output
-    List<byte[]> familiesList = new ArrayList<byte[]>();
+    List<byte[]> familiesList = new ArrayList<>();
     Collections.addAll(familiesList, families);
 
     // Create a snapshot in which all families are empty
@@ -262,8 +262,8 @@ public class TestSnapshotMetadata {
     // populate it with data
     final byte[] familyForUpdate = BLOCKSIZE_FAM;
 
-    List<byte[]> familiesWithDataList = new ArrayList<byte[]>();
-    List<byte[]> emptyFamiliesList = new ArrayList<byte[]>();
+    List<byte[]> familiesWithDataList = new ArrayList<>();
+    List<byte[]> emptyFamiliesList = new ArrayList<>();
     if (addData) {
       Table original = UTIL.getConnection().getTable(originalTableName);
       UTIL.loadTable(original, familyForUpdate); // family arbitrarily chosen

@@ -30,11 +30,12 @@ import javax.xml.bind.annotation.XmlElement;
 import javax.xml.bind.annotation.XmlRootElement;
 
 import org.apache.hadoop.hbase.NamespaceDescriptor;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.hbase.client.Admin;
 import org.apache.hadoop.hbase.rest.ProtobufMessageHandler;
 import org.apache.hadoop.hbase.rest.protobuf.generated.NamespacesMessage.Namespaces;
-import org.codehaus.jackson.annotate.JsonProperty;
+
+import com.fasterxml.jackson.annotation.JsonProperty;
 
 
 /**
@@ -52,7 +53,7 @@ public class NamespacesModel implements Serializable, ProtobufMessageHandler {
 
   @JsonProperty("Namespace")
   @XmlElement(name="Namespace")
-  private List<String> namespaces = new ArrayList<String>();
+  private List<String> namespaces = new ArrayList<>();
 
   /**
    * Default constructor. Do not use.
@@ -66,7 +67,7 @@ public class NamespacesModel implements Serializable, ProtobufMessageHandler {
    */
   public NamespacesModel(Admin admin) throws IOException {
     NamespaceDescriptor[] nds = admin.listNamespaceDescriptors();
-    namespaces = new ArrayList<String>();
+    namespaces = new ArrayList<>(nds.length);
     for (NamespaceDescriptor nd : nds) {
       namespaces.add(nd.getName());
     }

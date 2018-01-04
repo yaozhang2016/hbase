@@ -27,43 +27,38 @@ import java.util.NavigableSet;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.hbase.ArrayBackedTag;
 import org.apache.hadoop.hbase.Cell;
+import org.apache.hadoop.hbase.CellBuilderType;
 import org.apache.hadoop.hbase.CellComparator;
-import org.apache.hadoop.hbase.HColumnDescriptor;
+import org.apache.hadoop.hbase.DoNotRetryIOException;
+import org.apache.hadoop.hbase.ExtendedCellBuilderFactory;
 import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.KeyValue;
-import org.apache.hadoop.hbase.KeyValue.Type;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.Tag;
+import org.apache.hadoop.hbase.TagType;
 import org.apache.hadoop.hbase.TagUtil;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
+import org.apache.hadoop.hbase.client.ColumnFamilyDescriptor;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.filter.Filter;
 import org.apache.hadoop.hbase.filter.FilterList;
 import org.apache.hadoop.hbase.io.compress.Compression;
-import org.apache.hadoop.hbase.io.hfile.CacheConfig;
 import org.apache.hadoop.hbase.io.hfile.CorruptHFileException;
-import org.apache.hadoop.hbase.io.hfile.HFileContext;
-import org.apache.hadoop.hbase.io.hfile.HFileContextBuilder;
-import org.apache.hadoop.hbase.master.TableLockManager;
-import org.apache.hadoop.hbase.master.TableLockManager.TableLock;
 import org.apache.hadoop.hbase.mob.MobCacheConfig;
 import org.apache.hadoop.hbase.mob.MobConstants;
 import org.apache.hadoop.hbase.mob.MobFile;
 import org.apache.hadoop.hbase.mob.MobFileName;
 import org.apache.hadoop.hbase.mob.MobStoreEngine;
 import org.apache.hadoop.hbase.mob.MobUtils;
-import org.apache.hadoop.hbase.regionserver.compactions.CompactionContext;
-import org.apache.hadoop.hbase.regionserver.throttle.ThroughputController;
 import org.apache.hadoop.hbase.util.Bytes;
-import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.hadoop.hbase.util.HFileArchiveUtil;
 import org.apache.hadoop.hbase.util.IdLock;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * The store implementation to save MOBs (medium objects), it extends the HStore.
@@ -83,7 +78,7 @@ import org.apache.hadoop.hbase.util.IdLock;
  */
 @InterfaceAudience.Private
 public class HMobStore extends HStore {
-  private static final Log LOG = LogFactory.getLog(HMobStore.class);
+  private static final Logger LOG = LoggerFactory.getLogger(HMobStore.class);
   private MobCacheConfig mobCacheConfig;
   private Path homePath;
   private Path mobFamilyPath;
@@ -96,13 +91,18 @@ public class HMobStore extends HStore {
   private volatile long mobFlushedCellsSize = 0;
   private volatile long mobScanCellsCount = 0;
   private volatile long mobScanCellsSize = 0;
-  private HColumnDescriptor family;
-  private TableLockManager tableLockManager;
-  private TableName tableLockName;
-  private Map<String, List<Path>> map = new ConcurrentHashMap<String, List<Path>>();
+  private ColumnFamilyDescriptor family;
+  private Map<String, List<Path>> map = new ConcurrentHashMap<>();
   private final IdLock keyLock = new IdLock();
+  // When we add a MOB reference cell to the HFile, we will add 2 tags along with it
+  // 1. A ref tag with type TagType.MOB_REFERENCE_TAG_TYPE. This just denote this this cell is not
+  // original one but a ref to another MOB Cell.
+  // 2. Table name tag. It's very useful in cloning the snapshot. When reading from the cloning
+  // table, we need to find the original mob files by this table name. For details please see
+  // cloning snapshot for mob files.
+  private final byte[] refCellTags;
 
-  public HMobStore(final HRegion region, final HColumnDescriptor family,
+  public HMobStore(final HRegion region, final ColumnFamilyDescriptor family,
       final Configuration confParam) throws IOException {
     super(region, family, confParam);
     this.family = family;
@@ -110,23 +110,25 @@ public class HMobStore extends HStore {
     this.homePath = MobUtils.getMobHome(conf);
     this.mobFamilyPath = MobUtils.getMobFamilyPath(conf, this.getTableName(),
         family.getNameAsString());
-    List<Path> locations = new ArrayList<Path>(2);
+    List<Path> locations = new ArrayList<>(2);
     locations.add(mobFamilyPath);
-    TableName tn = region.getTableDesc().getTableName();
+    TableName tn = region.getTableDescriptor().getTableName();
     locations.add(HFileArchiveUtil.getStoreArchivePath(conf, tn, MobUtils.getMobRegionInfo(tn)
         .getEncodedName(), family.getNameAsString()));
     map.put(Bytes.toString(tn.getName()), locations);
-    if (region.getRegionServerServices() != null) {
-      tableLockManager = region.getRegionServerServices().getTableLockManager();
-      tableLockName = MobUtils.getTableLockName(getTableName());
-    }
+    List<Tag> tags = new ArrayList<>(2);
+    tags.add(MobConstants.MOB_REF_TAG);
+    Tag tableNameTag = new ArrayBackedTag(TagType.MOB_TABLE_NAME_TAG_TYPE,
+        getTableName().getName());
+    tags.add(tableNameTag);
+    this.refCellTags = TagUtil.fromList(tags);
   }
 
   /**
    * Creates the mob cache config.
    */
   @Override
-  protected void createCacheConf(HColumnDescriptor family) {
+  protected void createCacheConf(ColumnFamilyDescriptor family) {
     cacheConf = new MobCacheConfig(conf, family);
   }
 
@@ -142,29 +144,26 @@ public class HMobStore extends HStore {
    * the mob files should be performed after the seek in HBase is done.
    */
   @Override
-  protected KeyValueScanner createScanner(Scan scan, final NavigableSet<byte[]> targetCols,
-      long readPt, KeyValueScanner scanner) throws IOException {
-    if (scanner == null) {
-      if (MobUtils.isRefOnlyScan(scan)) {
-        Filter refOnlyFilter = new MobReferenceOnlyFilter();
-        Filter filter = scan.getFilter();
-        if (filter != null) {
-          scan.setFilter(new FilterList(filter, refOnlyFilter));
-        } else {
-          scan.setFilter(refOnlyFilter);
-        }
+  protected KeyValueScanner createScanner(Scan scan, ScanInfo scanInfo,
+      NavigableSet<byte[]> targetCols, long readPt) throws IOException {
+    if (MobUtils.isRefOnlyScan(scan)) {
+      Filter refOnlyFilter = new MobReferenceOnlyFilter();
+      Filter filter = scan.getFilter();
+      if (filter != null) {
+        scan.setFilter(new FilterList(filter, refOnlyFilter));
+      } else {
+        scan.setFilter(refOnlyFilter);
       }
-      scanner = scan.isReversed() ? new ReversedMobStoreScanner(this, getScanInfo(), scan,
-          targetCols, readPt) : new MobStoreScanner(this, getScanInfo(), scan, targetCols, readPt);
     }
-    return scanner;
+    return scan.isReversed() ? new ReversedMobStoreScanner(this, scanInfo, scan, targetCols, readPt)
+        : new MobStoreScanner(this, scanInfo, scan, targetCols, readPt);
   }
 
   /**
    * Creates the mob store engine.
    */
   @Override
-  protected StoreEngine<?, ?, ?, ?> createStoreEngine(Store store, Configuration conf,
+  protected StoreEngine<?, ?, ?, ?> createStoreEngine(HStore store, Configuration conf,
       CellComparator cellComparator) throws IOException {
     MobStoreEngine engine = new MobStoreEngine();
     engine.createComponents(conf, store, cellComparator);
@@ -185,16 +184,19 @@ public class HMobStore extends HStore {
    * @param maxKeyCount The key count.
    * @param compression The compression algorithm.
    * @param startKey The start key.
+   * @param isCompaction If the writer is used in compaction.
    * @return The writer for the mob file.
    * @throws IOException
    */
   public StoreFileWriter createWriterInTmp(Date date, long maxKeyCount,
-      Compression.Algorithm compression, byte[] startKey) throws IOException {
+      Compression.Algorithm compression, byte[] startKey,
+      boolean isCompaction) throws IOException {
     if (startKey == null) {
       startKey = HConstants.EMPTY_START_ROW;
     }
     Path path = getTempDir();
-    return createWriterInTmp(MobUtils.formatDate(date), path, maxKeyCount, compression, startKey);
+    return createWriterInTmp(MobUtils.formatDate(date), path, maxKeyCount, compression, startKey,
+      isCompaction);
   }
 
   /**
@@ -217,7 +219,7 @@ public class HMobStore extends HStore {
     String suffix = UUID
         .randomUUID().toString().replaceAll("-", "") + "_del";
     MobFileName mobFileName = MobFileName.create(startKey, MobUtils.formatDate(date), suffix);
-    return createWriterInTmp(mobFileName, path, maxKeyCount, compression);
+    return createWriterInTmp(mobFileName, path, maxKeyCount, compression, true);
   }
 
   /**
@@ -227,14 +229,16 @@ public class HMobStore extends HStore {
    * @param maxKeyCount The key count.
    * @param compression The compression algorithm.
    * @param startKey The start key.
+   * @param isCompaction If the writer is used in compaction.
    * @return The writer for the mob file.
    * @throws IOException
    */
   public StoreFileWriter createWriterInTmp(String date, Path basePath, long maxKeyCount,
-      Compression.Algorithm compression, byte[] startKey) throws IOException {
+      Compression.Algorithm compression, byte[] startKey,
+      boolean isCompaction) throws IOException {
     MobFileName mobFileName = MobFileName.create(startKey, date, UUID.randomUUID()
         .toString().replaceAll("-", ""));
-    return createWriterInTmp(mobFileName, basePath, maxKeyCount, compression);
+    return createWriterInTmp(mobFileName, basePath, maxKeyCount, compression, isCompaction);
   }
 
   /**
@@ -243,27 +247,16 @@ public class HMobStore extends HStore {
    * @param basePath The basic path for a temp directory.
    * @param maxKeyCount The key count.
    * @param compression The compression algorithm.
+   * @param isCompaction If the writer is used in compaction.
    * @return The writer for the mob file.
    * @throws IOException
    */
   public StoreFileWriter createWriterInTmp(MobFileName mobFileName, Path basePath,
-      long maxKeyCount, Compression.Algorithm compression) throws IOException {
-    final CacheConfig writerCacheConf = mobCacheConfig;
-    HFileContext hFileContext = new HFileContextBuilder().withCompression(compression)
-        .withIncludesMvcc(true).withIncludesTags(true)
-        .withCompressTags(family.isCompressTags())
-        .withChecksumType(checksumType)
-        .withBytesPerCheckSum(bytesPerChecksum)
-        .withBlockSize(blocksize)
-        .withHBaseCheckSum(true).withDataBlockEncoding(getFamily().getDataBlockEncoding())
-        .withEncryptionContext(cryptoContext)
-        .withCreateTime(EnvironmentEdgeManager.currentTime()).build();
-
-    StoreFileWriter w = new StoreFileWriter.Builder(conf, writerCacheConf, region.getFilesystem())
-        .withFilePath(new Path(basePath, mobFileName.getFileName()))
-        .withComparator(CellComparator.COMPARATOR).withBloomType(BloomType.NONE)
-        .withMaxKeyCount(maxKeyCount).withFileContext(hFileContext).build();
-    return w;
+      long maxKeyCount, Compression.Algorithm compression,
+      boolean isCompaction) throws IOException {
+    return MobUtils.createWriter(conf, region.getFilesystem(), family,
+      new Path(basePath, mobFileName.getFileName()), maxKeyCount, compression, mobCacheConfig,
+      cryptoContext, checksumType, bytesPerChecksum, blocksize, BloomType.NONE, isCompaction);
   }
 
   /**
@@ -295,17 +288,17 @@ public class HMobStore extends HStore {
    * @param path the path to the mob file
    */
   private void validateMobFile(Path path) throws IOException {
-    StoreFile storeFile = null;
+    HStoreFile storeFile = null;
     try {
-      storeFile =
-          new StoreFile(region.getFilesystem(), path, conf, this.mobCacheConfig, BloomType.NONE);
-      storeFile.createReader();
+      storeFile = new HStoreFile(region.getFilesystem(), path, conf, this.mobCacheConfig,
+          BloomType.NONE, isPrimaryReplicaStore());
+      storeFile.initReader();
     } catch (IOException e) {
       LOG.error("Fail to open mob file[" + path + "], keep it in temp directory.", e);
       throw e;
     } finally {
       if (storeFile != null) {
-        storeFile.closeReader(false);
+        storeFile.closeStoreFile(false);
       }
     }
   }
@@ -339,14 +332,14 @@ public class HMobStore extends HStore {
       String fileName = MobUtils.getMobFileName(reference);
       Tag tableNameTag = MobUtils.getTableNameTag(reference);
       if (tableNameTag != null) {
-        String tableNameString = TagUtil.getValueAsString(tableNameTag);
+        String tableNameString = Tag.getValueAsString(tableNameTag);
         List<Path> locations = map.get(tableNameString);
         if (locations == null) {
           IdLock.Entry lockEntry = keyLock.getLockEntry(tableNameString.hashCode());
           try {
             locations = map.get(tableNameString);
             if (locations == null) {
-              locations = new ArrayList<Path>(2);
+              locations = new ArrayList<>(2);
               TableName tn = TableName.valueOf(tableNameString);
               locations.add(MobUtils.getMobFamilyPath(conf, tn, family.getNameAsString()));
               locations.add(HFileArchiveUtil.getStoreArchivePath(conf, tn, MobUtils
@@ -362,15 +355,20 @@ public class HMobStore extends HStore {
       }
     }
     if (result == null) {
-      LOG.warn("The KeyValue result is null, assemble a new KeyValue with the same row,family,"
+      LOG.warn("The Cell result is null, assemble a new Cell with the same row,family,"
           + "qualifier,timestamp,type and tags but with an empty value to return.");
-      result = new KeyValue(reference.getRowArray(), reference.getRowOffset(),
-          reference.getRowLength(), reference.getFamilyArray(), reference.getFamilyOffset(),
-          reference.getFamilyLength(), reference.getQualifierArray(),
-          reference.getQualifierOffset(), reference.getQualifierLength(), reference.getTimestamp(),
-          Type.codeToType(reference.getTypeByte()), HConstants.EMPTY_BYTE_ARRAY,
-          0, 0, reference.getTagsArray(), reference.getTagsOffset(),
-          reference.getTagsLength());
+      result = ExtendedCellBuilderFactory.create(CellBuilderType.DEEP_COPY)
+              .setRow(reference.getRowArray(), reference.getRowOffset(), reference.getRowLength())
+              .setFamily(reference.getFamilyArray(), reference.getFamilyOffset(),
+                reference.getFamilyLength())
+              .setQualifier(reference.getQualifierArray(),
+                reference.getQualifierOffset(), reference.getQualifierLength())
+              .setTimestamp(reference.getTimestamp())
+              .setType(reference.getTypeByte())
+              .setValue(HConstants.EMPTY_BYTE_ARRAY)
+              .setTags(reference.getTagsArray(), reference.getTagsOffset(),
+                reference.getTagsLength())
+              .build();
     }
     return result;
   }
@@ -407,7 +405,7 @@ public class HMobStore extends HStore {
         throwable = e;
         if ((e instanceof FileNotFoundException) ||
             (e.getCause() instanceof FileNotFoundException)) {
-          LOG.warn("Fail to read the cell, the mob file " + path + " doesn't exist", e);
+          LOG.debug("Fail to read the cell, the mob file " + path + " doesn't exist", e);
         } else if (e instanceof CorruptHFileException) {
           LOG.error("The mob file " + path + " is corrupt", e);
           break;
@@ -416,11 +414,11 @@ public class HMobStore extends HStore {
         }
       } catch (NullPointerException e) { // HDFS 1.x - DFSInputStream.getBlockAt()
         mobCacheConfig.getMobFileCache().evictFile(fileName);
-        LOG.warn("Fail to read the cell", e);
+        LOG.debug("Fail to read the cell", e);
         throwable = e;
       } catch (AssertionError e) { // assert in HDFS 1.x - DFSInputStream.getBlockAt()
         mobCacheConfig.getMobFileCache().evictFile(fileName);
-        LOG.warn("Fail to read the cell", e);
+        LOG.debug("Fail to read the cell", e);
         throwable = e;
       } finally {
         if (file != null) {
@@ -432,6 +430,13 @@ public class HMobStore extends HStore {
       + " or it is corrupt");
     if (readEmptyValueOnMobCellMiss) {
       return null;
+    } else if ((throwable instanceof FileNotFoundException)
+        || (throwable.getCause() instanceof FileNotFoundException)) {
+      // The region is re-opened when FileNotFoundException is thrown.
+      // This is not necessary when MOB files cannot be found, because the store files
+      // in a region only contain the references to MOB files and a re-open on a region
+      // doesn't help fix the lost MOB files.
+      throw new DoNotRetryIOException(throwable);
     } else if (throwable instanceof IOException) {
       throw (IOException) throwable;
     } else {
@@ -445,70 +450,6 @@ public class HMobStore extends HStore {
    */
   public Path getPath() {
     return mobFamilyPath;
-  }
-
-  /**
-   * The compaction in the store of mob.
-   * The cells in this store contains the path of the mob files. There might be race
-   * condition between the major compaction and the sweeping in mob files.
-   * In order to avoid this, we need mutually exclude the running of the major compaction and
-   * sweeping in mob files.
-   * The minor compaction is not affected.
-   * The major compaction is marked as retainDeleteMarkers when a sweeping is in progress.
-   */
-  @Override
-  public List<StoreFile> compact(CompactionContext compaction,
-      ThroughputController throughputController) throws IOException {
-    // If it's major compaction, try to find whether there's a sweeper is running
-    // If yes, mark the major compaction as retainDeleteMarkers
-    if (compaction.getRequest().isAllFiles()) {
-      // Use the ZooKeeper to coordinate.
-      // 1. Acquire a operation lock.
-      //   1.1. If no, mark the major compaction as retainDeleteMarkers and continue the compaction.
-      //   1.2. If the lock is obtained, search the node of sweeping.
-      //      1.2.1. If the node is there, the sweeping is in progress, mark the major
-      //             compaction as retainDeleteMarkers and continue the compaction.
-      //      1.2.2. If the node is not there, add a child to the major compaction node, and
-      //             run the compaction directly.
-      TableLock lock = null;
-      if (tableLockManager != null) {
-        lock = tableLockManager.readLock(tableLockName, "Major compaction in HMobStore");
-      }
-      boolean tableLocked = false;
-      String tableName = getTableName().getNameAsString();
-      if (lock != null) {
-        try {
-          LOG.info("Start to acquire a read lock for the table[" + tableName
-              + "], ready to perform the major compaction");
-          lock.acquire();
-          tableLocked = true;
-        } catch (Exception e) {
-          LOG.error("Fail to lock the table " + tableName, e);
-        }
-      } else {
-        // If the tableLockManager is null, mark the tableLocked as true.
-        tableLocked = true;
-      }
-      try {
-        if (!tableLocked) {
-          LOG.warn("Cannot obtain the table lock, maybe a sweep tool is running on this table["
-              + tableName + "], forcing the delete markers to be retained");
-          compaction.getRequest().forceRetainDeleteMarkers();
-        }
-        return super.compact(compaction, throughputController);
-      } finally {
-        if (tableLocked && lock != null) {
-          try {
-            lock.release();
-          } catch (IOException e) {
-            LOG.error("Fail to release the table lock " + tableName, e);
-          }
-        }
-      }
-    } else {
-      // If it's not a major compaction, continue the compaction.
-      return super.compact(compaction, throughputController);
-    }
   }
 
   public void updateCellsCountCompactedToMob(long count) {
@@ -582,5 +523,9 @@ public class HMobStore extends HStore {
 
   public long getMobScanCellsSize() {
     return mobScanCellsSize;
+  }
+
+  public byte[] getRefCellTags() {
+    return this.refCellTags;
   }
 }

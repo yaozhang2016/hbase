@@ -25,8 +25,6 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.KeepDeletedCells;
 import org.apache.hadoop.hbase.KeyValue;
@@ -41,11 +39,13 @@ import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Category({ RegionServerTests.class, SmallTests.class })
 public class TestCompactionScanQueryMatcher extends AbstractTestScanQueryMatcher {
 
-  private static final Log LOG = LogFactory.getLog(TestCompactionScanQueryMatcher.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TestCompactionScanQueryMatcher.class);
 
   @Test
   public void testMatch_PartialRangeDropDeletes() throws Exception {
@@ -73,14 +73,13 @@ public class TestCompactionScanQueryMatcher extends AbstractTestScanQueryMatcher
       throws IOException {
     long now = EnvironmentEdgeManager.currentTime();
     // Set time to purge deletes to negative value to avoid it ever happening.
-    ScanInfo scanInfo = new ScanInfo(this.conf, fam2, 0, 1, ttl, KeepDeletedCells.FALSE, -1L,
-        rowComparator);
+    ScanInfo scanInfo = new ScanInfo(this.conf, fam2, 0, 1, ttl, KeepDeletedCells.FALSE,
+        HConstants.DEFAULT_BLOCKSIZE, -1L, rowComparator, false);
 
     CompactionScanQueryMatcher qm = CompactionScanQueryMatcher.create(scanInfo,
       ScanType.COMPACT_RETAIN_DELETES, Long.MAX_VALUE, HConstants.OLDEST_TIMESTAMP,
       HConstants.OLDEST_TIMESTAMP, now, from, to, null);
-    List<ScanQueryMatcher.MatchCode> actual = new ArrayList<ScanQueryMatcher.MatchCode>(
-        rows.length);
+    List<ScanQueryMatcher.MatchCode> actual = new ArrayList<>(rows.length);
     byte[] prevRow = null;
     for (byte[] row : rows) {
       if (prevRow == null || !Bytes.equals(prevRow, row)) {

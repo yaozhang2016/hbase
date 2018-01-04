@@ -17,18 +17,17 @@
  */
 package org.apache.hadoop.hbase.ipc;
 
-import com.google.common.base.Preconditions;
+import org.apache.hbase.thirdparty.com.google.common.base.Preconditions;
 
-import io.netty.channel.Channel;
-import io.netty.channel.EventLoopGroup;
+import org.apache.hbase.thirdparty.io.netty.channel.Channel;
+import org.apache.hbase.thirdparty.io.netty.channel.EventLoopGroup;
 
 import java.util.HashMap;
 import java.util.Map;
 
-import org.apache.commons.lang.StringUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
 import org.apache.hadoop.hbase.util.Pair;
 
 /**
@@ -37,9 +36,9 @@ import org.apache.hadoop.hbase.util.Pair;
  * As hadoop Configuration can not pass an Object directly, we need to find a way to pass the
  * EventLoopGroup to {@code AsyncRpcClient} if we want to use a single {@code EventLoopGroup} for
  * the whole process.
+ * @since 2.0.0
  */
 @InterfaceAudience.Public
-@InterfaceStability.Evolving
 public class NettyRpcClientConfigHelper {
 
   public static final String EVENT_LOOP_CONFIG = "hbase.rpc.client.event-loop.config";

@@ -23,10 +23,7 @@ import java.io.IOException;
 import java.util.Locale;
 import java.util.Map;
 
-import org.apache.commons.lang.StringUtils;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.conf.Configured;
 import org.apache.hadoop.hbase.HBaseClusterManager.CommandProvider.Operation;
@@ -35,6 +32,9 @@ import org.apache.hadoop.hbase.util.RetryCounter;
 import org.apache.hadoop.hbase.util.RetryCounter.RetryConfig;
 import org.apache.hadoop.hbase.util.RetryCounterFactory;
 import org.apache.hadoop.util.Shell;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * A default cluster manager for HBase. Uses SSH, and hbase shell scripts
@@ -49,7 +49,7 @@ public class HBaseClusterManager extends Configured implements ClusterManager {
   private static final String SIGSTOP = "SIGSTOP";
   private static final String SIGCONT = "SIGCONT";
 
-  protected static final Log LOG = LogFactory.getLog(HBaseClusterManager.class);
+  protected static final Logger LOG = LoggerFactory.getLogger(HBaseClusterManager.class);
   private String sshUserName;
   private String sshOptions;
 
@@ -59,7 +59,7 @@ public class HBaseClusterManager extends Configured implements ClusterManager {
    * 5 original command, 6 service user.
    */
   private static final String DEFAULT_TUNNEL_CMD =
-      "/usr/bin/ssh %1$s %2$s%3$s%4$s \"sudo -u %6$s %5$s\"";
+      "timeout 30 /usr/bin/ssh %1$s %2$s%3$s%4$s \"sudo -u %6$s %5$s\"";
   private String tunnelCmd;
 
   private static final String RETRY_ATTEMPTS_KEY = "hbase.it.clustermanager.retry.attempts";
@@ -84,6 +84,7 @@ public class HBaseClusterManager extends Configured implements ClusterManager {
       sshOptions = StringUtils.join(new Object[] { sshOptions, extraSshOptions }, " ");
     }
     sshOptions = (sshOptions == null) ? "" : sshOptions;
+    sshUserName = (sshUserName == null) ? "" : sshUserName;
     tunnelCmd = conf.get("hbase.it.clustermanager.ssh.cmd", DEFAULT_TUNNEL_CMD);
     // Print out ssh special config if any.
     if ((sshUserName != null && sshUserName.length() > 0) ||
@@ -312,7 +313,7 @@ public class HBaseClusterManager extends Configured implements ClusterManager {
     LOG.info("Executed remote command, exit code:" + shell.getExitCode()
         + " , output:" + shell.getOutput());
 
-    return new Pair<Integer, String>(shell.getExitCode(), shell.getOutput());
+    return new Pair<>(shell.getExitCode(), shell.getOutput());
   }
 
   private Pair<Integer, String> execWithRetries(String hostname, ServiceType service, String... cmd)

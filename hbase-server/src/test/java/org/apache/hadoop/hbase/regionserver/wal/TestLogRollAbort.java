@@ -22,8 +22,6 @@ import java.io.IOException;
 import java.util.NavigableMap;
 import java.util.TreeMap;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
@@ -34,10 +32,12 @@ import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.MiniHBaseCluster;
+import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Admin;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Table;
+import org.apache.hadoop.hbase.log.HBaseMarkers;
 import org.apache.hadoop.hbase.regionserver.HRegionServer;
 import org.apache.hadoop.hbase.regionserver.MultiVersionConcurrencyControl;
 import org.apache.hadoop.hbase.testclassification.MediumTests;
@@ -46,8 +46,9 @@ import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.FSUtils;
 import org.apache.hadoop.hbase.wal.AbstractFSWALProvider;
 import org.apache.hadoop.hbase.wal.WAL;
+import org.apache.hadoop.hbase.wal.WALEdit;
 import org.apache.hadoop.hbase.wal.WALFactory;
-import org.apache.hadoop.hbase.wal.WALKey;
+import org.apache.hadoop.hbase.wal.WALKeyImpl;
 import org.apache.hadoop.hbase.wal.WALSplitter;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
 import org.junit.After;
@@ -56,6 +57,8 @@ import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Tests for conditions that should trigger RegionServer aborts when
@@ -63,7 +66,7 @@ import org.junit.experimental.categories.Category;
  */
 @Category({RegionServerTests.class, MediumTests.class})
 public class TestLogRollAbort {
-  private static final Log LOG = LogFactory.getLog(AbstractTestLogRolling.class);
+  private static final Logger LOG = LoggerFactory.getLogger(AbstractTestLogRolling.class);
   private static MiniDFSCluster dfsCluster;
   private static Admin admin;
   private static MiniHBaseCluster cluster;
@@ -71,7 +74,8 @@ public class TestLogRollAbort {
 
   /* For the split-then-roll test */
   private static final Path HBASEDIR = new Path("/hbase");
-  private static final Path OLDLOGDIR = new Path(HBASEDIR, HConstants.HREGION_OLDLOGDIR_NAME);
+  private static final Path HBASELOGDIR = new Path("/hbaselog");
+  private static final Path OLDLOGDIR = new Path(HBASELOGDIR, HConstants.HREGION_OLDLOGDIR_NAME);
 
   // Need to override this setup so we can edit the config before it gets sent
   // to the HDFS & HBase cluster startup.
@@ -104,13 +108,14 @@ public class TestLogRollAbort {
 
     cluster = TEST_UTIL.getHBaseCluster();
     dfsCluster = TEST_UTIL.getDFSCluster();
-    admin = TEST_UTIL.getHBaseAdmin();
+    admin = TEST_UTIL.getAdmin();
     conf = TEST_UTIL.getConfiguration();
     fs = TEST_UTIL.getDFSCluster().getFileSystem();
 
     // disable region rebalancing (interferes with log watching)
     cluster.getMaster().balanceSwitch(false);
     FSUtils.setRootDir(conf, HBASEDIR);
+    FSUtils.setWALRootDir(conf, HBASELOGDIR);
   }
 
   @After
@@ -160,7 +165,7 @@ public class TestLogRollAbort {
         // not reliable now that sync plays a roll in wall rolling.  The above puts also now call
         // sync.
       } catch (Throwable t) {
-        LOG.fatal("FAILED TEST: Got wrong exception", t);
+        LOG.error(HBaseMarkers.FATAL, "FAILED TEST: Got wrong exception", t);
       }
     } finally {
       table.close();
@@ -175,8 +180,9 @@ public class TestLogRollAbort {
   @Test (timeout=300000)
   public void testLogRollAfterSplitStart() throws IOException {
     LOG.info("Verify wal roll after split starts will fail.");
-    String logName = "testLogRollAfterSplitStart";
-    Path thisTestsDir = new Path(HBASEDIR, AbstractFSWALProvider.getWALDirectoryName(logName));
+    String logName = ServerName.valueOf("testLogRollAfterSplitStart",
+        16010, System.currentTimeMillis()).toString();
+    Path thisTestsDir = new Path(HBASELOGDIR, AbstractFSWALProvider.getWALDirectoryName(logName));
     final WALFactory wals = new WALFactory(conf, null, logName);
 
     try {
@@ -195,12 +201,11 @@ public class TestLogRollAbort {
         kvs.add(new KeyValue(Bytes.toBytes(i), tableName.getName(), tableName.getName()));
         HTableDescriptor htd = new HTableDescriptor(tableName);
         htd.addFamily(new HColumnDescriptor("column"));
-        NavigableMap<byte[], Integer> scopes = new TreeMap<byte[], Integer>(
-            Bytes.BYTES_COMPARATOR);
+        NavigableMap<byte[], Integer> scopes = new TreeMap<>(Bytes.BYTES_COMPARATOR);
         for(byte[] fam : htd.getFamiliesKeys()) {
           scopes.put(fam, 0);
         }
-        log.append(regioninfo, new WALKey(regioninfo.getEncodedNameAsBytes(), tableName,
+        log.append(regioninfo, new WALKeyImpl(regioninfo.getEncodedNameAsBytes(), tableName,
             System.currentTimeMillis(), mvcc, scopes), kvs, true);
       }
       // Send the data to HDFS datanodes and close the HDFS writer
@@ -218,7 +223,7 @@ public class TestLogRollAbort {
       LOG.debug("Renamed region directory: " + rsSplitDir);
 
       LOG.debug("Processing the old log files.");
-      WALSplitter.split(HBASEDIR, rsSplitDir, OLDLOGDIR, fs, conf, wals);
+      WALSplitter.split(HBASELOGDIR, rsSplitDir, OLDLOGDIR, fs, conf, wals);
 
       LOG.debug("Trying to roll the WAL.");
       try {

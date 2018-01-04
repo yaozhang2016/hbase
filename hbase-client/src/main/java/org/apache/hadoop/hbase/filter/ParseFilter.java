@@ -22,6 +22,7 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.EmptyStackException;
@@ -30,10 +31,10 @@ import java.util.Map;
 import java.util.Set;
 import java.util.Stack;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.hadoop.hbase.CompareOperator;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.hadoop.hbase.filter.CompareFilter.CompareOp;
 import org.apache.hadoop.hbase.util.Bytes;
 
@@ -47,16 +48,15 @@ import org.apache.hadoop.hbase.util.Bytes;
  * Filter Language can be found at: https://issues.apache.org/jira/browse/HBASE-4176
  */
 @InterfaceAudience.Public
-@InterfaceStability.Stable
 public class ParseFilter {
-  private static final Log LOG = LogFactory.getLog(ParseFilter.class);
+  private static final Logger LOG = LoggerFactory.getLogger(ParseFilter.class);
 
   private static HashMap<ByteBuffer, Integer> operatorPrecedenceHashMap;
   private static HashMap<String, String> filterHashMap;
 
   static {
     // Registers all the filter supported by the Filter Language
-    filterHashMap = new HashMap<String, String>();
+    filterHashMap = new HashMap<>();
     filterHashMap.put("KeyOnlyFilter", ParseConstants.FILTER_PACKAGE + "." +
                       "KeyOnlyFilter");
     filterHashMap.put("FirstKeyOnlyFilter", ParseConstants.FILTER_PACKAGE + "." +
@@ -95,7 +95,7 @@ public class ParseFilter {
                       "DependentColumnFilter");
 
     // Creates the operatorPrecedenceHashMap
-    operatorPrecedenceHashMap = new HashMap<ByteBuffer, Integer>();
+    operatorPrecedenceHashMap = new HashMap<>();
     operatorPrecedenceHashMap.put(ParseConstants.SKIP_BUFFER, 1);
     operatorPrecedenceHashMap.put(ParseConstants.WHILE_BUFFER, 1);
     operatorPrecedenceHashMap.put(ParseConstants.AND_BUFFER, 2);
@@ -122,9 +122,9 @@ public class ParseFilter {
   public Filter parseFilterString (byte [] filterStringAsByteArray)
     throws CharacterCodingException {
     // stack for the operators and parenthesis
-    Stack <ByteBuffer> operatorStack = new Stack<ByteBuffer>();
+    Stack <ByteBuffer> operatorStack = new Stack<>();
     // stack for the filter objects
-    Stack <Filter> filterStack = new Stack<Filter>();
+    Stack <Filter> filterStack = new Stack<>();
 
     Filter filter = null;
     for (int i=0; i<filterStringAsByteArray.length; i++) {
@@ -161,6 +161,10 @@ public class ParseFilter {
           throw new IllegalArgumentException("Mismatched parenthesis");
         }
         ByteBuffer argumentOnTopOfStack = operatorStack.peek();
+        if (argumentOnTopOfStack.equals(ParseConstants.LPAREN_BUFFER)) {
+          operatorStack.pop();
+          continue;
+        }
         while (!(argumentOnTopOfStack.equals(ParseConstants.LPAREN_BUFFER))) {
           filterStack.push(popArguments(operatorStack, filterStack));
           if (operatorStack.empty()) {
@@ -180,6 +184,9 @@ public class ParseFilter {
     // Finished parsing filterString
     while (!operatorStack.empty()) {
       filterStack.push(popArguments(operatorStack, filterStack));
+    }
+    if (filterStack.empty()) {
+        throw new IllegalArgumentException("Incorrect Filter String");
     }
     filter = filterStack.pop();
     if (!filterStack.empty()) {
@@ -255,7 +262,7 @@ public class ParseFilter {
       e.printStackTrace();
     }
     throw new IllegalArgumentException("Incorrect filter string " +
-                                       new String(filterStringAsByteArray));
+        new String(filterStringAsByteArray, StandardCharsets.UTF_8));
   }
 
 /**
@@ -302,7 +309,7 @@ public class ParseFilter {
 
     int argumentStartIndex = 0;
     int argumentEndIndex = 0;
-    ArrayList<byte []> filterArguments = new ArrayList<byte []>();
+    ArrayList<byte []> filterArguments = new ArrayList<>();
 
     for (int i = argumentListStartIndex + 1; i<filterStringAsByteArray.length; i++) {
 
@@ -386,7 +393,7 @@ public class ParseFilter {
     if (argumentOnTopOfStack.equals(ParseConstants.OR_BUFFER)) {
       // The top of the stack is an OR
       try {
-        ArrayList<Filter> listOfFilters = new ArrayList<Filter>();
+        ArrayList<Filter> listOfFilters = new ArrayList<>();
         while (!operatorStack.empty() && operatorStack.peek().equals(ParseConstants.OR_BUFFER)) {
           Filter filter = filterStack.pop();
           listOfFilters.add(0, filter);
@@ -403,7 +410,7 @@ public class ParseFilter {
     } else if (argumentOnTopOfStack.equals(ParseConstants.AND_BUFFER)) {
       // The top of the stack is an AND
       try {
-        ArrayList<Filter> listOfFilters = new ArrayList<Filter>();
+        ArrayList<Filter> listOfFilters = new ArrayList<>();
         while (!operatorStack.empty() && operatorStack.peek().equals(ParseConstants.AND_BUFFER)) {
           Filter filter = filterStack.pop();
           listOfFilters.add(0, filter);
@@ -760,12 +767,40 @@ public class ParseFilter {
     }
   }
 
-/**
- * Takes a compareOperator symbol as a byte array and returns the corresponding CompareOperator
- * <p>
- * @param compareOpAsByteArray the comparatorOperator symbol as a byte array
- * @return the Compare Operator
- */
+  /**
+   * Takes a compareOperator symbol as a byte array and returns the corresponding CompareOperator
+   * @deprecated Since 2.0
+   * <p>
+   * @param compareOpAsByteArray the comparatorOperator symbol as a byte array
+   * @return the Compare Operator
+   */
+  public static CompareOperator createCompareOperator (byte [] compareOpAsByteArray) {
+    ByteBuffer compareOp = ByteBuffer.wrap(compareOpAsByteArray);
+    if (compareOp.equals(ParseConstants.LESS_THAN_BUFFER))
+      return CompareOperator.LESS;
+    else if (compareOp.equals(ParseConstants.LESS_THAN_OR_EQUAL_TO_BUFFER))
+      return CompareOperator.LESS_OR_EQUAL;
+    else if (compareOp.equals(ParseConstants.GREATER_THAN_BUFFER))
+      return CompareOperator.GREATER;
+    else if (compareOp.equals(ParseConstants.GREATER_THAN_OR_EQUAL_TO_BUFFER))
+      return CompareOperator.GREATER_OR_EQUAL;
+    else if (compareOp.equals(ParseConstants.NOT_EQUAL_TO_BUFFER))
+      return CompareOperator.NOT_EQUAL;
+    else if (compareOp.equals(ParseConstants.EQUAL_TO_BUFFER))
+      return CompareOperator.EQUAL;
+    else
+      throw new IllegalArgumentException("Invalid compare operator");
+  }
+
+  /**
+   * Takes a compareOperator symbol as a byte array and returns the corresponding CompareOperator
+   * @deprecated Since 2.0
+   * <p>
+   * @param compareOpAsByteArray the comparatorOperator symbol as a byte array
+   * @return the Compare Operator
+   * @deprecated Since 2.0.0. Will be removed in 3.0.0. Use {@link #createCompareOperator(byte [])}
+   */
+  @Deprecated
   public static CompareFilter.CompareOp createCompareOp (byte [] compareOpAsByteArray) {
     ByteBuffer compareOp = ByteBuffer.wrap(compareOpAsByteArray);
     if (compareOp.equals(ParseConstants.LESS_THAN_BUFFER))
@@ -803,9 +838,9 @@ public class ParseFilter {
     else if (Bytes.equals(comparatorType, ParseConstants.binaryPrefixType))
       return new BinaryPrefixComparator(comparatorValue);
     else if (Bytes.equals(comparatorType, ParseConstants.regexStringType))
-      return new RegexStringComparator(new String(comparatorValue));
+      return new RegexStringComparator(new String(comparatorValue, StandardCharsets.UTF_8));
     else if (Bytes.equals(comparatorType, ParseConstants.substringType))
-      return new SubstringComparator(new String(comparatorValue));
+      return new SubstringComparator(new String(comparatorValue, StandardCharsets.UTF_8));
     else
       throw new IllegalArgumentException("Incorrect comparatorType");
   }

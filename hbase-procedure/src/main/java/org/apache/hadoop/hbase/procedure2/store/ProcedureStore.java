@@ -20,9 +20,8 @@ package org.apache.hadoop.hbase.procedure2.store;
 
 import java.io.IOException;
 
-import org.apache.hadoop.hbase.ProcedureInfo;
-import org.apache.hadoop.hbase.classification.InterfaceAudience;
-import org.apache.hadoop.hbase.classification.InterfaceStability;
+import org.apache.yetus.audience.InterfaceAudience;
+import org.apache.yetus.audience.InterfaceStability;
 import org.apache.hadoop.hbase.procedure2.Procedure;
 
 /**
@@ -70,7 +69,7 @@ public interface ProcedureStore {
     /**
      * @return true if the iterator next element is a completed procedure.
      */
-    boolean isNextCompleted();
+    boolean isNextFinished();
 
     /**
      * Skip the next procedure
@@ -82,12 +81,7 @@ public interface ProcedureStore {
      * @throws IOException if there was an error fetching/deserializing the procedure
      * @return the next procedure in the iteration.
      */
-    Procedure nextAsProcedure() throws IOException;
-
-    /**
-     * @return the next procedure in the iteration as ProcedureInfo.
-     */
-    ProcedureInfo nextAsProcedureInfo();
+    Procedure next() throws IOException;
   }
 
   /**
@@ -151,6 +145,13 @@ public interface ProcedureStore {
   int getNumThreads();
 
   /**
+   * Set the number of procedure running.
+   * This can be used, for example, by the store to know how long to wait before a sync.
+   * @return how many procedures are running (may not be same as <code>count</code>).
+   */
+  int setRunningProcedureCount(int count);
+
+  /**
    * Acquire the lease for the procedure store.
    */
   void recoverLease() throws IOException;
@@ -173,6 +174,15 @@ public interface ProcedureStore {
    * @param subprocs the newly created child of the proc.
    */
   void insert(Procedure proc, Procedure[] subprocs);
+
+  /**
+   * Serialize a set of new procedures.
+   * These procedures are freshly submitted to the executor and each procedure
+   * has a 'RUNNABLE' state and the initial information required to start up.
+   *
+   * @param procs the procedures to serialize and write to the store.
+   */
+  void insert(Procedure[] procs);
 
   /**
    * The specified procedure was executed,
